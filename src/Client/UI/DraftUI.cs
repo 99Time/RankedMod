@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using HarmonyLib;
 using UnityEngine;
@@ -18,6 +19,7 @@ namespace schrader
         private static Button _readyButton;
 
         private static bool _isSetup = false;
+        private static bool _isUiVisible = false;
         private static bool _cursorStateCaptured = false;
         private static CursorLockMode _previousCursorLockState = CursorLockMode.Locked;
         private static bool _previousCursorVisible = false;
@@ -193,6 +195,11 @@ namespace schrader
 
             _overlayRoot.style.display = DisplayStyle.None;
             DisableCursor();
+            if (_isUiVisible)
+            {
+                _isUiVisible = false;
+                Debug.Log("draft UI hidden");
+            }
         }
 
         private static void Show()
@@ -204,6 +211,11 @@ namespace schrader
             _overlayRoot.style.opacity = 1f;
             _overlayRoot.BringToFront();
             EnableCursor();
+            if (!_isUiVisible)
+            {
+                _isUiVisible = true;
+                Debug.Log("draft UI shown");
+            }
         }
 
         public static void UpdateDraftUI(DraftState state)
@@ -218,10 +230,22 @@ namespace schrader
 
             Show();
 
+            var title = string.IsNullOrWhiteSpace(state.Title) ? "RANKED MATCH SETUP" : state.Title;
             var red = string.IsNullOrWhiteSpace(state.RedCaptainName) ? "Pending" : state.RedCaptainName;
             var blue = string.IsNullOrWhiteSpace(state.BlueCaptainName) ? "Pending" : state.BlueCaptainName;
             var status = state.IsCompleted ? "Draft Complete" : "Draft Active";
             var turn = string.IsNullOrWhiteSpace(state.CurrentTurnName) ? "Pending" : state.CurrentTurnName;
+            var available = FormatList(state.AvailablePlayers);
+            var redPlayers = FormatList(state.RedPlayers);
+            var bluePlayers = FormatList(state.BluePlayers);
+            var lateJoiners = state.PendingLateJoinerCount <= 0 ? "none" : state.PendingLateJoinerCount.ToString();
+            var dummyMode = state.DummyModeActive ? "ON" : "OFF";
+            var footer = string.IsNullOrWhiteSpace(state.FooterText) ? "Use /pick, /accept, /dummy, /draft" : state.FooterText;
+
+            if (_titleLabel != null)
+            {
+                _titleLabel.text = title;
+            }
 
             if (_stateLabel != null)
             {
@@ -229,8 +253,21 @@ namespace schrader
                     $"Red Captain: {red}\n" +
                     $"Blue Captain: {blue}\n" +
                     $"Status: {status}\n" +
-                    $"Turn: {turn}";
+                    $"Turn: {turn}\n" +
+                    $"Available: {available}\n" +
+                    $"Red Team: {redPlayers}\n" +
+                    $"Blue Team: {bluePlayers}\n" +
+                    $"Late Joiners: {lateJoiners}\n" +
+                    $"Dummy Mode: {dummyMode}\n" +
+                    $"{footer}";
             }
+        }
+
+        private static string FormatList(string[] values)
+        {
+            if (values == null || values.Length == 0) return "none";
+            var filtered = values.Where(v => !string.IsNullOrWhiteSpace(v)).Select(v => v.Trim()).ToArray();
+            return filtered.Length == 0 ? "none" : string.Join(", ", filtered);
         }
 
         private static void OnReadyClicked()
@@ -268,6 +305,7 @@ namespace schrader
             _readyButton = null;
             _panel = null;
             _hudRoot = null;
+            _isUiVisible = false;
 
             if (_overlayRoot != null)
             {

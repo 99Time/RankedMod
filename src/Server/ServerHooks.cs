@@ -85,20 +85,25 @@ namespace schrader
 
         private static string BuildPayload(Server.RankedSystem.DraftOverlayState state)
         {
+            // 🔥 IMPORTANTE
+            state.IsVisible = true;
+
             var players = string.Join(",", state.AvailablePlayers ?? Array.Empty<string>());
-            var red = state.RedCaptainName ?? string.Empty;
-            var blue = state.BlueCaptainName ?? string.Empty;
-            var turn = state.CurrentTurnName ?? string.Empty;
+            var redPlayers = string.Join(",", state.RedPlayers ?? Array.Empty<string>());
+            var bluePlayers = string.Join(",", state.BluePlayers ?? Array.Empty<string>());
+
             return string.Join("\n", new[]
             {
                 "[DRAFT_STATE]",
-                $"visible={(state.IsVisible ? "1" : "0")}",
+                $"visible=1",
                 $"title={Escape(state.Title)}",
-                $"captain_red={Escape(red)}",
-                $"captain_blue={Escape(blue)}",
-                $"turn={Escape(turn)}",
+                $"captain_red={Escape(state.RedCaptainName)}",
+                $"captain_blue={Escape(state.BlueCaptainName)}",
+                $"turn={Escape(state.CurrentTurnName)}",
                 $"status={(state.IsCompleted ? "complete" : "active")}",
                 $"players={Escape(players)}",
+                $"red_players={Escape(redPlayers)}",
+                $"blue_players={Escape(bluePlayers)}",
                 $"pending={state.PendingLateJoinerCount}",
                 $"dummy={(state.DummyModeActive ? "1" : "0")}",
                 $"footer={Escape(state.FooterText)}"

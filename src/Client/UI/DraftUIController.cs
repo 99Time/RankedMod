@@ -1,4 +1,5 @@
 using System;
+using UnityEngine;
 
 namespace schrader
 {
@@ -15,8 +16,11 @@ namespace schrader
         {
             if (state == null) return;
 
+            Debug.Log("APPLY STATE CALLED");
+
             var signature = BuildSignature(state);
             if (string.Equals(signature, lastSignature, StringComparison.Ordinal)) return;
+
             lastSignature = signature;
 
             DraftUI.UpdateDraftUI(state);
@@ -27,16 +31,16 @@ namespace schrader
             return string.Join("|",
                 state.IsVisible,
                 state.IsCompleted,
-                state.Title ?? string.Empty,
-                state.RedCaptainName ?? string.Empty,
-                state.BlueCaptainName ?? string.Empty,
-                state.CurrentTurnName ?? string.Empty,
+                state.Title ?? "",
+                state.RedCaptainName ?? "",
+                state.BlueCaptainName ?? "",
+                state.CurrentTurnName ?? "",
                 state.PendingLateJoinerCount,
                 state.DummyModeActive,
                 string.Join(",", state.AvailablePlayers ?? Array.Empty<string>()),
                 string.Join(",", state.RedPlayers ?? Array.Empty<string>()),
                 string.Join(",", state.BluePlayers ?? Array.Empty<string>()),
-                state.FooterText ?? string.Empty);
+                state.FooterText ?? "");
         }
     }
 }
