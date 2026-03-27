@@ -19,7 +19,7 @@ namespace schrader
             if (string.Equals(signature, lastSignature, StringComparison.Ordinal)) return;
             lastSignature = signature;
 
-            //DraftUI.UpdateDraftUI(state);
+            DraftUI.UpdateDraftUI(state);
         }
 
         private static string BuildSignature(DraftOverlayStateMessage state)

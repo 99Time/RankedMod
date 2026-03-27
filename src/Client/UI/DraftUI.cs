@@ -6,7 +6,7 @@ using UnityEngine;
 using UnityEngine.UIElements;
 using DraftState = schrader.DraftOverlayStateMessage;
 
-namespace schrader
+namespace schrader 
 {
     public static class DraftUI
     {
@@ -195,6 +195,44 @@ namespace schrader
             DisableCursor();
         }
 
+        private static void Show()
+        {
+            if (_overlayRoot == null) return;
+
+            _overlayRoot.style.display = DisplayStyle.Flex;
+            _overlayRoot.style.visibility = Visibility.Visible;
+            _overlayRoot.style.opacity = 1f;
+            _overlayRoot.BringToFront();
+            EnableCursor();
+        }
+
+        public static void UpdateDraftUI(DraftState state)
+        {
+            if (_overlayRoot == null) return;
+
+            if (state == null || !state.IsVisible)
+            {
+                Hide();
+                return;
+            }
+
+            Show();
+
+            var red = string.IsNullOrWhiteSpace(state.RedCaptainName) ? "Pending" : state.RedCaptainName;
+            var blue = string.IsNullOrWhiteSpace(state.BlueCaptainName) ? "Pending" : state.BlueCaptainName;
+            var status = state.IsCompleted ? "Draft Complete" : "Draft Active";
+            var turn = string.IsNullOrWhiteSpace(state.CurrentTurnName) ? "Pending" : state.CurrentTurnName;
+
+            if (_stateLabel != null)
+            {
+                _stateLabel.text =
+                    $"Red Captain: {red}\n" +
+                    $"Blue Captain: {blue}\n" +
+                    $"Status: {status}\n" +
+                    $"Turn: {turn}";
+            }
+        }
+
         private static void OnReadyClicked()
         {
             try
@@ -218,6 +256,23 @@ namespace schrader
             catch (Exception e)
             {
                 Debug.LogError("READY ERROR: " + e.Message);
+            }
+        }
+
+        public static void Shutdown()
+        {
+            Hide();
+            _isSetup = false;
+            _titleLabel = null;
+            _stateLabel = null;
+            _readyButton = null;
+            _panel = null;
+            _hudRoot = null;
+
+            if (_overlayRoot != null)
+            {
+                _overlayRoot.RemoveFromHierarchy();
+                _overlayRoot = null;
             }
         }
     }

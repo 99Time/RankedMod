@@ -86,7 +86,22 @@ namespace schrader.Server
                     .Where(p => !IsDummyParticipant(p))
                     .ToList();
 
-                if (realCaptainPool.Count < 2) return false;
+                if (realCaptainPool.Count < 2)
+                {
+                    if (!(testModeSinglePlayer && realCaptainPool.Count == 1)) return false;
+
+                    var singlePlayerCaptain = realCaptainPool[0];
+                    var dummyCaptain = CreateSinglePlayerDummyCaptain();
+                    if (dummyCaptain == null) return false;
+
+                    combinedParticipants.Add(dummyCaptain);
+                    rankedParticipants = combinedParticipants.Select(CloneParticipant).Where(p => p != null).ToList();
+                    pool.Add(dummyCaptain);
+                    realCaptainPool.Add(dummyCaptain);
+
+                    var singlePlayerName = singlePlayerCaptain.displayName ?? "Player";
+                    SendSystemChatToAll($"<size=14><color=#ffcc66>Ranked</color> single-player test draft enabled. Auto-added dummy captain for {singlePlayerName}.</size>");
+                }
 
                 var rng = new System.Random();
                 var shuffled = realCaptainPool.OrderBy(_ => rng.Next()).ToList();
@@ -114,6 +129,7 @@ namespace schrader.Server
                     draftAssignedTeams[redCaptainKey] = TeamResult.Red;
                     draftAssignedTeams[blueCaptainKey] = TeamResult.Blue;
                 }
+                Debug.Log("DRAFT STARTED");
 
                 ResetDraftAnnouncementState();
                 PublishDraftOverlayState();
@@ -156,6 +172,30 @@ namespace schrader.Server
                 team = participant.team,
                 isDummy = participant.isDummy
             };
+        }
+
+        private static RankedParticipant CreateSinglePlayerDummyCaptain()
+        {
+            try
+            {
+                lock (dummyLock)
+                {
+                    var dummy = new DummyPlayer
+                    {
+                        dummyId = $"dummy:{nextDummySequence}",
+                        displayName = $"DummyCaptain{nextDummySequence}",
+                        team = TeamResult.Blue,
+                        isPendingLateJoiner = false
+                    };
+
+                    nextDummySequence++;
+                    activeDraftDummies[dummy.dummyId] = dummy;
+                    return CreateParticipantFromDummy(dummy);
+                }
+            }
+            catch { }
+
+            return null;
         }
 
         private static void ApplyDraftTeamsToParticipants()
@@ -415,6 +455,7 @@ namespace schrader.Server
                 draftActive = false;
                 completionPanelMessage = BuildDraftOverlayFallbackMessage(true, false);
             }
+            Debug.Log("DRAFT COMPLETED");
 
             ForceApplyAllDraftTeams();
             ApplyDraftTeamsToParticipants();
@@ -451,6 +492,7 @@ namespace schrader.Server
             lastAnnouncedAvailablePlayersSignature = availableSignature;
             lastDraftTurnAnnouncementTime = now;
 
+            PublishDraftOverlayState();
             SendSystemChatToAll(BuildDraftOverlayFallbackMessage(false, true));
         }
 
@@ -1097,6 +1139,7 @@ namespace schrader.Server
             try
             {
                 schrader.DraftStateBridge.PublishState(GetDraftOverlayState());
+                Debug.Log("DRAFT STATE PUBLISHED");
             }
             catch (Exception ex)
             {

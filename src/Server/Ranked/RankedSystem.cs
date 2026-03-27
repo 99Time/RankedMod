@@ -27,6 +27,7 @@ namespace schrader.Server
         private static List<RankedParticipant> rankedParticipants = new List<RankedParticipant>();
         private static bool rankedMatchEndPatched = false;
         private static bool allowSinglePlayerRanked = true;
+        private static bool testModeSinglePlayer = true;
         // Captured eligible participants at the moment a vote starts; used as fallback
         private static List<RankedParticipant> lastVoteEligible = null;
         private static int manualSpawnDepth = 0;
@@ -613,6 +614,17 @@ namespace schrader.Server
                         }
                     }
 
+                    if (testModeSinglePlayer && eligible != null && eligible.Count == 1)
+                    {
+                        var pnameSingle = TryGetPlayerName(player) ?? "Player";
+                        SendSystemChatToAll($"<size=14><color=#ffcc66>Ranked</color> single-player test mode enabled by {pnameSingle}. Starting immediately.</size>");
+                        if (!StartRankedFromEligible(eligible, false))
+                        {
+                            SendSystemChatToClient("<size=14><color=#ff6666>Ranked</color> test mode start failed.</size>", clientId);
+                        }
+                        return;
+                    }
+
                     rankedVoteActive = true;
                     rankedVoteStartTime = Time.unscaledTime;
                     lastVoteSecondsRemaining = Mathf.CeilToInt(rankedVoteDuration);
@@ -628,6 +640,42 @@ namespace schrader.Server
                 }
             }
             catch { }
+        }
+
+        private static bool StartRankedFromEligible(List<RankedParticipant> eligible, bool forcedByAdmin)
+        {
+            try
+            {
+                if (eligible == null || eligible.Count == 0) return false;
+
+                rankedVoteActive = false;
+                rankedVotes.Clear();
+                rankedVoteStartTime = -999f;
+                lastVoteSecondsRemaining = -1;
+
+                rankedActive = true;
+                rankedParticipants = eligible;
+                lock (forfeitVotes)
+                {
+                    forfeitVotes.Clear();
+                    forfeitNoVotes.Clear();
+                    forfeitActive = false;
+                    forfeitStartTime = -999f;
+                    forfeitTeam = TeamResult.Unknown;
+                }
+
+                if (!TryStartCaptainDraft(eligible, forcedByAdmin))
+                {
+                    SendSystemChatToAll("<size=14><color=#ff6666>Ranked</color> draft could not be started.</size>");
+                    ResetRankedState(true, true);
+                    return false;
+                }
+
+                return true;
+            }
+            catch { }
+
+            return false;
         }
 
         public static void HandleRankedVoteResponse(object player, ulong clientId, bool accept)
@@ -5217,6 +5265,12 @@ namespace schrader.Server
         {
             try
             {
+                if (draftActive)
+                {
+                    SendSystemChatToAll("<size=14><color=#ffcc66>Ranked</color> waiting for draft completion before starting the match.</size>");
+                    return false;
+                }
+
                 // broaden candidate types/methods
                 string[] typeNames = { "GameManager", "MatchManager", "MatchController", "GameController", "PuckMatchManager", "Puck.GameManager", "Puck.MatchManager" };
                 string[] methodNames = { "Server_StartMatch", "Server_StartGame", "Server_Start", "StartMatch", "StartGame", "BeginMatch", "BeginGame", "StartRound", "BeginRound", "ForceStartMatch", "ForceStart" };
