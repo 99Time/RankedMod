@@ -109,6 +109,8 @@ namespace schrader
                     bootstrapBehaviour = null;
                 }
 
+                DraftUI.Shutdown();
+
                 Log("Disabled! Goodbye!");
                 return true;
             }

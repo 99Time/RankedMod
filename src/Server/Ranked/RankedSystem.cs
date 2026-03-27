@@ -616,6 +616,7 @@ namespace schrader.Server
 
                     if (testModeSinglePlayer && eligible != null && eligible.Count == 1)
                     {
+                        Debug.Log("SINGLE PLAYER TEST MODE ACTIVE");
                         var pnameSingle = TryGetPlayerName(player) ?? "Player";
                         SendSystemChatToAll($"<size=14><color=#ffcc66>Ranked</color> single-player test mode enabled by {pnameSingle}. Starting immediately.</size>");
                         if (!StartRankedFromEligible(eligible, false))
