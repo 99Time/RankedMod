@@ -504,6 +504,10 @@ namespace schrader.Server
                 var active = IsTeamSwitchProtectionActive();
                 Debug.Log($"[{Constants.MOD_NAME}] TeamSelectPrefix called. protectActive={active}");
                 if (!active) return true;
+                if (rankedActive && !draftActive && !draftTeamLockActive)
+                {
+                    return true;
+                }
                 ulong clientId = 0;
                 if (__0 is Dictionary<string, object> dict && dict.ContainsKey("clientId"))
                 {
@@ -540,10 +544,25 @@ namespace schrader.Server
                 Debug.Log($"[{Constants.MOD_NAME}] SwitchTeamMenuPrefix called. protectActive={active}");
                 if (!active) return true;
                 ulong clientId = 0;
+                object player = null;
                 if (__0 is Dictionary<string, object> dict && dict.ContainsKey("clientId"))
                 {
                     try { clientId = Convert.ToUInt64(dict["clientId"]); } catch { }
+                    try { player = TryGetPlayerFromDict(dict); } catch { }
                 }
+
+                if (rankedActive && !draftActive && !draftTeamLockActive && TryHandleSwitchTeamMenuRequest(player, clientId))
+                {
+                    return false;
+                }
+
+                if (rankedActive && !draftActive && !draftTeamLockActive)
+                {
+                    if (player == null && clientId != 0 && TryGetPlayerByClientId(clientId, out var resolvedPlayer)) player = resolvedPlayer;
+                    var currentTeam = GetCurrentTeamValue(player);
+                    if (IsTeamNoneLike(currentTeam)) return true;
+                }
+
                 if (clientId != 0)
                 {
                     SendSystemChatToClient("<size=13>Switch Team is disabled during active matches.</size>", clientId);
@@ -722,6 +741,14 @@ namespace schrader.Server
 
                 if (!protectActive) return true;
 
+                if (rankedActive && !draftActive && !draftTeamLockActive)
+                {
+                    if (TryHandleTeamSelectionRequest(player, clientId, currentTeam, requestedTeam))
+                    {
+                        return false;
+                    }
+                }
+
                 // Allow initial assignment when joining mid-match: current is None/Unknown and requested is a real team
                 if (!draftTeamLockActive && IsTeamNoneLike(currentTeam) && !IsTeamNoneLike(requestedTeam))
                 {
@@ -762,6 +789,14 @@ namespace schrader.Server
                     // Same team selected: do nothing (avoid double-switch side effects)
                     Debug.Log($"[{Constants.MOD_NAME}] PlayerTeamSetPrefix: same team selected ({FormatTeamValue(currentTeam)}), skipping.");
                     return false;
+                }
+
+                if (rankedActive && !draftActive && !draftTeamLockActive)
+                {
+                    if (TryHandleTeamSelectionRequest(__instance, 0UL, currentTeam, requestedTeam))
+                    {
+                        return false;
+                    }
                 }
 
                 // Allow initial team assignment while match is active (joining mid-game): current == None/Unknown, requested is a real team

@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 using HarmonyLib;
 using UnityEngine;
 using System.Reflection;
@@ -12,7 +11,6 @@ namespace schrader
     public class CustomMOTD : IPuckMod
     {
         static readonly Harmony harmony = new Harmony(Constants.MOD_NAME);
-        static string motd = "<size=18><color=#66ccff>Welcome to SpeedRankeds server!</color></size>\n<size=12>Type <b>/commands</b> to see available commands.</size>";
         private static GameObject updaterGo;
         private static RankedSystemUpdater updaterInstance;
         private static bool allowRankedWithoutPlayers = true; // testing override: allow starting ranked even if not enough players
@@ -25,7 +23,7 @@ namespace schrader
             {
                 ulong clientId = (ulong)message["clientId"];
 
-                UIChat.Instance.Server_SendSystemChatMessage(motd, clientId);
+                try { RankedOverlayNetwork.ResyncClient(clientId); } catch { }
                 return false;
             }
         }
@@ -56,6 +54,18 @@ namespace schrader
 
                     if (trimmed.Equals("/vr", StringComparison.OrdinalIgnoreCase))
                     {
+                        HandleRankedVoteStart(player, clientId);
+                        return false;
+                    }
+
+                    if (trimmed.Equals("/vs", StringComparison.OrdinalIgnoreCase))
+                    {
+                        try
+                        {
+                            UIChat.Instance.Server_SendSystemChatMessage("<size=13><color=#ffcc66>Ranked</color> Normal start disabled. Redirecting to ranked vote...</size>", clientId);
+                        }
+                        catch { }
+
                         HandleRankedVoteStart(player, clientId);
                         return false;
                     }
@@ -94,21 +104,7 @@ namespace schrader
                     {
                         try
                         {
-                            UIChat.Instance.Server_SendSystemChatMessage("<size=15><b>Server Commands</b></size>", clientId);
-                            UIChat.Instance.Server_SendSystemChatMessage("<size=13>/s</size> <size=12>- Spawn a puck (server). Blocked during matches, goals and replays.", clientId);
-                            UIChat.Instance.Server_SendSystemChatMessage("<size=13>/vr</size> <size=12>- Start a Ranked vote. Use /y or /n to vote.", clientId);
-                            UIChat.Instance.Server_SendSystemChatMessage("<size=13>/y</size> <size=12>- Vote yes in a Ranked vote.", clientId);
-                            UIChat.Instance.Server_SendSystemChatMessage("<size=13>/n</size> <size=12>- Vote no in a Ranked vote.", clientId);
-                            UIChat.Instance.Server_SendSystemChatMessage("<size=13>/mmr</size> <size=12>- Show your current MMR.", clientId);
-                            UIChat.Instance.Server_SendSystemChatMessage("<size=13>/cs</size> <size=12>- Despawn all pucks on the map.", clientId);
-                            UIChat.Instance.Server_SendSystemChatMessage("<size=13>/ranked start|end</size> <size=12>- Admin commands to force start or end a ranked match.", clientId);
-                            UIChat.Instance.Server_SendSystemChatMessage("<size=13>/ff</size> <size=12>- Start/vote forfeit (surrender) for your team.", clientId);
-                            UIChat.Instance.Server_SendSystemChatMessage("<size=13>Draft UI</size> <size=12>- During ranked draft, open the scoreboard and click a player row to pick or accept them.</size>", clientId);
-                            UIChat.Instance.Server_SendSystemChatMessage("<size=13>/pick &lt;player&gt;</size> <size=12>- Chat fallback for captains if scoreboard click is unavailable.</size>", clientId);
-                            UIChat.Instance.Server_SendSystemChatMessage("<size=13>/accept &lt;player&gt;</size> <size=12>- Chat fallback to approve a late joiner into your team.</size>", clientId);
-                            UIChat.Instance.Server_SendSystemChatMessage("<size=13>/draft</size> <size=12>- Show current draft status.</size>", clientId);
-                            UIChat.Instance.Server_SendSystemChatMessage("<size=13>/draftui</size> <size=12>- Toggle the Unity draft overlay on or off. Without an active draft it opens test mode locally.</size>", clientId);
-                            UIChat.Instance.Server_SendSystemChatMessage("<size=13>/dummy &lt;count&gt;</size> <size=12>- Create logical test dummies for the next draft or as late joiners in an active ranked.</size>", clientId);
+                            SendCommandsOverview(player, clientId);
                         }
                         catch { }
                         return false;
@@ -482,14 +478,6 @@ namespace schrader
                 Debug.LogError($"[{Constants.MOD_NAME}] Failed to load MMR: {ex.Message}");
             }
 
-            string rootPath = Path.GetFullPath(".");
-            string motdPath = Path.Combine(rootPath, "motd.txt");
-
-            if (!File.Exists(motdPath))
-                File.WriteAllText(motdPath, motd);
-            else
-                motd = File.ReadAllText(motdPath);
-
             try
             {
                 harmony.PatchAll();
@@ -665,6 +653,43 @@ namespace schrader
         private static bool TryGetBladeSpawn(Component playerComp, out Vector3 spawnPos, out Quaternion rot, out Vector3 vel)
         {
             try { return Server.ReflectionUtils.TryGetBladeSpawn(playerComp, out spawnPos, out rot, out vel); } catch { spawnPos = Vector3.zero; rot = Quaternion.identity; vel = Vector3.zero; return false; }
+        }
+
+        private static void SendCommandsOverview(object player, ulong clientId)
+        {
+            SendCommandHelpLine(clientId, "<size=15><b>Server Commands</b></size>");
+            SendCommandHelpLine(clientId, "<size=13>/vr</size> <size=12>- Start a Ranked vote. Use /y or /n to vote.</size>");
+            SendCommandHelpLine(clientId, "<size=13>/vs</size> <size=12>- Redirects to /vr. Normal start is disabled on this server.</size>");
+            SendCommandHelpLine(clientId, "<size=13>/y</size> <size=12>- Vote yes in a Ranked vote.</size>");
+            SendCommandHelpLine(clientId, "<size=13>/n</size> <size=12>- Vote no in a Ranked vote.</size>");
+            SendCommandHelpLine(clientId, "<size=13>/mmr</size> <size=12>- Show your current MMR.</size>");
+            SendCommandHelpLine(clientId, "<size=13>/ff</size> <size=12>- Start/vote forfeit (surrender) for your team.</size>");
+            //SendCommandHelpLine(clientId, "<size=13>Draft UI</size> <size=12>- During ranked draft, the HUD overlay opens automatically. Scoreboard click still works for picks and accepts.</size>");
+            //SendCommandHelpLine(clientId, "<size=13>/pick &lt;player&gt;</size> <size=12>- Chat fallback for captains if scoreboard click is unavailable.</size>");
+            //SendCommandHelpLine(clientId, "<size=13>/accept &lt;player&gt;</size> <size=12>- Chat fallback to approve a late joiner into your team.</size>");
+            //SendCommandHelpLine(clientId, "<size=13>/approve &lt;requestId&gt;</size> <size=12>- Captain fallback to approve a late join or team switch request.</size>");
+            //SendCommandHelpLine(clientId, "<size=13>/reject &lt;requestId&gt;</size> <size=12>- Captain fallback to reject a late join or team switch request.</size>");
+            //SendCommandHelpLine(clientId, "<size=13>/draft</size> <size=12>- Show current draft status.</size>");
+
+            if (!TryIsAdmin(player, clientId))
+            {
+                return;
+            }
+
+            SendCommandHelpLine(clientId, "<size=13>/s</size> <size=12>- Spawn a puck (server). Blocked during matches, goals and replays.</size>");
+            SendCommandHelpLine(clientId, "<size=13>/cs</size> <size=12>- Despawn all pucks on the map.</size>");
+            SendCommandHelpLine(clientId, "<size=13>/ranked start|end</size> <size=12>- Admin commands to force start or end a ranked match.</size>");
+            SendCommandHelpLine(clientId, "<size=13>/dummy &lt;count&gt;</size> <size=12>- Create logical test dummies for the next draft or as late joiners in an active ranked.</size>");
+            SendCommandHelpLine(clientId, "<size=13>/record start</size> <size=12>- Start recording your current movement and stick inputs.</size>");
+            SendCommandHelpLine(clientId, "<size=13>/record stop</size> <size=12>- Stop recording and save it into UserData/BotMemory.</size>");
+            SendCommandHelpLine(clientId, "<size=13>/replay latest</size> <size=12>- Start bot behavior mode using the saved BotMemory library.</size>");
+            SendCommandHelpLine(clientId, "<size=13>/replay &lt;name|type&gt;</size> <size=12>- Start behavior mode from a specific recording or a type like MOVE, CONTROL, SHOOT or TURN.</size>");
+            SendCommandHelpLine(clientId, "<size=13>/replay list</size> <size=12>- List saved BotMemory recordings with their replay behavior types.</size>");
+        }
+
+        private static void SendCommandHelpLine(ulong clientId, string message)
+        {
+            try { UIChat.Instance.Server_SendSystemChatMessage(message, clientId); } catch { }
         }
 
         private static Type FindTypeByName(params string[] names)

@@ -14,6 +14,7 @@ namespace schrader
         public string[] RedPlayers;
         public string[] BluePlayers;
         public int PendingLateJoinerCount;
+        public string[] PendingLateJoiners;
         public bool DummyModeActive;
         public string FooterText;
 
@@ -24,7 +25,8 @@ namespace schrader
                 IsVisible = false,
                 AvailablePlayers = Array.Empty<string>(),
                 RedPlayers = Array.Empty<string>(),
-                BluePlayers = Array.Empty<string>()
+                BluePlayers = Array.Empty<string>(),
+                PendingLateJoiners = Array.Empty<string>()
             };
         }
     }

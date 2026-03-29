@@ -21,6 +21,9 @@ namespace schrader.Server
         private static float rankedVoteDuration = 25f;
         private static float rankedVoteCooldown = 60f;
         private static float lastRankedVoteTime = -999f;
+        private static string rankedVoteStartedByName = null;
+        private static string rankedVoteStartedByKey = null;
+        private static ulong rankedVoteStartedByClientId = 0;
         private static Dictionary<ulong, bool> rankedVotes = new Dictionary<ulong, bool>();
         private static bool rankedActive = false;
         private static float lastRankedEndTime = -999f;
@@ -28,6 +31,7 @@ namespace schrader.Server
         private static bool rankedMatchEndPatched = false;
         private static bool allowSinglePlayerRanked = true;
         private static bool testModeSinglePlayer = true;
+        private static bool controlledRankedTestModeActive = false;
         // Captured eligible participants at the moment a vote starts; used as fallback
         private static List<RankedParticipant> lastVoteEligible = null;
         private static int manualSpawnDepth = 0;
@@ -121,16 +125,21 @@ namespace schrader.Server
             public string BlueCaptainName { get; set; }
             public string CurrentTurnName { get; set; }
             public string[] AvailablePlayers { get; set; }
+            public DraftOverlayPlayerEntryMessage[] AvailablePlayerEntries { get; set; }
             public string[] RedPlayers { get; set; }
+            public DraftOverlayPlayerEntryMessage[] RedPlayerEntries { get; set; }
             public string[] BluePlayers { get; set; }
+            public DraftOverlayPlayerEntryMessage[] BluePlayerEntries { get; set; }
             public int PendingLateJoinerCount { get; set; }
+            public string[] PendingLateJoiners { get; set; }
+            public DraftOverlayPlayerEntryMessage[] PendingLateJoinerEntries { get; set; }
             public bool DummyModeActive { get; set; }
             public string FooterText { get; set; }
         }
 
         public static void Initialize()
         {
-            try { LoadMmr(); TryPatchRankedMatchEndHooks(); TryPatchGameStateHooks(); TryPatchGoalHooks(); TryPatchSpawnHooks(); TryPatchTeamChangeHooks(); TryPatchDraftUiHooks(); } catch { }
+            try { LoadMmr(); LoadReplayMemory(); TryPatchRankedMatchEndHooks(); TryPatchGameStateHooks(); TryPatchGoalHooks(); TryPatchSpawnHooks(); TryPatchTeamChangeHooks(); TryPatchDraftUiHooks(); } catch { }
         }
 
         // Public accessor to indicate a ranked match is currently active
@@ -382,17 +391,26 @@ namespace schrader.Server
 
         public static void Update()
         {
+            try { RankedOverlayNetwork.EnsureServerHandlers(); } catch { }
             try { TryEnsureHooks(); } catch { }
             try { UpdateRankedVote(); } catch { }
             try { ProcessForfeitVotes(); } catch { }
             try { UpdateDraftState(); } catch { }
             try { UpdateRankedWatchdog(); } catch { }
+            try { UpdatePostMatchLock(); } catch { }
+            try { UpdateInputReplay(); } catch { }
         }
 
         private static void UpdateRankedWatchdog()
         {
             try
             {
+                if (postMatchLockActive)
+                {
+                    rankedNoMatchDetectedTime = -999f;
+                    return;
+                }
+
                 if (!rankedActive || draftActive)
                 {
                     rankedNoMatchDetectedTime = -999f;
@@ -445,6 +463,12 @@ namespace schrader.Server
         {
             try
             {
+                if (postMatchLockActive)
+                {
+                    lastDraftStatePollTime = -999f;
+                    return;
+                }
+
                 if (!rankedActive)
                 {
                     lastDraftStatePollTime = -999f;
@@ -464,6 +488,7 @@ namespace schrader.Server
 
                 DetectLateJoiners();
                 RemoveDisconnectedDraftCandidates();
+                UpdateApprovalRequestState();
             }
             catch { }
         }
@@ -558,16 +583,11 @@ namespace schrader.Server
                 if (secondsRemaining < 0) secondsRemaining = 0;
                 if (secondsRemaining != lastVoteSecondsRemaining)
                 {
-                    // Reduce chat spam: announce every 5s and the last 3 seconds
-                    if (secondsRemaining == Mathf.CeilToInt(rankedVoteDuration) || secondsRemaining % 5 == 0 || secondsRemaining <= 3)
-                    {
-                        try { SendSystemChatToAll($"<size=14><color=#ffcc66>Ranked</color> vote: {secondsRemaining}s remaining.</size>"); } catch { }
-                    }
                     lastVoteSecondsRemaining = secondsRemaining;
+                    PublishVoteOverlayState();
                 }
 
-                // Prefer live detection, but fall back to the list captured at vote start if available
-                if (!TryGetEligiblePlayers(out var eligible, out _)) eligible = lastVoteEligible;
+                var eligible = ResolveCurrentVoteEligibleParticipants();
                 if (eligible != null)
                 {
                     var total = eligible.Count;
@@ -576,6 +596,94 @@ namespace schrader.Server
                     var requiredYes = (total / 2) + 1;
                     if (yes >= requiredYes) FinalizeRankedVote();
                     else if (no > total - requiredYes) FinalizeRankedVote();
+                }
+            }
+            catch { }
+        }
+
+        private static List<RankedParticipant> ResolveCurrentVoteEligibleParticipants()
+        {
+            try
+            {
+                if (controlledRankedTestModeActive && lastVoteEligible != null && lastVoteEligible.Count > 0)
+                {
+                    return lastVoteEligible
+                        .Select(CloneParticipant)
+                        .Where(p => p != null)
+                        .ToList();
+                }
+
+                if (!TryGetEligiblePlayers(out var eligible, out _)) eligible = lastVoteEligible;
+                if (eligible == null) return null;
+
+                return eligible
+                    .Select(CloneParticipant)
+                    .Where(p => p != null)
+                    .ToList();
+            }
+            catch { }
+
+            return null;
+        }
+
+        private static TeamResult DetermineControlledTestBotTeam(List<RankedParticipant> eligible, ulong initiatorClientId)
+        {
+            try
+            {
+                var initiator = eligible?
+                    .FirstOrDefault(p => p != null && p.clientId == initiatorClientId)
+                    ?? eligible?.FirstOrDefault(p => p != null && !IsDummyParticipant(p));
+
+                if (initiator != null)
+                {
+                    if (initiator.team == TeamResult.Red) return TeamResult.Blue;
+                    if (initiator.team == TeamResult.Blue) return TeamResult.Red;
+                }
+
+                var redCount = eligible?.Count(p => p != null && p.team == TeamResult.Red) ?? 0;
+                var blueCount = eligible?.Count(p => p != null && p.team == TeamResult.Blue) ?? 0;
+                return redCount <= blueCount ? TeamResult.Red : TeamResult.Blue;
+            }
+            catch { }
+
+            return TeamResult.Blue;
+        }
+
+        private static bool TryInjectControlledTestBot(List<RankedParticipant> eligible, ulong initiatorClientId)
+        {
+            try
+            {
+                if (eligible == null) return false;
+
+                var preferredTeam = DetermineControlledTestBotTeam(eligible, initiatorClientId);
+                var botParticipant = SpawnTrackedBotParticipant(preferredTeam, false);
+                if (botParticipant == null) return false;
+
+                botParticipant.team = preferredTeam;
+                eligible.Add(CloneParticipant(botParticipant));
+                Debug.Log($"[{Constants.MOD_NAME}] Injected bot player for test mode: {botParticipant.displayName} ({ResolveParticipantIdToKey(botParticipant)})");
+                return true;
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static void AutoAcceptBotVotes(IEnumerable<RankedParticipant> eligible)
+        {
+            try
+            {
+                if (eligible == null) return;
+
+                foreach (var participant in eligible)
+                {
+                    if (participant == null || participant.clientId == 0) continue;
+
+                    var participantKey = ResolveParticipantIdToKey(participant);
+                    if (!IsDummyParticipant(participant) && !BotManager.IsBotKey(participantKey)) continue;
+
+                    rankedVotes[participant.clientId] = true;
+                    Debug.Log($"[{Constants.MOD_NAME}] Bot auto-voted READY: {participant.displayName} ({participantKey ?? participant.clientId.ToString()})");
                 }
             }
             catch { }
@@ -614,16 +722,23 @@ namespace schrader.Server
                         }
                     }
 
+                    rankedVoteStartedByName = TryGetPlayerName(player) ?? "Player";
+                    rankedVoteStartedByKey = ResolvePlayerObjectKey(player, clientId) ?? TryGetPlayerId(player, clientId) ?? $"clientId:{clientId}";
+                    rankedVoteStartedByClientId = clientId;
+                    controlledRankedTestModeActive = false;
+
                     if (testModeSinglePlayer && eligible != null && eligible.Count == 1)
                     {
-                        Debug.Log("SINGLE PLAYER TEST MODE ACTIVE");
-                        var pnameSingle = TryGetPlayerName(player) ?? "Player";
-                        SendSystemChatToAll($"<size=14><color=#ffcc66>Ranked</color> single-player test mode enabled by {pnameSingle}. Starting immediately.</size>");
-                        if (!StartRankedFromEligible(eligible, false))
+                        Debug.Log($"[{Constants.MOD_NAME}] Auto-start disabled");
+                        if (!TryInjectControlledTestBot(eligible, clientId))
                         {
-                            SendSystemChatToClient("<size=14><color=#ff6666>Ranked</color> test mode start failed.</size>", clientId);
+                            rankedVoteStartedByKey = null;
+                            rankedVoteStartedByClientId = 0;
+                            SendSystemChatToClient("<size=14><color=#ff6666>Ranked</color> test mode bot injection failed.</size>", clientId);
+                            return;
                         }
-                        return;
+
+                        controlledRankedTestModeActive = true;
                     }
 
                     rankedVoteActive = true;
@@ -631,13 +746,21 @@ namespace schrader.Server
                     lastVoteSecondsRemaining = Mathf.CeilToInt(rankedVoteDuration);
                     lastRankedVoteTime = rankedVoteStartTime;
                     rankedVotes.Clear();
-                    rankedVotes[clientId] = true;
+                    if (!controlledRankedTestModeActive)
+                    {
+                        rankedVotes[clientId] = true;
+                    }
 
                     // Capture eligible at vote start so single-player/test mode can fall back later
-                    lastVoteEligible = eligible != null ? new List<RankedParticipant>(eligible) : null;
+                    lastVoteEligible = eligible?
+                        .Select(CloneParticipant)
+                        .Where(p => p != null)
+                        .ToList();
+                    AutoAcceptBotVotes(lastVoteEligible);
 
-                    var pname = TryGetPlayerName(player) ?? "Player";
+                    var pname = rankedVoteStartedByName;
                     SendSystemChatToAll($"<size=14><color=#00ff00>Ranked vote started</color> by {pname}. Type <b>/y</b> to accept or <b>/n</b> to reject. ({Mathf.CeilToInt(rankedVoteDuration)}s)</size>");
+                    PublishVoteOverlayState();
                 }
             }
             catch { }
@@ -653,6 +776,9 @@ namespace schrader.Server
                 rankedVotes.Clear();
                 rankedVoteStartTime = -999f;
                 lastVoteSecondsRemaining = -1;
+                rankedVoteStartedByName = null;
+
+                PublishVoteOverlayState();
 
                 rankedActive = true;
                 rankedParticipants = eligible;
@@ -687,14 +813,12 @@ namespace schrader.Server
                 if (!rankedVoteActive) { SendSystemChatToClient("<size=14>No ranked vote in progress.</size>", clientId); return; }
 
                 rankedVotes[clientId] = accept;
-                var pname = TryGetPlayerName(player) ?? "Player";
-                var voteText = accept ? "accepted" : "rejected";
-                SendSystemChatToAll($"<size=14>{pname} has {voteText} the ranked vote.</size>");
+                PublishVoteOverlayState();
 
                 // If everyone voted yes, start immediately. Use captured eligible as fallback.
                 if (accept)
                 {
-                    if (!TryGetEligiblePlayers(out var eligible, out _)) eligible = lastVoteEligible;
+                    var eligible = ResolveCurrentVoteEligibleParticipants();
                     if (eligible != null)
                     {
                         var total = eligible.Count;
@@ -712,25 +836,29 @@ namespace schrader.Server
             try
             {
                 if (!rankedVoteActive) return;
+                var voteStartTime = rankedVoteStartTime;
                 rankedVoteActive = false;
+                rankedVoteStartTime = -999f;
+                lastVoteSecondsRemaining = -1;
+                rankedVoteStartedByName = null;
+                PublishVoteOverlayState();
 
-                // Prefer live detection, but fall back to the list captured at vote start if available
-                if (!TryGetEligiblePlayers(out var eligible, out var reason))
+                var eligible = ResolveCurrentVoteEligibleParticipants();
+                if (eligible == null)
                 {
-                    eligible = lastVoteEligible;
-                    if (eligible == null)
-                    {
-                        SendSystemChatToAll($"<size=14><color=#ff6666>Ranked</color> vote failed: {reason}</size>");
-                        return;
-                    }
+                    TryGetEligiblePlayers(out _, out var reason);
+                    SendSystemChatToAll($"<size=14><color=#ff6666>Ranked</color> vote failed: {reason}</size>");
+                    if (controlledRankedTestModeActive) ResetRankedState(true, true);
+                    return;
                 }
 
                 var total = eligible.Count; var yes = 0; var no = 0;
                 foreach (var kvp in rankedVotes) { if (kvp.Value) yes++; else no++; }
                 var requiredYes = (total / 2) + 1;
-                var timedOut = Time.unscaledTime - rankedVoteStartTime >= rankedVoteDuration;
+                var timedOut = voteStartTime >= 0f && Time.unscaledTime - voteStartTime >= rankedVoteDuration;
                 if (yes >= requiredYes)
                 {
+                    Debug.Log($"[{Constants.MOD_NAME}] Vote finished -> starting draft");
                     rankedActive = true; rankedParticipants = eligible;
                     lock (forfeitVotes)
                     {
@@ -750,11 +878,67 @@ namespace schrader.Server
                 {
                     if (timedOut) SendSystemChatToAll("<size=14><color=#ff6666>Ranked</color> vote timed out: not enough votes.</size>");
                     else SendSystemChatToAll("<size=14><color=#ff6666>Ranked</color> vote failed.</size>");
+                    if (controlledRankedTestModeActive)
+                    {
+                        ResetRankedState(true, true);
+                        return;
+                    }
                 }
                 // clear captured eligible after vote finalizes
                 lastVoteEligible = null;
             }
             catch { }
+        }
+
+        public static VoteOverlayStateMessage GetVoteOverlayState()
+        {
+            try
+            {
+                lock (rankedLock)
+                {
+                    if (!rankedVoteActive)
+                    {
+                        return VoteOverlayStateMessage.Hidden();
+                    }
+
+                    var eligible = ResolveCurrentVoteEligibleParticipants();
+
+                    var total = eligible?.Count ?? 0;
+                    var yes = rankedVotes.Count(entry => entry.Value);
+                    var no = rankedVotes.Count(entry => !entry.Value);
+                    var requiredYes = total > 0 ? ((total / 2) + 1) : 1;
+                    var secondsRemaining = Mathf.Max(0, Mathf.CeilToInt(rankedVoteDuration - (Time.unscaledTime - rankedVoteStartTime)));
+
+                    return new VoteOverlayStateMessage
+                    {
+                        IsVisible = true,
+                        Title = "RANKED VOTE",
+                        PromptText = "Enable ranked captain draft for this lobby?",
+                        InitiatorName = rankedVoteStartedByName,
+                        SecondsRemaining = secondsRemaining,
+                        EligibleCount = total,
+                        YesVotes = yes,
+                        NoVotes = no,
+                        RequiredYesVotes = requiredYes,
+                        FooterText = "Vote with the overlay buttons or use /y and /n."
+                    };
+                }
+            }
+            catch { }
+
+            return VoteOverlayStateMessage.Hidden();
+        }
+
+        private static void PublishVoteOverlayState()
+        {
+            try
+            {
+                RankedOverlayNetwork.PublishVoteState(GetVoteOverlayState());
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[{Constants.MOD_NAME}] PublishVoteOverlayState failed: {ex.Message}");
+            }
         }
 
         #if false
@@ -1359,7 +1543,7 @@ namespace schrader.Server
             if (TryGetCaptainTeam(playerKey, out var _)) return false;
             lock (draftLock)
             {
-                return IsDummyKey(currentCaptainTurnId);
+                return IsDummyKey(currentCaptainTurnId) || BotManager.IsBotKey(currentCaptainTurnId);
             }
         }
 
@@ -3040,10 +3224,17 @@ namespace schrader.Server
 
         private static void ResetRankedState(bool keepPhaseState, bool keepRankedVoteCooldown)
         {
+            ClearPostMatchLockState();
+
             lock (rankedLock)
             {
                 rankedActive = false;
                 rankedVoteActive = false;
+                rankedVoteStartTime = -999f;
+                rankedVoteStartedByName = null;
+                rankedVoteStartedByKey = null;
+                rankedVoteStartedByClientId = 0;
+                controlledRankedTestModeActive = false;
                 rankedParticipants.Clear();
                 rankedVotes.Clear();
                 lastVoteEligible = null;
@@ -3099,8 +3290,17 @@ namespace schrader.Server
                 announcedLateJoinerIds.Clear();
             }
 
+            lock (approvalRequestLock)
+            {
+                pendingTeamApprovalRequests.Clear();
+                rejectedLateJoinTeams.Clear();
+            }
+
+            PublishHiddenApprovalStateToAllClients();
+
             ResetDraftAnnouncementState();
 
+            PublishVoteOverlayState();
             PublishDraftOverlayState();
 
             ClearAllDummies();
@@ -4523,9 +4723,12 @@ namespace schrader.Server
                     var dummyLine = rankedParticipants.Any(IsDummyParticipant)
                         ? "\n<size=12><color=#cccc66>Dummy Mode:</color> Logical dummies are present in this draft.</size>"
                         : string.Empty;
+                    var controlledManualHold = controlledRankedTestModeActive && draftActive && draftAvailablePlayerIds.Count == 0;
                     var guidanceLine = completed
                         ? "<size=12><color=#dddddd>Match is ready to start.</color></size>"
-                        : "<size=12><color=#dddddd>Use /pick player. Scoreboard click remains available where supported.</color></size>";
+                        : controlledManualHold
+                            ? "<size=12><color=#dddddd>Auto-start is disabled for test mode. Draft remains open for manual inspection.</color></size>"
+                            : "<size=12><color=#dddddd>Use /pick player. Scoreboard click remains available where supported.</color></size>";
 
                     return
                         "<size=15><b><color=#f2f2f2>RANKED DRAFT</color></b></size>\n"
@@ -5134,6 +5337,8 @@ namespace schrader.Server
                     return false;
                 }
 
+                var isBotPlayer = BotManager.TryGetBotIdByClientId(clientId, out var botKey);
+
                 if (TryIsGoalie(player, out var isGoalie) && isGoalie)
                 {
                     reason = "goalies cannot play ranked";
@@ -5156,15 +5361,20 @@ namespace schrader.Server
                     return false;
                 }
 
-                var playerId = ResolvePlayerObjectKey(player, clientId) ?? TryGetPlayerId(player, clientId);
-                var displayName = TryGetPlayerName(player) ?? $"Player {clientId}";
+                var playerId = isBotPlayer
+                    ? botKey
+                    : (ResolvePlayerObjectKey(player, clientId) ?? TryGetPlayerId(player, clientId));
+                var displayName = isBotPlayer
+                    ? (BotManager.GetBotDisplayName(botKey) ?? TryGetPlayerName(player) ?? $"Bot {clientId}")
+                    : (TryGetPlayerName(player) ?? $"Player {clientId}");
 
                 participant = new RankedParticipant
                 {
                     clientId = clientId,
                     playerId = playerId,
                     displayName = displayName,
-                    team = team
+                    team = team,
+                    isDummy = isBotPlayer
                 };
                 return true;
             }

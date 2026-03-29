@@ -21,15 +21,27 @@
     <Compile Include="src\Shared\**\*.cs" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Content Include="src\speedrankedlogo.png">
+      <TargetPath>speedrankedlogo.png</TargetPath>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
   <Target Name="PostBuildCopyClientDll" AfterTargets="Build">
     <PropertyGroup>
       <DeployDir>C:\Users\schrader\Downloads\SteamWorkshopUploader_10_win\SteamWorkshopUploader\WorkshopContent\Speed Ranked Mod\</DeployDir>
       <BuiltDll>$(TargetDir)$(AssemblyName).dll</BuiltDll>
       <DeployDll>$(DeployDir)$(AssemblyName).dll</DeployDll>
+      <BuiltLogo>$(TargetDir)speedrankedlogo.png</BuiltLogo>
+      <BuiltLogoFallback>$(TargetDir)src\speedrankedlogo.png</BuiltLogoFallback>
+      <DeployLogo>$(DeployDir)speedrankedlogo.png</DeployLogo>
     </PropertyGroup>
 
     <MakeDir Directories="$(DeployDir)" />
     <Copy SourceFiles="$(BuiltDll)" DestinationFiles="$(DeployDll)" OverwriteReadOnlyFiles="true" />
+    <Copy SourceFiles="$(BuiltLogo)" DestinationFiles="$(DeployLogo)" OverwriteReadOnlyFiles="true" Condition="Exists('$(BuiltLogo)')" />
+    <Copy SourceFiles="$(BuiltLogoFallback)" DestinationFiles="$(DeployLogo)" OverwriteReadOnlyFiles="true" Condition="!Exists('$(BuiltLogo)') and Exists('$(BuiltLogoFallback)')" />
 
     <Message Importance="high" Text="Copied $(AssemblyName).dll to $(DeployDir)" />
   </Target>

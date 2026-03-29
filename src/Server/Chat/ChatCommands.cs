@@ -33,6 +33,36 @@ namespace schrader.Server
             if (string.IsNullOrWhiteSpace(message)) return false;
 
             var trimmed = message.Trim();
+            if (trimmed.Equals("/record start", StringComparison.OrdinalIgnoreCase))
+            {
+                HandleRecordCommand(player, clientId, true);
+                return true;
+            }
+
+            if (trimmed.Equals("/record stop", StringComparison.OrdinalIgnoreCase))
+            {
+                HandleRecordCommand(player, clientId, false);
+                return true;
+            }
+
+            if (trimmed.Equals("/replay list", StringComparison.OrdinalIgnoreCase))
+            {
+                HandleReplayListCommand(clientId);
+                return true;
+            }
+
+            if (trimmed.Equals("/replay", StringComparison.OrdinalIgnoreCase))
+            {
+                HandleReplayCommand(player, clientId, "latest");
+                return true;
+            }
+
+            if (trimmed.StartsWith("/replay ", StringComparison.OrdinalIgnoreCase))
+            {
+                HandleReplayCommand(player, clientId, trimmed.Substring(8).Trim());
+                return true;
+            }
+
             if (trimmed.StartsWith("/dummy ", StringComparison.OrdinalIgnoreCase))
             {
                 HandleDummyCommand(player, clientId, trimmed.Substring(7).Trim());
@@ -48,6 +78,18 @@ namespace schrader.Server
             if (trimmed.StartsWith("/accept ", StringComparison.OrdinalIgnoreCase))
             {
                 HandleLateJoinAcceptance(player, clientId, trimmed.Substring(8).Trim());
+                return true;
+            }
+
+            if (trimmed.StartsWith("/approve ", StringComparison.OrdinalIgnoreCase))
+            {
+                HandleApprovalDecision(player, clientId, trimmed.Substring(9).Trim(), true);
+                return true;
+            }
+
+            if (trimmed.StartsWith("/reject ", StringComparison.OrdinalIgnoreCase))
+            {
+                HandleApprovalDecision(player, clientId, trimmed.Substring(8).Trim(), false);
                 return true;
             }
 
@@ -70,20 +112,7 @@ namespace schrader.Server
         {
             try
             {
-                if (!schrader.DraftStateBridge.CanRenderInCurrentProcess())
-                {
-                    var reason = schrader.DraftStateBridge.GetUnavailableReason();
-                    SendSystemChatToClient($"<size=14><color=#ff6666>Draft UI</color> {reason}</size>", clientId);
-                    return;
-                }
-
-                var visible = schrader.DraftStateBridge.Toggle();
-                var testMode = schrader.DraftStateBridge.IsTestModeEnabled();
-                SendSystemChatToClient(visible
-                    ? (testMode
-                        ? "<size=14><color=#00ff00>Draft UI</color> shown in test mode.</size>"
-                        : "<size=14><color=#00ff00>Draft UI</color> shown.</size>")
-                    : "<size=14><color=#ffcc66>Draft UI</color> hidden.</size>", clientId);
+                SendSystemChatToClient("<size=14><color=#ffcc66>Draft UI</color> the ranked overlay opens automatically on clients during vote and draft. Use <b>/draft</b> if you need the text fallback.</size>", clientId);
             }
             catch (Exception ex)
             {
@@ -111,14 +140,13 @@ namespace schrader.Server
                 var created = CreateDummyParticipants(count, rankedActive);
                 if (created.Count == 0)
                 {
-                    SendSystemChatToClient("<size=14><color=#ff6666>Dummy</color> no dummies were created.</size>", clientId);
+                    SendSystemChatToClient("<size=14><color=#ff6666>Dummy</color> no bots were created.</size>", clientId);
                     return;
                 }
 
                 if (!rankedActive)
                 {
-                    SendSystemChatToAll($"<size=14><color=#ffcc66>Dummy</color> queued {created.Count} logical dummies for the next draft: {string.Join(", ", created.Select(p => p.displayName))}</size>");
-                    SendSystemChatToAll("<size=13><color=#ffcc66>Dummy</color> these players only exist inside RankedSystem and never spawn as real players.</size>");
+                    SendSystemChatToAll($"<size=14><color=#ffcc66>Dummy</color> queued {created.Count} bot spawn request(s) for the next draft: {string.Join(", ", created.Select(p => p.displayName))}</size>");
                     return;
                 }
 
@@ -132,8 +160,8 @@ namespace schrader.Server
                     MergeOrReplaceParticipant(participant, TeamResult.Unknown);
                 }
 
-                SendSystemChatToAll($"<size=14><color=#ffcc66>Dummy</color> created {created.Count} logical late joiners: {string.Join(", ", created.Select(p => p.displayName))}</size>");
-                SendSystemChatToAll("<size=13><color=#ffcc66>Dummy</color> captains can accept them like any other late joiner, but they will not enter network gameplay.</size>");
+                SendSystemChatToAll($"<size=14><color=#ffcc66>Dummy</color> created {created.Count} real bot late joiners: {string.Join(", ", created.Select(p => p.displayName))}</size>");
+                SendSystemChatToAll("<size=13><color=#ffcc66>Dummy</color> captains can accept them like any other late joiner.</size>");
             }
             catch (Exception ex)
             {
@@ -142,26 +170,78 @@ namespace schrader.Server
             }
         }
 
+        private static RankedParticipant SpawnTrackedBotParticipant(TeamResult team, bool isPendingLateJoiner, string requestedName = null)
+        {
+            if (string.IsNullOrWhiteSpace(requestedName))
+            {
+                lock (dummyLock)
+                {
+                    requestedName = $"RankedBot{nextDummySequence}";
+                    nextDummySequence++;
+                }
+            }
+
+            var participant = BotManager.SpawnBot(team, requestedName);
+            if (participant == null) return null;
+
+            if (isPendingLateJoiner) participant.team = TeamResult.Unknown;
+            participant.isDummy = true;
+
+            lock (dummyLock)
+            {
+                activeDraftDummies[participant.playerId] = new DummyPlayer
+                {
+                    dummyId = participant.playerId,
+                    displayName = participant.displayName,
+                    team = participant.team,
+                    isPendingLateJoiner = isPendingLateJoiner
+                };
+            }
+
+            return participant;
+        }
+
         private static List<RankedParticipant> CreateDummyParticipants(int count, bool asLateJoiners)
         {
             var created = new List<RankedParticipant>();
+
+            if (count <= 0) return created;
+
+            if (asLateJoiners)
+            {
+                for (var index = 0; index < count; index++)
+                {
+                    string fallbackName;
+                    lock (dummyLock)
+                    {
+                        fallbackName = $"RankedBot{nextDummySequence}";
+                        nextDummySequence++;
+                    }
+
+                    var participant = SpawnTrackedBotParticipant(TeamResult.Unknown, true, fallbackName);
+                    if (participant == null) continue;
+                    created.Add(participant);
+                }
+
+                return created;
+            }
+
             lock (dummyLock)
             {
                 for (var index = 0; index < count; index++)
                 {
-                    var dummy = new DummyPlayer
+                    var queuedDummy = new DummyPlayer
                     {
-                        dummyId = $"dummy:{nextDummySequence}",
-                        displayName = $"Dummy{nextDummySequence}",
+                        dummyId = $"queuebot:{nextDummySequence}",
+                        displayName = $"RankedBot{nextDummySequence}",
                         team = TeamResult.Unknown,
-                        isPendingLateJoiner = asLateJoiners
+                        isPendingLateJoiner = false
                     };
+
                     nextDummySequence++;
 
-                    if (asLateJoiners) activeDraftDummies[dummy.dummyId] = dummy;
-                    else queuedDraftDummies[dummy.dummyId] = dummy;
-
-                    created.Add(CreateParticipantFromDummy(dummy));
+                    queuedDraftDummies[queuedDummy.dummyId] = queuedDummy;
+                    created.Add(CreateParticipantFromDummy(queuedDummy));
                 }
             }
 
@@ -170,32 +250,37 @@ namespace schrader.Server
 
         private static List<RankedParticipant> ConsumeQueuedDummyParticipants()
         {
+            List<DummyPlayer> queuedRequests;
             lock (dummyLock)
             {
-                var consumed = queuedDraftDummies.Values
-                    .Select(CreateParticipantFromDummy)
-                    .Where(p => p != null)
-                    .ToList();
-
-                foreach (var participant in consumed)
-                {
-                    activeDraftDummies[participant.playerId] = new DummyPlayer
-                    {
-                        dummyId = participant.playerId,
-                        displayName = participant.displayName,
-                        team = participant.team,
-                        isPendingLateJoiner = false
-                    };
-                }
-
+                queuedRequests = queuedDraftDummies.Values.ToList();
                 queuedDraftDummies.Clear();
-                return consumed;
             }
+
+            var consumed = new List<RankedParticipant>();
+            foreach (var queuedRequest in queuedRequests)
+            {
+                if (queuedRequest == null) continue;
+                var participant = SpawnTrackedBotParticipant(TeamResult.Unknown, false, queuedRequest.displayName);
+                if (participant == null) continue;
+                consumed.Add(participant);
+            }
+
+            return consumed;
         }
 
         private static RankedParticipant CreateParticipantFromDummy(DummyPlayer dummy)
         {
             if (dummy == null || string.IsNullOrEmpty(dummy.dummyId)) return null;
+
+            if (BotManager.TryGetBotParticipant(dummy.dummyId, out var botParticipant))
+            {
+                botParticipant.displayName = string.IsNullOrEmpty(dummy.displayName) ? botParticipant.displayName : dummy.displayName;
+                botParticipant.team = dummy.team;
+                botParticipant.isDummy = true;
+                return botParticipant;
+            }
+
             return new RankedParticipant
             {
                 clientId = 0,
@@ -214,6 +299,8 @@ namespace schrader.Server
                 activeDraftDummies.Clear();
                 nextDummySequence = 1;
             }
+
+            BotManager.RemoveAllBots();
         }
 
         private static bool IsDummyParticipant(RankedParticipant participant)
@@ -223,7 +310,10 @@ namespace schrader.Server
 
         private static bool IsDummyKey(string playerKey)
         {
-            return !string.IsNullOrEmpty(playerKey) && playerKey.StartsWith("dummy:", StringComparison.OrdinalIgnoreCase);
+            return !string.IsNullOrEmpty(playerKey)
+                && (playerKey.StartsWith("dummy:", StringComparison.OrdinalIgnoreCase)
+                    || playerKey.StartsWith("queuebot:", StringComparison.OrdinalIgnoreCase)
+                    || BotManager.IsBotKey(playerKey));
         }
 
         private static void ResetDraftAnnouncementState()
