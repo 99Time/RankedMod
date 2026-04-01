@@ -22,7 +22,7 @@ namespace schrader
 
     public class MmrEntry
     {
-        public int mmr = 350;
+        public int mmr = Constants.DEFAULT_MMR;
         public int wins = 0;
         public int losses = 0;
         public string lastUpdated = null;

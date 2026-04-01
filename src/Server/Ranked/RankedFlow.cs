@@ -46,18 +46,6 @@ namespace schrader.Server
                     }
                     Debug.Log($"[{Constants.MOD_NAME}] Ranked participants refreshed before MMR. Count={rankedParticipants.Count}");
                 }
-
-                lock (dummyLock)
-                {
-                    foreach (var dummy in activeDraftDummies.Values)
-                    {
-                        if (dummy == null) continue;
-                        var dummyParticipant = CreateParticipantFromDummy(dummy);
-                        if (dummyParticipant == null) continue;
-                        if (rankedParticipants.Any(p => string.Equals(ResolveParticipantIdToKey(p), dummyParticipant.playerId, StringComparison.OrdinalIgnoreCase))) continue;
-                        rankedParticipants.Add(dummyParticipant);
-                    }
-                }
             }
             catch { }
         }
@@ -68,11 +56,14 @@ namespace schrader.Server
             {
                 if (participants == null) participants = new List<RankedParticipant>();
 
-                var combinedParticipants = new List<RankedParticipant>(participants.Select(CloneParticipant).Where(p => p != null));
-                combinedParticipants.AddRange(ConsumeQueuedDummyParticipants());
-                EnsureDraftPoolHasMinimumPlayers(combinedParticipants, 2);
+                var combinedParticipants = OrderParticipantsForDeterminism(participants.Select(CloneParticipant).Where(p => p != null));
+                if (controlledTestModeEnabled)
+                {
+                    EnsureControlledTestDraftParticipants(combinedParticipants);
+                }
+
                 if (combinedParticipants.Count < 2) return false;
-                rankedParticipants = combinedParticipants.Select(CloneParticipant).Where(p => p != null).ToList();
+                rankedParticipants = OrderParticipantsForDeterminism(combinedParticipants);
 
                 var pool = combinedParticipants
                     .Where(p => p != null && (p.clientId != 0 || p.isDummy))
@@ -83,94 +74,8 @@ namespace schrader.Server
 
                 if (pool.Count < 2) return false;
 
-                var realCaptainPool = pool
-                    .Where(p => p != null)
-                    .Where(p => !IsDummyParticipant(p))
-                    .Where(p =>
-                    {
-                        var key = ResolveParticipantIdToKey(p);
-                        return !string.IsNullOrEmpty(key) && !BotManager.IsBotKey(key);
-                    })
-                    .ToList();
+                if (!TrySelectDraftCaptains(pool, out var redCaptain, out var blueCaptain)) return false;
 
-                RankedParticipant captainProxy = null;
-                if (realCaptainPool.Count < 2)
-                {
-                    if (realCaptainPool.Count != 1) return false;
-
-                    var singlePlayerCaptain = realCaptainPool[0];
-                    captainProxy = CreateSinglePlayerDummyCaptain();
-                    if (captainProxy == null) return false;
-
-                    combinedParticipants.Add(captainProxy);
-                    rankedParticipants = combinedParticipants.Select(CloneParticipant).Where(p => p != null).ToList();
-                    pool.Add(captainProxy);
-
-                    var singlePlayerName = singlePlayerCaptain.displayName ?? "Player";
-                    SendSystemChatToAll($"<size=14><color=#ffcc66>Ranked</color> auto-added bot captain for {singlePlayerName}.</size>");
-                }
-
-                RankedParticipant redCaptain = null;
-                RankedParticipant blueCaptain = null;
-                if (controlledRankedTestModeActive)
-                {
-                    var forcedCaptain = realCaptainPool.FirstOrDefault(p =>
-                    {
-                        if (p == null) return false;
-                        if (rankedVoteStartedByClientId != 0 && p.clientId == rankedVoteStartedByClientId) return true;
-
-                        var participantKey = ResolveParticipantIdToKey(p);
-                        return !string.IsNullOrEmpty(participantKey)
-                            && !string.IsNullOrEmpty(rankedVoteStartedByKey)
-                            && string.Equals(participantKey, rankedVoteStartedByKey, StringComparison.OrdinalIgnoreCase);
-                    }) ?? realCaptainPool.FirstOrDefault();
-
-                    if (forcedCaptain != null)
-                    {
-                        redCaptain = forcedCaptain;
-                        var forcedCaptainKey = ResolveParticipantIdToKey(forcedCaptain);
-                        Debug.Log($"[{Constants.MOD_NAME}] User forced as captain: {forcedCaptain.displayName} ({forcedCaptainKey ?? forcedCaptain.clientId.ToString()})");
-
-                        if (captainProxy != null)
-                        {
-                            blueCaptain = captainProxy;
-                        }
-                        else
-                        {
-                            blueCaptain = pool
-                                .Where(p => p != null)
-                                .FirstOrDefault(p =>
-                                {
-                                    var key = ResolveParticipantIdToKey(p);
-                                    return !string.IsNullOrEmpty(key) && !string.Equals(key, forcedCaptainKey, StringComparison.OrdinalIgnoreCase);
-                                });
-                        }
-                    }
-                }
-
-                if (redCaptain == null || blueCaptain == null)
-                {
-                    if (realCaptainPool.Count == 1)
-                    {
-                        redCaptain = realCaptainPool[0];
-                        blueCaptain = captainProxy ?? pool
-                            .Where(p => p != null)
-                            .FirstOrDefault(p =>
-                            {
-                                var key = ResolveParticipantIdToKey(p);
-                                if (string.IsNullOrEmpty(key)) return false;
-                                return !string.Equals(key, ResolveParticipantIdToKey(redCaptain), StringComparison.OrdinalIgnoreCase);
-                            });
-                        if (blueCaptain == null) return false;
-                    }
-                    else
-                    {
-                        var rng = new System.Random();
-                        var shuffled = realCaptainPool.OrderBy(_ => rng.Next()).ToList();
-                        redCaptain = shuffled[0];
-                        blueCaptain = shuffled[1];
-                    }
-                }
                 var redCaptainKey = ResolveParticipantIdToKey(redCaptain);
                 var blueCaptainKey = ResolveParticipantIdToKey(blueCaptain);
                 if (string.IsNullOrEmpty(redCaptainKey) || string.IsNullOrEmpty(blueCaptainKey)) return false;
@@ -182,9 +87,17 @@ namespace schrader.Server
                     redCaptainId = redCaptainKey;
                     blueCaptainId = blueCaptainKey;
                     currentCaptainTurnId = redCaptainKey;
-                    draftAvailablePlayerIds = pool
+                    draftAvailablePlayerIds = OrderParticipantsForDeterminism(pool
+                            .Where(participant => participant != null)
+                            .Where(participant =>
+                            {
+                                var participantKey = ResolveParticipantIdToKey(participant);
+                                return !string.IsNullOrEmpty(participantKey)
+                                    && !string.Equals(participantKey, redCaptainKey, StringComparison.OrdinalIgnoreCase)
+                                    && !string.Equals(participantKey, blueCaptainKey, StringComparison.OrdinalIgnoreCase);
+                            }))
                         .Select(ResolveParticipantIdToKey)
-                        .Where(pid => !string.IsNullOrEmpty(pid) && !string.Equals(pid, redCaptainKey, StringComparison.OrdinalIgnoreCase) && !string.Equals(pid, blueCaptainKey, StringComparison.OrdinalIgnoreCase))
+                        .Where(pid => !string.IsNullOrEmpty(pid))
                         .Distinct(StringComparer.OrdinalIgnoreCase)
                         .ToList();
                     draftAssignedTeams.Clear();
@@ -237,6 +150,316 @@ namespace schrader.Server
                 team = participant.team,
                 isDummy = participant.isDummy
             };
+        }
+
+        private static void EnsureControlledTestDraftParticipants(List<RankedParticipant> combinedParticipants)
+        {
+            try
+            {
+                if (combinedParticipants == null) return;
+
+                RankedParticipant initiator = null;
+                if (!string.IsNullOrWhiteSpace(controlledTestModeInitiatorKey))
+                {
+                    initiator = combinedParticipants.FirstOrDefault(participant =>
+                        string.Equals(ResolveParticipantIdToKey(participant), controlledTestModeInitiatorKey, StringComparison.OrdinalIgnoreCase));
+                }
+
+                if (initiator == null && controlledTestModeInitiatorClientId != 0)
+                {
+                    initiator = combinedParticipants.FirstOrDefault(participant => participant != null && participant.clientId == controlledTestModeInitiatorClientId);
+                }
+
+                if (initiator == null && controlledTestModeInitiatorClientId != 0 && TryGetParticipantByClientId(controlledTestModeInitiatorClientId, out var initiatorSnapshot))
+                {
+                    initiator = CloneParticipant(initiatorSnapshot);
+                    if (initiator != null)
+                    {
+                        combinedParticipants.Add(initiator);
+                    }
+                }
+
+                combinedParticipants.RemoveAll(participant => participant == null);
+
+                var humanCount = combinedParticipants.Count(participant => participant != null && !IsDummyParticipant(participant));
+                if (humanCount == 1)
+                {
+                    var extraCaptain = CreateSinglePlayerDummyCaptain();
+                    if (extraCaptain != null)
+                    {
+                        combinedParticipants.Add(extraCaptain);
+                    }
+                }
+
+                EnsureDraftPoolHasMinimumPlayers(combinedParticipants, 6);
+            }
+            catch { }
+        }
+
+        private static bool TrySelectDraftCaptains(List<RankedParticipant> pool, out RankedParticipant redCaptain, out RankedParticipant blueCaptain)
+        {
+            redCaptain = null;
+            blueCaptain = null;
+
+            var orderedPool = OrderParticipantsForDeterminism(pool);
+            var humanPool = orderedPool
+                .Where(participant => participant != null && !IsDummyParticipant(participant))
+                .ToList();
+            if (humanPool.Count == 0) return false;
+
+            var activeCaptainKeys = new HashSet<string>(humanPool
+                .Select(ResolveParticipantIdToKey)
+                .Where(key => !string.IsNullOrWhiteSpace(key)), StringComparer.OrdinalIgnoreCase);
+            captainRotationQueue.RemoveAll(key => !activeCaptainKeys.Contains(key));
+            if (captainRotationQueue.Count >= activeCaptainKeys.Count)
+            {
+                captainRotationQueue.Clear();
+            }
+
+            if (controlledTestModeEnabled)
+            {
+                redCaptain = ResolveForcedTestCaptain(humanPool);
+            }
+
+            if (redCaptain == null)
+            {
+                redCaptain = humanPool.FirstOrDefault(participant =>
+                {
+                    var participantKey = ResolveParticipantIdToKey(participant);
+                    return !string.IsNullOrWhiteSpace(participantKey) && !captainRotationQueue.Contains(participantKey);
+                }) ?? humanPool.FirstOrDefault();
+            }
+
+            if (redCaptain == null) return false;
+
+            var redCaptainKey = ResolveParticipantIdToKey(redCaptain);
+            blueCaptain = humanPool.FirstOrDefault(participant =>
+            {
+                var participantKey = ResolveParticipantIdToKey(participant);
+                return !string.IsNullOrWhiteSpace(participantKey)
+                    && !string.Equals(participantKey, redCaptainKey, StringComparison.OrdinalIgnoreCase)
+                    && !captainRotationQueue.Contains(participantKey);
+            });
+
+            if (blueCaptain == null)
+            {
+                blueCaptain = humanPool.FirstOrDefault(participant =>
+                {
+                    var participantKey = ResolveParticipantIdToKey(participant);
+                    return !string.IsNullOrWhiteSpace(participantKey)
+                        && !string.Equals(participantKey, redCaptainKey, StringComparison.OrdinalIgnoreCase);
+                });
+            }
+
+            if (blueCaptain == null && controlledTestModeEnabled)
+            {
+                blueCaptain = orderedPool.FirstOrDefault(participant =>
+                {
+                    var participantKey = ResolveParticipantIdToKey(participant);
+                    return !string.IsNullOrWhiteSpace(participantKey)
+                        && !string.Equals(participantKey, redCaptainKey, StringComparison.OrdinalIgnoreCase);
+                });
+            }
+
+            if (blueCaptain == null) return false;
+
+            RememberCaptainRotation(redCaptain);
+            RememberCaptainRotation(blueCaptain);
+            return true;
+        }
+
+        private static RankedParticipant ResolveForcedTestCaptain(IEnumerable<RankedParticipant> candidates)
+        {
+            var orderedCandidates = OrderParticipantsForDeterminism(candidates);
+            if (!string.IsNullOrWhiteSpace(controlledTestModeInitiatorKey))
+            {
+                var byKey = orderedCandidates.FirstOrDefault(participant =>
+                    string.Equals(ResolveParticipantIdToKey(participant), controlledTestModeInitiatorKey, StringComparison.OrdinalIgnoreCase));
+                if (byKey != null) return byKey;
+            }
+
+            if (controlledTestModeInitiatorClientId != 0)
+            {
+                return orderedCandidates.FirstOrDefault(participant => participant != null && participant.clientId == controlledTestModeInitiatorClientId);
+            }
+
+            return null;
+        }
+
+        private static void RememberCaptainRotation(RankedParticipant captain)
+        {
+            if (captain == null || IsDummyParticipant(captain)) return;
+
+            var captainKey = ResolveParticipantIdToKey(captain);
+            if (string.IsNullOrWhiteSpace(captainKey)) return;
+            if (captainRotationQueue.Contains(captainKey, StringComparer.OrdinalIgnoreCase)) return;
+
+            captainRotationQueue.Add(captainKey);
+        }
+
+        private sealed class CaptainAuthorityChange
+        {
+            public TeamResult Team;
+            public string PreviousCaptainKey;
+            public string NewCaptainKey;
+        }
+
+        private static bool EnsureValidCaptainAssignments(bool publishOverlayState, bool refreshApprovalPanels)
+        {
+            List<CaptainAuthorityChange> changes;
+            lock (draftLock)
+            {
+                changes = EnsureValidCaptainAssignmentsLocked();
+            }
+
+            if (changes == null || changes.Count == 0)
+            {
+                return false;
+            }
+
+            foreach (var change in changes)
+            {
+                var captainName = GetCaptainDisplayNameByKey(change.NewCaptainKey) ?? "none";
+                Debug.Log($"[{Constants.MOD_NAME}] [CAPTAIN] Reassigned to {captainName} ({change.NewCaptainKey ?? "none"}) for {FormatTeamLabel(change.Team)}.");
+            }
+
+            if (publishOverlayState)
+            {
+                PublishDraftOverlayState();
+            }
+
+            if (refreshApprovalPanels)
+            {
+                RefreshCaptainApprovalPanels();
+            }
+
+            return true;
+        }
+
+        private static List<CaptainAuthorityChange> EnsureValidCaptainAssignmentsLocked()
+        {
+            var changes = new List<CaptainAuthorityChange>();
+
+            if (!rankedActive)
+            {
+                return changes;
+            }
+
+            var previousRedCaptain = redCaptainId;
+            var previousBlueCaptain = blueCaptainId;
+
+            redCaptainId = ResolveValidCaptainKeyLocked(TeamResult.Red, previousRedCaptain, changes);
+            blueCaptainId = ResolveValidCaptainKeyLocked(TeamResult.Blue, previousBlueCaptain, changes);
+
+            if (!string.IsNullOrWhiteSpace(currentCaptainTurnId))
+            {
+                if (string.Equals(currentCaptainTurnId, previousRedCaptain, StringComparison.OrdinalIgnoreCase))
+                {
+                    currentCaptainTurnId = !string.IsNullOrWhiteSpace(redCaptainId) ? redCaptainId : blueCaptainId;
+                }
+                else if (string.Equals(currentCaptainTurnId, previousBlueCaptain, StringComparison.OrdinalIgnoreCase))
+                {
+                    currentCaptainTurnId = !string.IsNullOrWhiteSpace(blueCaptainId) ? blueCaptainId : redCaptainId;
+                }
+                else if (!string.Equals(currentCaptainTurnId, redCaptainId, StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(currentCaptainTurnId, blueCaptainId, StringComparison.OrdinalIgnoreCase))
+                {
+                    currentCaptainTurnId = !string.IsNullOrWhiteSpace(redCaptainId) ? redCaptainId : blueCaptainId;
+                }
+            }
+
+            return changes;
+        }
+
+        private static string ResolveValidCaptainKeyLocked(TeamResult team, string currentCaptainKey, List<CaptainAuthorityChange> changes)
+        {
+            if (IsValidTeamCaptainLocked(currentCaptainKey, team))
+            {
+                return currentCaptainKey;
+            }
+
+            var candidateKeys = GetCaptainCandidateKeysLocked(team);
+            var newCaptainKey = candidateKeys.Count == 0
+                ? null
+                : candidateKeys[UnityEngine.Random.Range(0, candidateKeys.Count)];
+
+            if (!string.Equals(currentCaptainKey, newCaptainKey, StringComparison.OrdinalIgnoreCase))
+            {
+                changes.Add(new CaptainAuthorityChange
+                {
+                    Team = team,
+                    PreviousCaptainKey = currentCaptainKey,
+                    NewCaptainKey = newCaptainKey
+                });
+            }
+
+            return newCaptainKey;
+        }
+
+        private static bool IsValidTeamCaptainLocked(string captainKey, TeamResult team)
+        {
+            if (string.IsNullOrWhiteSpace(captainKey))
+            {
+                return false;
+            }
+
+            if (!draftAssignedTeams.TryGetValue(captainKey, out var assignedTeam) || assignedTeam != team)
+            {
+                return false;
+            }
+
+            if (draftAvailablePlayerIds.Contains(captainKey, StringComparer.OrdinalIgnoreCase) || pendingLateJoiners.ContainsKey(captainKey))
+            {
+                return false;
+            }
+
+            return IsConnectedCaptainCandidateLocked(captainKey);
+        }
+
+        private static List<string> GetCaptainCandidateKeysLocked(TeamResult team)
+        {
+            var assignedTeamKeys = draftAssignedTeams
+                .Where(entry => entry.Value == team)
+                .Select(entry => entry.Key)
+                .Where(key => !string.IsNullOrWhiteSpace(key))
+                .Where(key => !draftAvailablePlayerIds.Contains(key, StringComparer.OrdinalIgnoreCase))
+                .Where(key => !pendingLateJoiners.ContainsKey(key))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            var connectedHumanKeys = assignedTeamKeys
+                .Where(key => TryGetParticipantByKey(key, out var participant)
+                    && participant != null
+                    && !IsDummyParticipant(participant)
+                    && participant.clientId != 0
+                    && TryResolveConnectedPlayer(key, participant.clientId, out _, out _, out _))
+                .ToList();
+            if (connectedHumanKeys.Count > 0)
+            {
+                return connectedHumanKeys;
+            }
+
+            return assignedTeamKeys.Where(IsConnectedCaptainCandidateLocked).ToList();
+        }
+
+        private static bool IsConnectedCaptainCandidateLocked(string candidateKey)
+        {
+            if (string.IsNullOrWhiteSpace(candidateKey))
+            {
+                return false;
+            }
+
+            if (IsDummyKey(candidateKey) || BotManager.IsBotKey(candidateKey))
+            {
+                return TryGetParticipantByKey(candidateKey, out var dummyCandidate) && dummyCandidate != null;
+            }
+
+            if (!TryGetParticipantByKey(candidateKey, out var participant) || participant == null || participant.clientId == 0)
+            {
+                return false;
+            }
+
+            return TryResolveConnectedPlayer(candidateKey, participant.clientId, out _, out _, out _);
         }
 
         private static void EnsureDraftPoolHasMinimumPlayers(List<RankedParticipant> combinedParticipants, int minimumPlayers)
@@ -304,26 +527,22 @@ namespace schrader.Server
                     return;
                 }
 
-                var actorKey = ResolvePlayerObjectKey(player, clientId) ?? $"clientId:{clientId}";
+                EnsureValidCaptainAssignments(publishOverlayState: false, refreshApprovalPanels: true);
+
+                var actorKey = GetPlayerKey(player, clientId) ?? $"clientId:{clientId}";
                 if (string.IsNullOrEmpty(actorKey))
                 {
                     SendSystemChatToClient("<size=14><color=#ff6666>Draft</color> could not identify your player.</size>", clientId);
                     return;
                 }
 
-                TeamResult captainTeam;
-                var usingSoloDummyProxy = false;
-                if (!TryGetCaptainTeam(actorKey, out captainTeam))
+                if (!TryGetCaptainTeam(actorKey, out var captainTeam))
                 {
-                    if (!CanUseSoloDummyCaptainProxy(player, clientId) || !TryGetCurrentCaptainTeam(out captainTeam))
-                    {
-                        SendSystemChatToClient("<size=14><color=#ff6666>Draft</color> only captains can use /pick.</size>", clientId);
-                        return;
-                    }
-                    usingSoloDummyProxy = true;
+                    SendSystemChatToClient("<size=14><color=#ff6666>Draft</color> only captains can use /pick.</size>", clientId);
+                    return;
                 }
 
-                if (!usingSoloDummyProxy && !string.Equals(currentCaptainTurnId, actorKey, StringComparison.OrdinalIgnoreCase))
+                if (!string.Equals(currentCaptainTurnId, actorKey, StringComparison.OrdinalIgnoreCase))
                 {
                     var currentCaptainName = GetCaptainDisplayNameByKey(currentCaptainTurnId) ?? "the other captain";
                     SendSystemChatToClient($"<size=14><color=#ff6666>Draft</color> it is not your turn. Current turn: {currentCaptainName}.</size>", clientId);
@@ -339,19 +558,24 @@ namespace schrader.Server
                 List<RankedParticipant> availablePlayers;
                 lock (draftLock)
                 {
-                    availablePlayers = rankedParticipants
-                        .Where(p => p != null)
-                        .Where(p =>
+                    RemoveDuplicateDraftAvailablePlayersLocked();
+                    availablePlayers = draftAvailablePlayerIds
+                        .Select(playerId =>
                         {
-                            var participantKey = ResolveParticipantIdToKey(p);
-                            return !string.IsNullOrEmpty(participantKey) && draftAvailablePlayerIds.Contains(participantKey, StringComparer.OrdinalIgnoreCase);
+                            TryGetParticipantByKey(playerId, out var participant);
+                            return participant;
                         })
-                        .Select(CloneParticipant)
+                        .Where(participant => participant != null)
+                        .GroupBy(participant => ResolveParticipantIdToKey(participant) ?? participant.playerId ?? $"clientId:{participant.clientId}", StringComparer.OrdinalIgnoreCase)
+                        .Select(group => group.First())
                         .ToList();
                 }
 
+                Debug.Log($"[{Constants.MOD_NAME}] [DRAFT] Pick requested: {rawTarget} actor={actorKey} turn={currentCaptainTurnId ?? "none"} available={string.Join(", ", availablePlayers.Select(candidate => ResolveParticipantIdToKey(candidate) ?? candidate.playerId ?? $"clientId:{candidate.clientId}"))}");
+
                 if (!TryResolveParticipantFromCommand(rawTarget, availablePlayers, out var pickedParticipant))
                 {
+                    Debug.LogWarning($"[{Constants.MOD_NAME}] [DRAFT] Pick target not found or ambiguous: actor={actorKey} target={rawTarget}");
                     SendSystemChatToClient("<size=14><color=#ff6666>Draft</color> player not found in the available draft pool.</size>", clientId);
                     return;
                 }
@@ -363,46 +587,83 @@ namespace schrader.Server
                     return;
                 }
 
-                lock (draftLock)
+                Debug.Log($"[{Constants.MOD_NAME}] [DRAFT] Found player: {pickedParticipant.displayName} ({pickedKey}) clientId={pickedParticipant.clientId}");
+
+                if (!TryApplyDraftPick(actorKey, captainTeam, pickedParticipant, clientId))
                 {
-                    if (!draftAvailablePlayerIds.RemoveAll(id => string.Equals(id, pickedKey, StringComparison.OrdinalIgnoreCase)).Equals(0))
-                    {
-                        draftAssignedTeams[pickedKey] = captainTeam;
-                    }
-                    else
-                    {
-                        SendSystemChatToClient("<size=14><color=#ff6666>Draft</color> that player was already picked.</size>", clientId);
-                        return;
-                    }
-
-                    var turnOwnerKey = usingSoloDummyProxy ? currentCaptainTurnId : actorKey;
-                    currentCaptainTurnId = string.Equals(turnOwnerKey, redCaptainId, StringComparison.OrdinalIgnoreCase) ? blueCaptainId : redCaptainId;
-
-                    if (!controlledRankedTestModeActive && draftAvailablePlayerIds.Count == 1)
-                    {
-                        var lastKey = draftAvailablePlayerIds[0];
-                        draftAvailablePlayerIds.Clear();
-
-                        var redCount = draftAssignedTeams.Count(kv => kv.Value == TeamResult.Red);
-                        var blueCount = draftAssignedTeams.Count(kv => kv.Value == TeamResult.Blue);
-                        var fallbackTeam = redCount <= blueCount ? TeamResult.Red : TeamResult.Blue;
-                        draftAssignedTeams[lastKey] = fallbackTeam;
-                    }
-
-                    EnsureAllDraftParticipantsAssignedLocked();
+                    Debug.LogWarning($"[{Constants.MOD_NAME}] [DRAFT] Pick rejected because player was no longer available: {pickedParticipant.displayName} ({pickedKey})");
+                    SendSystemChatToClient("<size=14><color=#ff6666>Draft</color> that player was already picked.</size>", clientId);
                 }
-
-                ApplyDraftTeamsToParticipants();
-                ForceApplyDraftTeam(pickedKey, captainTeam);
-                var actingCaptainName = usingSoloDummyProxy ? GetCaptainDisplayNameByKey(string.Equals(captainTeam, TeamResult.Red) ? redCaptainId : blueCaptainId) : GetCaptainDisplayNameByKey(actorKey);
-                SendSystemChatToAll($"<size=14><color=#ffcc66>Draft</color> {actingCaptainName ?? "Captain"} picked <b>{pickedParticipant.displayName}</b> for {FormatTeamLabel(captainTeam)}.</size>");
-                CompleteDraftIfReadyOrAnnounceTurn();
             }
             catch (Exception ex)
             {
                 Debug.LogError($"[{Constants.MOD_NAME}] HandleDraftPick failed: {ex.Message}");
                 SendSystemChatToClient("<size=14><color=#ff6666>Draft</color> /pick failed.</size>", clientId);
             }
+        }
+
+        private static bool TryApplyDraftPick(string actorKey, TeamResult captainTeam, RankedParticipant pickedParticipant, ulong feedbackClientId)
+        {
+            if (pickedParticipant == null) return false;
+
+            var pickedKey = ResolveParticipantIdToKey(pickedParticipant);
+            if (string.IsNullOrEmpty(pickedKey)) return false;
+
+            var removedCount = 0;
+            var availableCount = 0;
+            var redCount = 0;
+            var blueCount = 0;
+
+            lock (draftLock)
+            {
+                RemoveDuplicateDraftAvailablePlayersLocked();
+
+                if (!draftAvailablePlayerIds.Contains(pickedKey, StringComparer.OrdinalIgnoreCase))
+                {
+                    Debug.LogWarning($"[{Constants.MOD_NAME}] [DRAFT] Attempt to pick already removed player: {pickedKey}");
+                    return false;
+                }
+
+                removedCount = draftAvailablePlayerIds.RemoveAll(id => string.Equals(id, pickedKey, StringComparison.OrdinalIgnoreCase));
+                if (removedCount == 0)
+                {
+                    Debug.LogWarning($"[{Constants.MOD_NAME}] [DRAFT] Attempt to pick already removed player: {pickedKey}");
+                    return false;
+                }
+
+                draftAssignedTeams[pickedKey] = captainTeam;
+                pickedParticipant.team = captainTeam;
+                for (var i = 0; i < rankedParticipants.Count; i++)
+                {
+                    var existing = rankedParticipants[i];
+                    if (existing == null) continue;
+                    var existingKey = ResolveParticipantIdToKey(existing);
+                    if (!string.Equals(existingKey, pickedKey, StringComparison.OrdinalIgnoreCase)) continue;
+                    existing.team = captainTeam;
+                    rankedParticipants[i] = existing;
+                    break;
+                }
+
+                currentCaptainTurnId = string.Equals(actorKey, redCaptainId, StringComparison.OrdinalIgnoreCase) ? blueCaptainId : redCaptainId;
+                availableCount = draftAvailablePlayerIds.Count;
+                redCount = draftAssignedTeams.Count(kv => kv.Value == TeamResult.Red);
+                blueCount = draftAssignedTeams.Count(kv => kv.Value == TeamResult.Blue);
+            }
+
+            ApplyDraftTeamsToParticipants();
+            ForceApplyDraftTeam(pickedKey, captainTeam);
+            SetJoinState(pickedKey, RankedJoinState.InTeam);
+
+            Debug.Log($"[{Constants.MOD_NAME}] [DRAFT] Found: {pickedParticipant.displayName} ({pickedKey})");
+            Debug.Log($"[{Constants.MOD_NAME}] [DRAFT] Removed from available: {pickedParticipant.displayName} ({pickedKey}) removedCount={removedCount}");
+            Debug.Log($"[{Constants.MOD_NAME}] [DRAFT] Added to team: {FormatTeamLabel(captainTeam)} player={pickedParticipant.displayName} ({pickedKey})");
+            Debug.Log($"[{Constants.MOD_NAME}] [DRAFT] Final counts -> Available={availableCount} Red={redCount} Blue={blueCount}");
+
+            PublishDraftOverlayState();
+            var actingCaptainName = GetCaptainDisplayNameByKey(actorKey);
+            SendSystemChatToAll($"<size=14><color=#ffcc66>Draft</color> {actingCaptainName ?? "Captain"} picked <b>{pickedParticipant.displayName}</b> for {FormatTeamLabel(captainTeam)}.</size>");
+            CompleteDraftIfReadyOrAnnounceTurn();
+            return true;
         }
 
         private static void HandleLateJoinAcceptance(object player, ulong clientId, string rawTarget)
@@ -421,23 +682,19 @@ namespace schrader.Server
                     return;
                 }
 
-                var actorKey = ResolvePlayerObjectKey(player, clientId) ?? $"clientId:{clientId}";
+                EnsureValidCaptainAssignments(publishOverlayState: false, refreshApprovalPanels: true);
+
+                var actorKey = GetPlayerKey(player, clientId) ?? $"clientId:{clientId}";
                 if (string.IsNullOrEmpty(actorKey))
                 {
                     SendSystemChatToClient("<size=14><color=#ff6666>Draft</color> could not identify your player.</size>", clientId);
                     return;
                 }
 
-                TeamResult captainTeam;
-                var usingSoloDummyProxy = false;
-                if (!TryGetCaptainTeam(actorKey, out captainTeam))
+                if (!TryGetCaptainTeam(actorKey, out var captainTeam))
                 {
-                    if (!CanUseSoloDummyCaptainProxy(player, clientId) || !TryGetCurrentCaptainTeam(out captainTeam))
-                    {
-                        SendSystemChatToClient("<size=14><color=#ff6666>Draft</color> only captains can use /accept.</size>", clientId);
-                        return;
-                    }
-                    usingSoloDummyProxy = true;
+                    SendSystemChatToClient("<size=14><color=#ff6666>Draft</color> only captains can use /accept.</size>", clientId);
+                    return;
                 }
 
                 if (string.IsNullOrWhiteSpace(rawTarget))
@@ -452,6 +709,8 @@ namespace schrader.Server
                     pendingPlayers = pendingLateJoiners.Values.Select(CloneParticipant).ToList();
                 }
 
+                Debug.Log($"[{Constants.MOD_NAME}] [DRAFT] Approval requested: actor={actorKey} target={rawTarget} pending={string.Join(", ", pendingPlayers.Select(candidate => ResolveParticipantIdToKey(candidate) ?? candidate.displayName ?? candidate.clientId.ToString()))}");
+
                 if (!pendingPlayers.Any())
                 {
                     SendSystemChatToClient("<size=14><color=#ffcc66>Draft</color> there are no pending late joiners.</size>", clientId);
@@ -460,6 +719,7 @@ namespace schrader.Server
 
                 if (!TryResolveParticipantFromCommand(rawTarget, pendingPlayers, out var acceptedParticipant))
                 {
+                    Debug.LogWarning($"[{Constants.MOD_NAME}] [DRAFT] Approval target not found or ambiguous: actor={actorKey} target={rawTarget}");
                     SendSystemChatToClient("<size=14><color=#ff6666>Draft</color> pending player not found.</size>", clientId);
                     return;
                 }
@@ -470,6 +730,8 @@ namespace schrader.Server
                     SendSystemChatToClient("<size=14><color=#ff6666>Draft</color> could not identify that player.</size>", clientId);
                     return;
                 }
+
+                Debug.Log($"[{Constants.MOD_NAME}] [DRAFT] Found player: {acceptedParticipant.displayName} ({acceptedKey}) clientId={acceptedParticipant.clientId}");
 
                 lock (draftLock)
                 {
@@ -483,6 +745,8 @@ namespace schrader.Server
                     announcedLateJoinerIds.Remove(acceptedKey);
                 }
 
+                SetJoinState(acceptedKey, RankedJoinState.Approved);
+
                 MergeOrReplaceParticipant(acceptedParticipant, captainTeam);
                 if (!TryApplyOfficialTeamJoin(acceptedKey, acceptedParticipant.clientId, captainTeam))
                 {
@@ -493,11 +757,15 @@ namespace schrader.Server
                         announcedLateJoinerIds.Remove(acceptedKey);
                         draftAssignedTeams.Remove(acceptedKey);
                     }
+                    SetJoinState(acceptedKey, RankedJoinState.PendingApproval);
                     PublishDraftOverlayState();
                     return;
                 }
+
+                SetJoinState(acceptedKey, RankedJoinState.InTeam);
                 PublishDraftOverlayState();
-                var acceptingCaptainName = usingSoloDummyProxy ? GetCaptainDisplayNameByKey(string.Equals(captainTeam, TeamResult.Red) ? redCaptainId : blueCaptainId) : GetCaptainDisplayNameByKey(actorKey);
+                Debug.Log($"[{Constants.MOD_NAME}] [JOIN] Approved: {acceptedParticipant.displayName} ({acceptedKey}) -> {FormatTeamLabel(captainTeam)} by {actorKey}.");
+                var acceptingCaptainName = GetCaptainDisplayNameByKey(actorKey);
                 SendSystemChatToAll($"<size=14><color=#ffcc66>Draft</color> {acceptingCaptainName ?? "Captain"} accepted late joiner <b>{acceptedParticipant.displayName}</b> for {FormatTeamLabel(captainTeam)}.</size>");
             }
             catch (Exception ex)
@@ -513,19 +781,6 @@ namespace schrader.Server
             participant.team = team;
             var participantKey = ResolveParticipantIdToKey(participant);
             if (string.IsNullOrEmpty(participantKey)) return;
-
-            if (participant.isDummy)
-            {
-                lock (dummyLock)
-                {
-                    if (activeDraftDummies.TryGetValue(participantKey, out var dummy)) dummy.team = team;
-                }
-
-                if (team != TeamResult.Unknown)
-                {
-                    BotManager.AssignBotTeam(participantKey, team);
-                }
-            }
 
             var replaced = false;
             for (var i = 0; i < rankedParticipants.Count; i++)
@@ -548,33 +803,21 @@ namespace schrader.Server
         private static void CompleteDraftIfReadyOrAnnounceTurn()
         {
             var shouldFinalize = false;
-            var loggedNoAvailablePlayers = false;
             lock (draftLock)
             {
                 if (!draftActive) return;
 
-                EnsureAllDraftParticipantsAssignedLocked();
-
-                var noAvailablePlayers = draftAvailablePlayerIds.Count == 0;
+                RemoveDuplicateDraftAvailablePlayersLocked();
                 var completionConditionMet = IsDraftCompletionConditionMetLocked();
-                var staleTurnWithNoAvailablePlayers = noAvailablePlayers
-                    && pendingLateJoiners.Count == 0
-                    && !string.IsNullOrWhiteSpace(currentCaptainTurnId);
 
-                if (completionConditionMet || staleTurnWithNoAvailablePlayers)
+                if (completionConditionMet)
                 {
                     shouldFinalize = true;
-                    loggedNoAvailablePlayers = noAvailablePlayers;
                 }
             }
 
             if (shouldFinalize)
             {
-                if (loggedNoAvailablePlayers)
-                {
-                    Debug.Log($"[{Constants.MOD_NAME}] Draft completion condition met: no available players");
-                }
-
                 Debug.Log($"[{Constants.MOD_NAME}] Draft completed — starting match");
                 CompleteDraftAndStartMatch();
                 return;
@@ -588,7 +831,6 @@ namespace schrader.Server
             lock (draftLock)
             {
                 if (!draftActive) return;
-                EnsureAllDraftParticipantsAssignedLocked();
                 currentCaptainTurnId = null;
                 draftActive = false;
                 draftTeamLockActive = false;
@@ -596,8 +838,8 @@ namespace schrader.Server
             Debug.Log("DRAFT COMPLETED");
 
             ForceApplyAllDraftTeams();
-            ApplyDraftTeamsToParticipants();
             EnsureDraftBotPositions();
+            ApplyDraftTeamsToParticipants();
             PublishDraftOverlayState();
             SendDraftTeamSummary();
             SendSystemChatToAll("<size=14><color=#00ff00>Ranked match started.</color></size>");
@@ -683,6 +925,11 @@ namespace schrader.Server
 
         private static void AnnounceDraftTurn()
         {
+            if (TryProcessAutomaticDraftTurn())
+            {
+                return;
+            }
+
             string captainName;
             string turnId;
             int remaining;
@@ -708,6 +955,33 @@ namespace schrader.Server
             lastDraftTurnAnnouncementTime = now;
 
             PublishDraftOverlayState();
+        }
+
+        private static bool TryProcessAutomaticDraftTurn()
+        {
+            try
+            {
+                string autoCaptainId;
+                string autoPickTargetId;
+                lock (draftLock)
+                {
+                    if (!draftActive) return false;
+                    autoCaptainId = currentCaptainTurnId;
+                    if (string.IsNullOrWhiteSpace(autoCaptainId)) return false;
+                    if (!IsDummyKey(autoCaptainId) && !BotManager.IsBotKey(autoCaptainId)) return false;
+                    if (draftAvailablePlayerIds.Count == 0) return false;
+
+                    autoPickTargetId = draftAvailablePlayerIds[0];
+                }
+
+                if (!TryGetCaptainTeam(autoCaptainId, out var captainTeam)) return false;
+                if (!TryGetParticipantByKey(autoPickTargetId, out var pickedParticipant) || pickedParticipant == null) return false;
+
+                return TryApplyDraftPick(autoCaptainId, captainTeam, pickedParticipant, 0UL);
+            }
+            catch { }
+
+            return false;
         }
 
         private static void SendDraftStatusToClient(ulong clientId)
@@ -761,18 +1035,13 @@ namespace schrader.Server
                     if (string.IsNullOrEmpty(playerKey)) continue;
                     if (IsKnownRankedParticipant(snapshot)) continue;
 
-                    if (!snapshot.isDummy && TryReplaceBotWithLateJoiner(snapshot, out var replacedBotName))
-                    {
-                        SendSystemChatToAll($"<size=14><color=#ffcc66>Draft</color> replaced bot <b>{replacedBotName}</b> with real player <b>{snapshot.displayName}</b>.</size>");
-                        PublishDraftOverlayState();
-                        continue;
-                    }
-
                     lock (draftLock)
                     {
                         pendingLateJoiners[playerKey] = snapshot;
                         if (announcedLateJoinerIds.Add(playerKey))
                         {
+                            SetJoinState(playerKey, RankedJoinState.PendingApproval);
+                            Debug.Log($"[{Constants.MOD_NAME}] [JOIN] Player requested join: {snapshot.displayName} ({playerKey})");
                             TryMovePlayerToNeutralState(snapshot);
                             newlyAnnouncedLateJoiners.Add(CloneParticipant(snapshot));
                         }
@@ -899,8 +1168,11 @@ namespace schrader.Server
                 if (connectedIds.Count == 0 && connectedClientIds.Count == 0) return;
 
                 List<string> removedNames = null;
+                List<string> removedAssignedIds = null;
+                List<string> removedAssignedNames = null;
                 var draftPoolChanged = false;
                 var pendingPoolChanged = false;
+                var assignedPoolChanged = false;
                 lock (draftLock)
                 {
                     if (draftActive)
@@ -914,6 +1186,8 @@ namespace schrader.Server
                             if (TryGetParticipantByKey(candidateId, out var connectedCandidate) && connectedCandidate.clientId != 0 && connectedClientIds.Contains(connectedCandidate.clientId)) continue;
                             removedNames.Add(GetParticipantDisplayNameByKey(candidateId) ?? candidateId);
                             draftAvailablePlayerIds.RemoveAt(i);
+                            rankedParticipants.RemoveAll(participant => string.Equals(ResolveParticipantIdToKey(participant), candidateId, StringComparison.OrdinalIgnoreCase));
+                            ClearJoinState(candidateId);
                             draftPoolChanged = true;
                         }
                     }
@@ -932,9 +1206,44 @@ namespace schrader.Server
                     {
                         pendingLateJoiners.Remove(pendingId);
                         announcedLateJoinerIds.Remove(pendingId);
+                        ClearJoinState(pendingId);
                     }
                     pendingPoolChanged = stalePending.Count > 0;
+
+                    removedAssignedIds = draftAssignedTeams
+                        .Where(entry => entry.Value == TeamResult.Red || entry.Value == TeamResult.Blue)
+                        .Where(entry => !IsDummyKey(entry.Key) && !BotManager.IsBotKey(entry.Key))
+                        .Where(entry => !connectedIds.Contains(entry.Key))
+                        .Where(entry =>
+                        {
+                            if (TryGetParticipantByKey(entry.Key, out var connectedParticipant) && connectedParticipant != null && connectedParticipant.clientId != 0)
+                            {
+                                return !connectedClientIds.Contains(connectedParticipant.clientId);
+                            }
+
+                            return true;
+                        })
+                        .Select(entry => entry.Key)
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToList();
+
+                    removedAssignedNames = removedAssignedIds
+                        .Select(key => GetParticipantDisplayNameByKey(key) ?? key)
+                        .ToList();
+
+                    foreach (var assignedKey in removedAssignedIds)
+                    {
+                        draftAssignedTeams.Remove(assignedKey);
+                        pendingLateJoiners.Remove(assignedKey);
+                        announcedLateJoinerIds.Remove(assignedKey);
+                        rankedParticipants.RemoveAll(participant => string.Equals(ResolveParticipantIdToKey(participant), assignedKey, StringComparison.OrdinalIgnoreCase));
+                        ClearJoinState(assignedKey);
+                        assignedPoolChanged = true;
+                    }
                 }
+
+                var captainChanged = (draftPoolChanged || assignedPoolChanged)
+                    && EnsureValidCaptainAssignments(publishOverlayState: false, refreshApprovalPanels: true);
 
                 if (removedNames != null)
                 {
@@ -944,11 +1253,16 @@ namespace schrader.Server
                     }
                 }
 
-                if (draftPoolChanged)
+                if (removedAssignedNames != null && removedAssignedNames.Count > 0)
+                {
+                    SendSystemChatToAll($"<size=14><color=#ffcc66>Draft</color> removed disconnected team player{(removedAssignedNames.Count == 1 ? string.Empty : "s")} from the ranked draft: <b>{string.Join(", ", removedAssignedNames)}</b>.</size>");
+                }
+
+                if (draftPoolChanged || assignedPoolChanged)
                 {
                     CompleteDraftIfReadyOrAnnounceTurn();
                 }
-                else if (pendingPoolChanged)
+                else if (pendingPoolChanged || captainChanged)
                 {
                     PublishDraftOverlayState();
                 }
@@ -965,15 +1279,12 @@ namespace schrader.Server
                 if (!TryGetClientId(player, out var clientId) || clientId == 0) return false;
 
                 var isBotPlayer = BotManager.TryGetBotIdByClientId(clientId, out var botKey);
+                if (isBotPlayer) return false;
 
-                var playerId = isBotPlayer
-                    ? botKey
-                    : (ResolvePlayerObjectKey(player, clientId) ?? TryGetPlayerId(player, clientId));
+                var playerId = GetPlayerKey(player, clientId) ?? TryGetPlayerId(player, clientId);
                 if (string.IsNullOrEmpty(playerId)) return false;
 
-                var displayName = isBotPlayer
-                    ? (BotManager.GetBotDisplayName(botKey) ?? TryGetPlayerName(player) ?? $"Bot {clientId}")
-                    : (TryGetPlayerName(player) ?? $"Player {clientId}");
+                var displayName = TryGetPlayerName(player) ?? $"Player {clientId}";
                 var team = TeamResult.Unknown;
                 TryGetPlayerTeam(player, out team);
                 if (team == TeamResult.Unknown) TryGetPlayerTeamFromManager(clientId, out team);
@@ -984,7 +1295,7 @@ namespace schrader.Server
                     playerId = playerId,
                     displayName = displayName,
                     team = team,
-                    isDummy = isBotPlayer
+                    isDummy = false
                 };
                 return true;
             }
@@ -1043,30 +1354,104 @@ namespace schrader.Server
             participant = null;
             if (string.IsNullOrWhiteSpace(rawTarget) || candidates == null || candidates.Count == 0) return false;
 
-            var normalizedTarget = NormalizeCommandToken(rawTarget);
-            RankedParticipant containsMatch = null;
+            var trimmedTarget = StripRichTextTags(rawTarget)?.Trim();
+            if (string.IsNullOrWhiteSpace(trimmedTarget)) return false;
 
-            foreach (var candidate in candidates)
+            var matches = GetDistinctParticipantMatches(candidates, candidate => ParticipantMatchesStableDraftIdentity(candidate, trimmedTarget));
+            if (matches.Count == 1)
             {
-                if (candidate == null) continue;
-                var candidateName = NormalizeCommandToken(candidate.displayName);
-                var candidateId = NormalizeCommandToken(candidate.playerId);
-                var candidateClient = NormalizeCommandToken(candidate.clientId.ToString());
-                if (normalizedTarget == candidateName || normalizedTarget == candidateId || normalizedTarget == candidateClient)
-                {
-                    participant = candidate;
-                    return true;
-                }
+                participant = matches[0];
+                return true;
+            }
 
-                if (!string.IsNullOrEmpty(candidateName) && candidateName.Contains(normalizedTarget))
+            if (matches.Count > 1)
+            {
+                Debug.LogWarning($"[{Constants.MOD_NAME}] [DRAFT] Ambiguous exact identity target '{trimmedTarget}': {string.Join(", ", matches.Select(match => ResolveParticipantIdToKey(match) ?? match.playerId ?? $"clientId:{match.clientId}"))}");
+            }
+
+            return false;
+        }
+
+        private static bool ParticipantMatchesStableDraftIdentity(RankedParticipant candidate, string rawTarget)
+        {
+            if (candidate == null || string.IsNullOrWhiteSpace(rawTarget))
+            {
+                return false;
+            }
+
+            var participantKey = ResolveParticipantIdToKey(candidate);
+            if (string.IsNullOrWhiteSpace(participantKey))
+            {
+                return false;
+            }
+
+            return string.Equals(participantKey, rawTarget, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static List<RankedParticipant> GetDistinctParticipantMatches(IEnumerable<RankedParticipant> candidates, Func<RankedParticipant, bool> predicate)
+        {
+            return (candidates ?? Enumerable.Empty<RankedParticipant>())
+                .Where(candidate => candidate != null && predicate(candidate))
+                .GroupBy(candidate => ResolveParticipantIdToKey(candidate) ?? candidate.playerId ?? $"clientId:{candidate.clientId}", StringComparer.OrdinalIgnoreCase)
+                .Select(group => group.First())
+                .ToList();
+        }
+
+        private static IEnumerable<string> EnumerateParticipantIdentityTokens(RankedParticipant candidate)
+        {
+            var participantKey = ResolveParticipantIdToKey(candidate);
+            if (!string.IsNullOrWhiteSpace(participantKey))
+            {
+                yield return participantKey;
+            }
+
+            if (!string.IsNullOrWhiteSpace(candidate?.playerId))
+            {
+                yield return candidate.playerId;
+            }
+
+            if (candidate != null && candidate.clientId != 0)
+            {
+                yield return $"clientId:{candidate.clientId}";
+                yield return candidate.clientId.ToString();
+            }
+        }
+
+        private static string BuildStableDraftCommandTarget(string participantKey)
+        {
+            if (string.IsNullOrWhiteSpace(participantKey))
+            {
+                return null;
+            }
+
+            return StripRichTextTags(participantKey)?.Trim();
+        }
+
+        private static int RemoveDuplicateDraftAvailablePlayersLocked()
+        {
+            if (draftAvailablePlayerIds == null || draftAvailablePlayerIds.Count <= 1)
+            {
+                return 0;
+            }
+
+            var removed = 0;
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            for (var index = draftAvailablePlayerIds.Count - 1; index >= 0; index--)
+            {
+                var playerKey = draftAvailablePlayerIds[index];
+                if (string.IsNullOrWhiteSpace(playerKey) || !seen.Add(playerKey))
                 {
-                    if (containsMatch != null) return false;
-                    containsMatch = candidate;
+                    draftAvailablePlayerIds.RemoveAt(index);
+                    removed++;
                 }
             }
 
-            participant = containsMatch;
-            return participant != null;
+            if (removed > 0)
+            {
+                Debug.LogWarning($"[{Constants.MOD_NAME}] [DRAFT] Removed duplicate available entries: {removed}");
+            }
+
+            return removed;
         }
 
         private static bool TryResolveDraftUiTarget(Dictionary<string, object> dict, out RankedParticipant participant)
@@ -1095,6 +1480,12 @@ namespace schrader.Server
         {
             participant = null;
             if (string.IsNullOrEmpty(playerKey)) return false;
+
+            if (BotManager.IsBotKey(playerKey) && BotManager.TryGetBotParticipant(playerKey, out var botParticipant))
+            {
+                participant = CloneParticipant(botParticipant);
+                return participant != null;
+            }
 
             lock (draftLock)
             {
@@ -1237,6 +1628,11 @@ namespace schrader.Server
         private static string GetParticipantDisplayNameByKey(string playerKey)
         {
             if (string.IsNullOrEmpty(playerKey)) return null;
+
+            if (BotManager.IsBotKey(playerKey))
+            {
+                return BotManager.GetBotDisplayName(playerKey);
+            }
 
             lock (draftLock)
             {
@@ -1394,39 +1790,39 @@ namespace schrader.Server
         {
             try
             {
+                EnsureValidCaptainAssignments(publishOverlayState: false, refreshApprovalPanels: false);
+
                 lock (draftLock)
                 {
-                    var availableParticipants = rankedParticipants
-                        .Where(p => p != null)
-                        .Where(p =>
+                    RemoveDuplicateDraftAvailablePlayersLocked();
+
+                    var availableParticipants = draftAvailablePlayerIds
+                        .Select(playerId =>
                         {
-                            var participantKey = ResolveParticipantIdToKey(p);
-                            return !string.IsNullOrEmpty(participantKey) && draftAvailablePlayerIds.Contains(participantKey, StringComparer.OrdinalIgnoreCase);
+                            TryGetParticipantByKey(playerId, out var participant);
+                            return participant;
                         })
-                        .GroupBy(ResolveParticipantIdToKey, StringComparer.OrdinalIgnoreCase)
-                        .Select(group => group.First())
+                        .Where(participant => participant != null)
                         .ToArray();
 
-                    var redParticipants = rankedParticipants
-                        .Where(p => p != null)
-                        .Where(p =>
+                    var redParticipants = draftAssignedTeams
+                        .Where(entry => entry.Value == TeamResult.Red)
+                        .Select(entry =>
                         {
-                            var participantKey = ResolveParticipantIdToKey(p);
-                            return !string.IsNullOrEmpty(participantKey) && draftAssignedTeams.TryGetValue(participantKey, out var assignedTeam) && assignedTeam == TeamResult.Red;
+                            TryGetParticipantByKey(entry.Key, out var participant);
+                            return participant;
                         })
-                        .GroupBy(ResolveParticipantIdToKey, StringComparer.OrdinalIgnoreCase)
-                        .Select(group => group.First())
+                        .Where(participant => participant != null)
                         .ToArray();
 
-                    var blueParticipants = rankedParticipants
-                        .Where(p => p != null)
-                        .Where(p =>
+                    var blueParticipants = draftAssignedTeams
+                        .Where(entry => entry.Value == TeamResult.Blue)
+                        .Select(entry =>
                         {
-                            var participantKey = ResolveParticipantIdToKey(p);
-                            return !string.IsNullOrEmpty(participantKey) && draftAssignedTeams.TryGetValue(participantKey, out var assignedTeam) && assignedTeam == TeamResult.Blue;
+                            TryGetParticipantByKey(entry.Key, out var participant);
+                            return participant;
                         })
-                        .GroupBy(ResolveParticipantIdToKey, StringComparer.OrdinalIgnoreCase)
-                        .Select(group => group.First())
+                        .Where(participant => participant != null)
                         .ToArray();
 
                     var pendingParticipants = pendingLateJoiners.Values
@@ -1456,16 +1852,16 @@ namespace schrader.Server
                         RedCaptainName = GetCaptainDisplayNameByKey(redCaptainId) ?? "Pending",
                         BlueCaptainName = GetCaptainDisplayNameByKey(blueCaptainId) ?? "Pending",
                         CurrentTurnName = isCompleted ? string.Empty : (draftActive ? (GetCaptainDisplayNameByKey(currentCaptainTurnId) ?? "Pending") : string.Empty),
-                        AvailablePlayers = availableEntries.Select(entry => entry.CommandTarget).Where(name => !string.IsNullOrWhiteSpace(name)).ToArray(),
+                        AvailablePlayers = availableEntries.Select(entry => entry.DisplayName ?? entry.CommandTarget).Where(name => !string.IsNullOrWhiteSpace(name)).ToArray(),
                         AvailablePlayerEntries = availableEntries,
-                        RedPlayers = redEntries.Select(entry => entry.CommandTarget).Where(name => !string.IsNullOrWhiteSpace(name)).ToArray(),
+                        RedPlayers = redEntries.Select(entry => entry.DisplayName ?? entry.CommandTarget).Where(name => !string.IsNullOrWhiteSpace(name)).ToArray(),
                         RedPlayerEntries = redEntries,
-                        BluePlayers = blueEntries.Select(entry => entry.CommandTarget).Where(name => !string.IsNullOrWhiteSpace(name)).ToArray(),
+                        BluePlayers = blueEntries.Select(entry => entry.DisplayName ?? entry.CommandTarget).Where(name => !string.IsNullOrWhiteSpace(name)).ToArray(),
                         BluePlayerEntries = blueEntries,
                         PendingLateJoinerCount = pendingLateJoiners.Count,
-                        PendingLateJoiners = pendingEntries.Select(entry => entry.CommandTarget).Where(name => !string.IsNullOrWhiteSpace(name)).ToArray(),
+                        PendingLateJoiners = pendingEntries.Select(entry => entry.DisplayName ?? entry.CommandTarget).Where(name => !string.IsNullOrWhiteSpace(name)).ToArray(),
                         PendingLateJoinerEntries = pendingEntries,
-                        DummyModeActive = rankedParticipants.Any(IsDummyParticipant),
+                        DummyModeActive = controlledTestModeEnabled,
                         FooterText = isCompleted
                             ? "Draft complete. Starting match..."
                             : "Click a player to send /pick or /accept. Scoreboard click still works as a fallback."
@@ -1480,9 +1876,11 @@ namespace schrader.Server
         private static DraftOverlayPlayerEntryMessage[] BuildDraftOverlayEntries(IEnumerable<RankedParticipant> participants, TeamResult fallbackTeam, string captainKey, bool sortByMmrDescending, bool captainFirst)
         {
             var entries = (participants ?? Enumerable.Empty<RankedParticipant>())
-                .Where(participant => participant != null && !string.IsNullOrWhiteSpace(participant.displayName))
+                .Where(participant => participant != null)
                 .Select(participant => BuildDraftOverlayEntry(participant, fallbackTeam, captainKey))
                 .Where(entry => entry != null)
+                .GroupBy(entry => entry.CommandTarget ?? entry.DisplayName, StringComparer.OrdinalIgnoreCase)
+                .Select(group => group.First())
                 .ToList();
 
             IOrderedEnumerable<DraftOverlayPlayerEntryMessage> orderedEntries;
@@ -1511,24 +1909,37 @@ namespace schrader.Server
 
         private static DraftOverlayPlayerEntryMessage BuildDraftOverlayEntry(RankedParticipant participant, TeamResult fallbackTeam, string captainKey)
         {
-            if (participant == null || string.IsNullOrWhiteSpace(participant.displayName))
+            if (participant == null)
             {
                 return null;
             }
 
             var participantKey = ResolveParticipantIdToKey(participant);
+            if (string.IsNullOrWhiteSpace(participantKey))
+            {
+                return null;
+            }
+
+            var mmrValue = GetAuthoritativeMmrOrDefault(participant, participantKey, out _);
+            var displayName = ResolvePreferredParticipantDisplayName(participant, null, participantKey);
+            if (string.IsNullOrWhiteSpace(displayName))
+            {
+                return null;
+            }
+
             var effectiveTeam = participant.team != TeamResult.Unknown ? participant.team : fallbackTeam;
+            var playerNumber = ResolveParticipantPlayerNumber(participant);
             var isCaptain = !string.IsNullOrWhiteSpace(captainKey)
                 && !string.IsNullOrWhiteSpace(participantKey)
                 && string.Equals(participantKey, captainKey, StringComparison.OrdinalIgnoreCase);
-            var hasMmr = TryGetMmrValue(participantKey, out var mmrValue);
 
             return new DraftOverlayPlayerEntryMessage
             {
-                CommandTarget = participant.displayName,
-                DisplayName = participant.displayName,
-                HasMmr = hasMmr,
-                Mmr = hasMmr ? mmrValue : 0,
+                CommandTarget = BuildStableDraftCommandTarget(participantKey),
+                DisplayName = displayName,
+                PlayerNumber = playerNumber,
+                HasMmr = true,
+                Mmr = mmrValue,
                 IsCaptain = isCaptain,
                 Team = effectiveTeam
             };
@@ -1543,7 +1954,7 @@ namespace schrader.Server
                     + (state.RedPlayers?.Length ?? 0)
                     + (state.BluePlayers?.Length ?? 0)
                     + (state.PendingLateJoiners?.Length ?? 0);
-                Debug.Log($"[{Constants.MOD_NAME}] Sending draft state with {playerCount} players");
+                Debug.Log($"[{Constants.MOD_NAME}] [DRAFT] Broadcasting new state. Available={(state.AvailablePlayers?.Length ?? 0)} Red={(state.RedPlayers?.Length ?? 0)} Blue={(state.BluePlayers?.Length ?? 0)} Pending={(state.PendingLateJoiners?.Length ?? 0)} Total={playerCount}");
                 RankedOverlayNetwork.PublishDraftState(state);
             }
             catch (Exception ex)

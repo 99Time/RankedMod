@@ -83,13 +83,13 @@ namespace schrader.Server
 
                 if (draftActive && IsDraftAvailablePlayer(targetKey))
                 {
-                    HandleDraftPick(actorPlayer, actorClientId, targetParticipant.displayName ?? targetParticipant.playerId ?? actorClientId.ToString());
+                    HandleDraftPick(actorPlayer, actorClientId, targetKey);
                     return false;
                 }
 
                 if (IsPendingLateJoiner(targetKey))
                 {
-                    HandleLateJoinAcceptance(actorPlayer, actorClientId, targetParticipant.displayName ?? targetParticipant.playerId ?? actorClientId.ToString());
+                    HandleLateJoinAcceptance(actorPlayer, actorClientId, targetKey);
                     return false;
                 }
 
@@ -947,17 +947,8 @@ namespace schrader.Server
             {
                 if (!rankedActive) return;
                 if (Time.unscaledTime - lastRankedEndTime < 1f) return;
-                lastRankedEndTime = Time.unscaledTime;
 
                 TeamResult winner = TeamResult.Unknown;
-
-                if (forfeitOverrideActive && forfeitOverrideWinner != TeamResult.Unknown)
-                {
-                    winner = forfeitOverrideWinner;
-                    forfeitOverrideActive = false;
-                    forfeitOverrideWinner = TeamResult.Unknown;
-                    Debug.Log($"[{Constants.MOD_NAME}] Winner overridden by forfeit: {winner}");
-                }
                 
                 // Try GameState scores first (most reliable)
                 if (winner == TeamResult.Unknown && TryGetScoresFromGameState(__instance, out var red, out var blue))
@@ -973,13 +964,9 @@ namespace schrader.Server
                     Debug.LogError($"[{Constants.MOD_NAME}] RankedMatchEnd no pudo detectar ganador; contexto: {__instance?.GetType().FullName ?? "null"}");
                     LogWinnerCandidateValues("RankedMatchEnd context", __instance);
                     LogManagerWinnerCandidates();
-                    SendSystemChatToAll("<size=14><color=#ff6666>Ranked</color> ended, but winner was not detected. MMR unchanged.</size>");
-                    ResetGoalCounts();
-                    rankedActive = false; rankedParticipants.Clear(); return;
                 }
 
-                ApplyRankedResults(winner);
-                ResetGoalCounts();
+                EndMatch(winner, requestRuntimeEnd: false, forceRequestedWinner: true);
             }
             catch { }
         }

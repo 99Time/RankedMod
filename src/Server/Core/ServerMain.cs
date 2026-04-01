@@ -13,7 +13,6 @@ namespace schrader
         static readonly Harmony harmony = new Harmony(Constants.MOD_NAME);
         private static GameObject updaterGo;
         private static RankedSystemUpdater updaterInstance;
-        private static bool allowRankedWithoutPlayers = true; // testing override: allow starting ranked even if not enough players
 
         [HarmonyPatch(typeof(UIChatController), "Event_Server_OnSynchronizeComplete")]
         public class UIChatControllerPatch
@@ -100,6 +99,26 @@ namespace schrader
                         return false;
                     }
 
+                    if (trimmed.Equals("/discord", StringComparison.OrdinalIgnoreCase))
+                    {
+                        try
+                        {
+                            UIChat.Instance.Server_SendSystemChatMessage("<size=14><color=#66ccff>Opening Discord invite...</color></size>", clientId);
+                        }
+                        catch { }
+
+                        try
+                        {
+                            RankedOverlayNetwork.PublishDiscordInviteOpenToClient(clientId);
+                        }
+                        catch (Exception ex)
+                        {
+                            Debug.LogError($"[{Constants.MOD_NAME}] /discord failed: {ex.Message}");
+                        }
+
+                        return false;
+                    }
+
                     if (trimmed.Equals("/commands", StringComparison.OrdinalIgnoreCase))
                     {
                         try
@@ -138,7 +157,7 @@ namespace schrader
                         return false;
                     }
 
-                        // Admin-style ranked controls: /ranked start | /ranked end <red|blue|draw>
+                        // Admin-style ranked controls: /ranked start | /ranked end [red|blue|draw] | /ranked test <on|off|status>
                         if (trimmed.StartsWith("/ranked", StringComparison.OrdinalIgnoreCase))
                         {
                             var parts = trimmed.Split(new[] {' '}, StringSplitOptions.RemoveEmptyEntries);
@@ -152,24 +171,14 @@ namespace schrader
                                         SendSystemChatToClient("<size=14><color=#ff6666>Permission denied.</color></size>", clientId);
                                         return false;
                                     }
-                                        if (!TryGetEligiblePlayers(out var eligible, out var reason))
-                                        {
-                                            if (allowRankedWithoutPlayers)
-                                            {
-                                                eligible = new List<RankedParticipant>();
-                                                var pid = TryGetPlayerId(player, clientId);
-                                                var initiatorName = TryGetPlayerName(player) ?? $"Player {clientId}";
-                                                eligible.Add(new RankedParticipant { clientId = clientId, playerId = pid, displayName = initiatorName, team = TeamResult.Red });
-                                            }
-                                            else
-                                            {
-                                                SendSystemChatToClient($"<size=14><color=#ff6666>Ranked</color> cannot start: {reason}</size>", clientId);
-                                                return false;
-                                            }
-                                        }
 
-                                        // Delegate forcing a ranked start to the server-ranked system
-                                        Server.RankedSystem.ForceStart(eligible);
+                                    if (!TryGetEligiblePlayersForStart(player, clientId, out var eligible, out var reason))
+                                    {
+                                        SendSystemChatToClient($"<size=14><color=#ff6666>Ranked</color> cannot start: {reason}</size>", clientId);
+                                        return false;
+                                    }
+
+                                    Server.RankedSystem.ForceStart(eligible);
                                     return false;
                                 }
                                 else if (sub == "end")
@@ -186,31 +195,58 @@ namespace schrader
                                             var arg = parts[2].ToLowerInvariant();
                                             if (arg == "red" || arg == "r")
                                             {
-                                                ApplyRankedResults(TeamResult.Red);
+                                                EndRankedMatch(TeamResult.Red, true, true);
                                                 SendSystemChatToAll("<size=14><color=#ffcc66>Ranked</color> forcibly ended by admin. Winner: Red.</size>");
                                                 return false;
                                             }
                                             else if (arg == "blue" || arg == "b")
                                             {
-                                                ApplyRankedResults(TeamResult.Blue);
+                                                EndRankedMatch(TeamResult.Blue, true, true);
                                                 SendSystemChatToAll("<size=14><color=#ffcc66>Ranked</color> forcibly ended by admin. Winner: Blue.</size>");
                                                 return false;
                                             }
                                             else if (arg == "draw")
                                             {
-                                                Server.RankedSystem.ForceEnd();
+                                                EndRankedMatch(TeamResult.Unknown, true, true);
                                                 SendSystemChatToAll("<size=14><color=#ffcc66>Ranked</color> forcibly ended by admin: draw. MMR unchanged.</size>");
                                                 return false;
                                             }
                                         }
 
-                                        // no arg -> cancel vote/match
-                                        Server.RankedSystem.ForceEnd();
+                                        EndRankedMatch(TeamResult.Unknown, true, true);
+                                        SendSystemChatToAll("<size=14><color=#ffcc66>Ranked</color> forcibly ended by admin: draw. MMR unchanged.</size>");
                                         return false;
+                                }
+                                else if (sub == "test")
+                                {
+                                    if (!TryIsAdmin(player, clientId))
+                                    {
+                                        SendSystemChatToClient("<size=14><color=#ff6666>Permission denied.</color></size>", clientId);
+                                        return false;
+                                    }
+
+                                    var toggle = parts.Length >= 3 ? parts[2].ToLowerInvariant() : "status";
+                                    if (toggle == "on")
+                                    {
+                                        SetControlledTestModeEnabled(true);
+                                        SendSystemChatToAll("<size=14><color=#ffcc66>Ranked</color> controlled test mode enabled.</size>");
+                                        return false;
+                                    }
+
+                                    if (toggle == "off")
+                                    {
+                                        SetControlledTestModeEnabled(false);
+                                        SendSystemChatToAll("<size=14><color=#ffcc66>Ranked</color> controlled test mode disabled.</size>");
+                                        return false;
+                                    }
+
+                                    var statusText = IsControlledTestModeEnabled() ? "enabled" : "disabled";
+                                    SendSystemChatToClient($"<size=14><color=#ffcc66>Ranked</color> controlled test mode is currently <b>{statusText}</b>.</size>", clientId);
+                                    return false;
                                 }
                             }
 
-                            SendSystemChatToClient("<size=14>Usage: /ranked start | /ranked end <red|blue|draw></size>", clientId);
+                            SendSystemChatToClient("<size=14>Usage: /ranked start | /ranked end [red|blue|draw] | /ranked test <on|off|status></size>", clientId);
                             return false;
                         }
 
@@ -663,6 +699,7 @@ namespace schrader
             SendCommandHelpLine(clientId, "<size=13>/y</size> <size=12>- Vote yes in a Ranked vote.</size>");
             SendCommandHelpLine(clientId, "<size=13>/n</size> <size=12>- Vote no in a Ranked vote.</size>");
             SendCommandHelpLine(clientId, "<size=13>/mmr</size> <size=12>- Show your current MMR.</size>");
+            SendCommandHelpLine(clientId, "<size=13>/discord</size> <size=12>- Open the Discord invite in your browser.</size>");
             SendCommandHelpLine(clientId, "<size=13>/ff</size> <size=12>- Start/vote forfeit (surrender) for your team.</size>");
             //SendCommandHelpLine(clientId, "<size=13>Draft UI</size> <size=12>- During ranked draft, the HUD overlay opens automatically. Scoreboard click still works for picks and accepts.</size>");
             //SendCommandHelpLine(clientId, "<size=13>/pick &lt;player&gt;</size> <size=12>- Chat fallback for captains if scoreboard click is unavailable.</size>");
@@ -679,12 +716,11 @@ namespace schrader
             SendCommandHelpLine(clientId, "<size=13>/s</size> <size=12>- Spawn a puck (server). Blocked during matches, goals and replays.</size>");
             SendCommandHelpLine(clientId, "<size=13>/cs</size> <size=12>- Despawn all pucks on the map.</size>");
             SendCommandHelpLine(clientId, "<size=13>/ranked start|end</size> <size=12>- Admin commands to force start or end a ranked match.</size>");
-            SendCommandHelpLine(clientId, "<size=13>/dummy &lt;count&gt;</size> <size=12>- Create logical test dummies for the next draft or as late joiners in an active ranked.</size>");
-            SendCommandHelpLine(clientId, "<size=13>/record start</size> <size=12>- Start recording your current movement and stick inputs.</size>");
-            SendCommandHelpLine(clientId, "<size=13>/record stop</size> <size=12>- Stop recording and save it into UserData/BotMemory.</size>");
-            SendCommandHelpLine(clientId, "<size=13>/replay latest</size> <size=12>- Start bot behavior mode using the saved BotMemory library.</size>");
-            SendCommandHelpLine(clientId, "<size=13>/replay &lt;name|type&gt;</size> <size=12>- Start behavior mode from a specific recording or a type like MOVE, CONTROL, SHOOT or TURN.</size>");
-            SendCommandHelpLine(clientId, "<size=13>/replay list</size> <size=12>- List saved BotMemory recordings with their replay behavior types.</size>");
+            //SendCommandHelpLine(clientId, "<size=13>/record start</size> <size=12>- Start recording your current movement and stick inputs.</size>");
+            //SendCommandHelpLine(clientId, "<size=13>/record stop</size> <size=12>- Stop recording and save it into UserData/BotMemory.</size>");
+            //SendCommandHelpLine(clientId, "<size=13>/replay latest</size> <size=12>- Start bot behavior mode using the saved BotMemory library.</size>");
+            //SendCommandHelpLine(clientId, "<size=13>/replay &lt;name|type&gt;</size> <size=12>- Start behavior mode from a specific recording or a type like MOVE, CONTROL, SHOOT or TURN.</size>");
+            //SendCommandHelpLine(clientId, "<size=13>/replay list</size> <size=12>- List saved BotMemory recordings with their replay behavior types.</size>");
         }
 
         private static void SendCommandHelpLine(ulong clientId, string message)
@@ -696,7 +732,7 @@ namespace schrader
         {
             try { return Server.ReflectionUtils.FindTypeByName(names); } catch { return null; }
         }
-
+        
         private static string StripRichTextTags(string input)
         {
             if (string.IsNullOrEmpty(input)) return input;
@@ -740,6 +776,7 @@ namespace schrader
         private static void FinalizeRankedVote() { /* handled by RankedSystem */ }
         private static bool TryHandleDraftCommand(object player, ulong clientId, string message) => Server.RankedSystem.TryHandleDraftCommand(player, clientId, message);
         private static bool TryGetEligiblePlayers(out List<RankedParticipant> eligible, out string reason) => Server.RankedSystem.TryGetEligiblePlayers(out eligible, out reason);
+        private static bool TryGetEligiblePlayersForStart(object player, ulong clientId, out List<RankedParticipant> eligible, out string reason) => Server.RankedSystem.TryGetEligiblePlayersForStartPublic(player, clientId, out eligible, out reason);
         private static string TryGetPlayerId(object player, ulong fallbackClientId) => Server.RankedSystem.TryGetPlayerId(player, fallbackClientId);
         private static string TryGetPlayerName(object player) => Server.RankedSystem.TryGetPlayerName(player);
         private static int GetMmr(string playerId) => Server.RankedSystem.GetMmr(playerId);
@@ -748,6 +785,9 @@ namespace schrader
         private static void SendSystemChatToClient(string message, ulong clientId) => Server.RankedSystem.SendSystemChatToClient(message, clientId);
         private static void TryStartMatch() => Server.RankedSystem.TryStartMatch();
         private static void ApplyRankedResults(TeamResult winner) => Server.RankedSystem.ApplyRankedResults(winner);
+        private static bool EndRankedMatch(TeamResult winner, bool requestRuntimeEnd, bool forceRequestedWinner) => Server.RankedSystem.EndMatch(winner, requestRuntimeEnd, forceRequestedWinner);
+        private static bool IsControlledTestModeEnabled() => Server.RankedSystem.IsControlledTestModeEnabled();
+        private static void SetControlledTestModeEnabled(bool enabled) => Server.RankedSystem.SetControlledTestModeEnabled(enabled);
 
         // Diagnostic Harmony patch: intercept NetworkVariableBase.CanSend to detect null NetworkBehaviour and avoid crashing the network tick
         [HarmonyPatch]

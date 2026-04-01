@@ -11,13 +11,14 @@ namespace schrader
         public sealed class View
         {
             public VisualElement Panel;
+            public Button DiscordButton;
             public Button ContinueButton;
         }
 
         private static Texture2D cachedLogoTexture;
         private static bool logoLoadAttempted;
 
-        public static void BuildUI(DraftUIRenderer.View rootView, Action onContinue)
+        public static void BuildUI(DraftUIRenderer.View rootView, Action onOpenDiscord, Action onContinue)
         {
             if (rootView?.Root == null)
             {
@@ -101,6 +102,7 @@ namespace schrader
             commandsHintLabel.style.marginBottom = new StyleLength(new Length(10, LengthUnit.Pixel));
             commandsSection.Add(commandsHintLabel);
             AddCommandRow(commandsSection, "/vr", "Start a Ranked vote (use /y or /n).");
+            AddCommandRow(commandsSection, "/discord", "Open the Discord invite in your browser.");
             AddCommandRow(commandsSection, "/s", "Spawn a puck.");
             AddCommandRow(commandsSection, "/cs", "Clear all pucks.");
             AddCommandRow(commandsSection, "/mmr", "Show your current MMR.");
@@ -124,6 +126,21 @@ namespace schrader
             buttonRow.style.paddingLeft = 0;
             buttonRow.style.paddingRight = 0;
 
+            view.DiscordButton = new Button(() => onOpenDiscord?.Invoke())
+            {
+                text = "DISCORD"
+            };
+            StyleButton(view.DiscordButton, new ButtonPalette(
+                new Color(0.16f, 0.33f, 0.70f, 0.98f),
+                new Color(0.23f, 0.42f, 0.84f, 1f),
+                new Color(0.11f, 0.25f, 0.56f, 1f),
+                Color.white));
+            view.DiscordButton.style.minWidth = 180;
+            view.DiscordButton.style.height = 44;
+            view.DiscordButton.style.alignSelf = Align.Center;
+            view.DiscordButton.style.flexShrink = 0;
+            view.DiscordButton.style.marginRight = new StyleLength(new Length(14, LengthUnit.Pixel));
+
             view.ContinueButton = new Button(() => onContinue?.Invoke())
             {
                 text = "CONTINUE"
@@ -138,6 +155,7 @@ namespace schrader
             view.ContinueButton.style.alignSelf = Align.Center;
             view.ContinueButton.style.flexShrink = 0;
 
+            buttonRow.Add(view.DiscordButton);
             buttonRow.Add(view.ContinueButton);
 
             panel.Add(hero);

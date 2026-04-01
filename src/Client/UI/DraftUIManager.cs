@@ -66,16 +66,20 @@ namespace schrader
         private static DraftOverlayStateMessage currentDraftState = DraftOverlayStateMessage.Hidden();
         private static DraftOverlayExtendedMessage currentDraftExtendedState = DraftOverlayExtendedMessage.Hidden();
         private static MatchResultMessage currentMatchResultState = MatchResultMessage.Hidden();
+        private static MatchResultMessage cachedMatchResultState = MatchResultMessage.Hidden();
         private static bool postMatchDismissed;
         private static bool welcomePendingAcknowledgement = true;
         private static float currentStateEnteredAt = -1f;
         private static float welcomeRequestedAt = -1f;
+        private static float lastVisibleMatchResultReceivedAt = -1f;
         private static bool hasLoggedWelcomeFallback;
+        private static bool hasLoggedPostMatchFallback;
         private static float currentUiOpacity;
         private static float targetUiOpacity;
         private static bool pendingHideAfterFade;
         private const float UiFadeSpeed = 7.5f;
         private const float WelcomeVisibilityFailsafeDelay = 1.5f;
+        private const float PostMatchVisibilityFailsafeDelay = 2f;
 
         public static bool ValidateRuntimeMethods()
         {
@@ -198,6 +202,7 @@ namespace schrader
                 OnApprovalRejectedClicked,
                 OnPickPlayerClicked,
                 OnAcceptLateJoinerClicked,
+                OnWelcomeDiscordClicked,
                 OnWelcomeContinueClicked,
                 OnPostMatchContinueClicked,
                 OnPostMatchCloseClicked);
@@ -288,6 +293,7 @@ namespace schrader
             currentDraftState = DraftOverlayStateMessage.Hidden();
             currentDraftExtendedState = DraftOverlayExtendedMessage.Hidden();
             currentMatchResultState = MatchResultMessage.Hidden();
+            cachedMatchResultState = MatchResultMessage.Hidden();
             suppressVoteUntilHidden = false;
             localVoteAccepted = false;
             lastVoteRenderSignature = null;
@@ -298,7 +304,9 @@ namespace schrader
             welcomePendingAcknowledgement = true;
             currentStateEnteredAt = -1f;
             welcomeRequestedAt = -1f;
+            lastVisibleMatchResultReceivedAt = -1f;
             hasLoggedWelcomeFallback = false;
+            hasLoggedPostMatchFallback = false;
             UIInputState.Reset();
             ApplyUiState(OverlayUiState.None, forceRefresh: true);
         }
@@ -329,6 +337,7 @@ namespace schrader
                 messagingManager.RegisterNamedMessageHandler(RankedOverlayChannels.DraftState, OnDraftStateReceived);
                 messagingManager.RegisterNamedMessageHandler(RankedOverlayChannels.DraftStateExtended, OnDraftExtendedStateReceived);
                 messagingManager.RegisterNamedMessageHandler(RankedOverlayChannels.MatchResult, OnMatchResultReceived);
+                messagingManager.RegisterNamedMessageHandler(RankedOverlayChannels.DiscordInviteOpen, OnDiscordInviteOpenReceived);
                 currentMessagingManager = messagingManager;
                 handlersRegistered = true;
             }
@@ -347,6 +356,7 @@ namespace schrader
                 try { currentMessagingManager.UnregisterNamedMessageHandler(RankedOverlayChannels.DraftState); } catch { }
                 try { currentMessagingManager.UnregisterNamedMessageHandler(RankedOverlayChannels.DraftStateExtended); } catch { }
                 try { currentMessagingManager.UnregisterNamedMessageHandler(RankedOverlayChannels.MatchResult); } catch { }
+                try { currentMessagingManager.UnregisterNamedMessageHandler(RankedOverlayChannels.DiscordInviteOpen); } catch { }
             }
 
             currentMessagingManager = null;
@@ -357,7 +367,9 @@ namespace schrader
         {
             try
             {
-                currentVoteState = RankedOverlayNetcode.ReadJson<VoteOverlayStateMessage>(ref reader) ?? VoteOverlayStateMessage.Hidden();
+                var incomingState = RankedOverlayNetcode.ReadJson<VoteOverlayStateMessage>(ref reader) ?? VoteOverlayStateMessage.Hidden();
+                var preservePostMatch = incomingState.IsVisible && IsPostMatchStateLocked();
+                currentVoteState = preservePostMatch ? VoteOverlayStateMessage.Hidden() : incomingState;
                 voteStateReceivedAt = Time.unscaledTime;
 
                 if (!currentVoteState.IsVisible)
@@ -369,6 +381,11 @@ namespace schrader
                 {
                     currentMatchResultState = MatchResultMessage.Hidden();
                     postMatchDismissed = false;
+                }
+
+                if (preservePostMatch)
+                {
+                    DraftUIPlugin.Log("Ignoring vote overlay while post-match results are visible.");
                 }
 
                 RefreshUi(forceRefresh: true);
@@ -383,7 +400,9 @@ namespace schrader
         {
             try
             {
-                currentDraftState = RankedOverlayNetcode.ReadJson<DraftOverlayStateMessage>(ref reader) ?? DraftOverlayStateMessage.Hidden();
+                var incomingState = RankedOverlayNetcode.ReadJson<DraftOverlayStateMessage>(ref reader) ?? DraftOverlayStateMessage.Hidden();
+                var preservePostMatch = incomingState.IsVisible && IsPostMatchStateLocked();
+                currentDraftState = preservePostMatch ? DraftOverlayStateMessage.Hidden() : incomingState;
                 if (currentDraftState == null || !currentDraftState.IsVisible)
                 {
                     currentDraftExtendedState = DraftOverlayExtendedMessage.Hidden();
@@ -392,6 +411,11 @@ namespace schrader
                 {
                     currentMatchResultState = MatchResultMessage.Hidden();
                     postMatchDismissed = false;
+                }
+
+                if (preservePostMatch)
+                {
+                    DraftUIPlugin.Log("Ignoring draft overlay while post-match results are visible.");
                 }
 
                 DraftUIPlugin.Log($"Draft state received. Visible={currentDraftState.IsVisible} Available={(currentDraftState.AvailablePlayers?.Length ?? 0)} Red={(currentDraftState.RedPlayers?.Length ?? 0)} Blue={(currentDraftState.BluePlayers?.Length ?? 0)} Pending={(currentDraftState.PendingLateJoiners?.Length ?? 0)}");
@@ -407,7 +431,13 @@ namespace schrader
         {
             try
             {
-                currentDraftExtendedState = RankedOverlayNetcode.ReadJson<DraftOverlayExtendedMessage>(ref reader) ?? DraftOverlayExtendedMessage.Hidden();
+                var incomingState = RankedOverlayNetcode.ReadJson<DraftOverlayExtendedMessage>(ref reader) ?? DraftOverlayExtendedMessage.Hidden();
+                var preservePostMatch = incomingState.IsVisible && IsPostMatchStateLocked();
+                currentDraftExtendedState = preservePostMatch ? DraftOverlayExtendedMessage.Hidden() : incomingState;
+                if (preservePostMatch)
+                {
+                    DraftUIPlugin.Log("Ignoring draft overlay while post-match results are visible.");
+                }
                 DraftUIPlugin.Log($"Draft extended state received. Visible={currentDraftExtendedState.IsVisible} Available={(currentDraftExtendedState.AvailablePlayerEntries?.Length ?? 0)} Red={(currentDraftExtendedState.RedPlayerEntries?.Length ?? 0)} Blue={(currentDraftExtendedState.BluePlayerEntries?.Length ?? 0)} Pending={(currentDraftExtendedState.PendingLateJoinerEntries?.Length ?? 0)}");
                 RefreshUi(forceRefresh: true);
             }
@@ -421,12 +451,20 @@ namespace schrader
         {
             try
             {
-                currentApprovalRequestState = RankedOverlayNetcode.ReadJson<ApprovalRequestStateMessage>(ref reader) ?? ApprovalRequestStateMessage.Hidden();
+                var incomingState = RankedOverlayNetcode.ReadJson<ApprovalRequestStateMessage>(ref reader) ?? ApprovalRequestStateMessage.Hidden();
+                var preservePostMatch = incomingState.IsVisible && IsPostMatchStateLocked();
+                currentApprovalRequestState = preservePostMatch ? ApprovalRequestStateMessage.Hidden() : incomingState;
                 if (currentApprovalRequestState != null && currentApprovalRequestState.IsVisible)
                 {
                     currentMatchResultState = MatchResultMessage.Hidden();
                     postMatchDismissed = false;
                 }
+
+                if (preservePostMatch)
+                {
+                    DraftUIPlugin.Log("Ignoring approval overlay while post-match results are visible.");
+                }
+
                 RefreshUi(forceRefresh: true);
             }
             catch (Exception ex)
@@ -439,8 +477,27 @@ namespace schrader
         {
             try
             {
-                currentMatchResultState = RankedOverlayNetcode.ReadJson<MatchResultMessage>(ref reader) ?? MatchResultMessage.Hidden();
-                postMatchDismissed = false;
+                var incomingState = RankedOverlayNetcode.ReadJson<MatchResultMessage>(ref reader) ?? MatchResultMessage.Hidden();
+                currentMatchResultState = incomingState;
+
+                if (incomingState.IsVisible)
+                {
+                    cachedMatchResultState = incomingState;
+                    lastVisibleMatchResultReceivedAt = Time.unscaledTime;
+                    hasLoggedPostMatchFallback = false;
+                    postMatchDismissed = false;
+                    welcomePendingAcknowledgement = false;
+                    welcomeRequestedAt = -1f;
+                    hasLoggedWelcomeFallback = false;
+                }
+                else
+                {
+                    cachedMatchResultState = MatchResultMessage.Hidden();
+                    lastVisibleMatchResultReceivedAt = -1f;
+                    hasLoggedPostMatchFallback = false;
+                    postMatchDismissed = false;
+                }
+
                 currentVoteState = VoteOverlayStateMessage.Hidden();
                 currentApprovalRequestState = ApprovalRequestStateMessage.Hidden();
                 currentDraftState = DraftOverlayStateMessage.Hidden();
@@ -448,12 +505,30 @@ namespace schrader
                 suppressVoteUntilHidden = false;
                 localVoteAccepted = false;
 
-                DraftUIPlugin.Log($"Match result received. Visible={currentMatchResultState.IsVisible} Winner={currentMatchResultState.WinningTeam} Players={(currentMatchResultState.Players?.Length ?? 0)}");
+                DraftUIPlugin.Log($"MatchResultMessage received. Visible={currentMatchResultState.IsVisible} Winner={currentMatchResultState.WinningTeam} Players={(currentMatchResultState.Players?.Length ?? 0)}");
+                if (currentMatchResultState.IsVisible)
+                {
+                    EnsureViewSetup();
+                }
+
                 RefreshUi(forceRefresh: true);
             }
             catch (Exception ex)
             {
                 DraftUIPlugin.LogError($"Failed to receive match result state: {ex}");
+            }
+        }
+
+        private static void OnDiscordInviteOpenReceived(ulong senderClientId, FastBufferReader reader)
+        {
+            try
+            {
+                var message = RankedOverlayNetcode.ReadJson<OpenDiscordInviteMessage>(ref reader) ?? new OpenDiscordInviteMessage();
+                OpenDiscordInvite(message.Url, "Server command");
+            }
+            catch (Exception ex)
+            {
+                DraftUIPlugin.LogError($"Failed to receive Discord invite request: {ex}");
             }
         }
 
@@ -465,6 +540,7 @@ namespace schrader
             RefreshUi(forceRefresh: false);
             UpdateStateFailsafes();
             EnforceGameplayUiPriority();
+            FreezeLocalGameplayInputIfBlocked();
             EnsureCursorConsistency();
             TickOverlayTransition();
         }
@@ -500,6 +576,10 @@ namespace schrader
                 currentUiState = nextState;
                 currentStateEnteredAt = Time.unscaledTime;
                 DraftUIPlugin.Log($"UI state transition: {previousState} -> {nextState}");
+                if (nextState == OverlayUiState.PostMatch)
+                {
+                    DraftUIPlugin.Log("POST_MATCH state activated");
+                }
             }
             else
             {
@@ -555,6 +635,13 @@ namespace schrader
 
         private static OverlayUiState ResolveTargetUiState()
         {
+            if (ShouldShowPostMatchUi() || (currentUiState == OverlayUiState.PostMatch && HasCachedPostMatchResult()))
+            {
+                welcomeRequestedAt = -1f;
+                hasLoggedWelcomeFallback = false;
+                return OverlayUiState.PostMatch;
+            }
+
             if (ShouldAwaitWelcomeFlow())
             {
                 if (welcomeRequestedAt < 0f)
@@ -571,11 +658,6 @@ namespace schrader
 
             welcomeRequestedAt = -1f;
             hasLoggedWelcomeFallback = false;
-
-            if (ShouldShowPostMatchUi())
-            {
-                return OverlayUiState.PostMatch;
-            }
 
             if (ShouldShowDraftUi())
             {
@@ -607,6 +689,19 @@ namespace schrader
         private static bool ShouldShowPostMatchUi()
         {
             return currentMatchResultState != null && currentMatchResultState.IsVisible && !postMatchDismissed;
+        }
+
+        private static bool HasCachedPostMatchResult()
+        {
+            return cachedMatchResultState != null && cachedMatchResultState.IsVisible && !postMatchDismissed;
+        }
+
+        private static bool IsPostMatchStateLocked()
+        {
+            return !postMatchDismissed
+                && (ShouldShowPostMatchUi()
+                    || HasCachedPostMatchResult()
+                    || currentUiState == OverlayUiState.PostMatch);
         }
 
         private static bool ShouldShowTeamSelectState()
@@ -795,6 +890,7 @@ namespace schrader
             return string.Join("~",
                 entry.CommandTarget ?? string.Empty,
                 entry.DisplayName ?? string.Empty,
+                entry.PlayerNumber,
                 entry.HasMmr,
                 entry.Mmr,
                 entry.IsCaptain,
@@ -834,25 +930,44 @@ namespace schrader
             }
         }
 
-        private static void OnPickPlayerClicked(string playerName)
+        private static void OnPickPlayerClicked(string commandTarget)
         {
-            if (!string.IsNullOrWhiteSpace(playerName))
+            if (!string.IsNullOrWhiteSpace(commandTarget))
             {
-                SendChatCommand($"/pick {playerName}");
+                SendChatCommand($"/pick {commandTarget}");
             }
         }
 
-        private static void OnAcceptLateJoinerClicked(string playerName)
+        private static void OnAcceptLateJoinerClicked(string commandTarget)
         {
-            if (!string.IsNullOrWhiteSpace(playerName))
+            if (!string.IsNullOrWhiteSpace(commandTarget))
             {
-                SendChatCommand($"/accept {playerName}");
+                SendChatCommand($"/accept {commandTarget}");
             }
+        }
+
+        private static void OnWelcomeDiscordClicked()
+        {
+            OpenDiscordInvite(Constants.DISCORD_INVITE_URL, "Welcome Discord button");
         }
 
         private static void OnWelcomeContinueClicked()
         {
             DismissWelcomeScreen("Welcome UI Continued");
+        }
+
+        private static void OpenDiscordInvite(string url, string sourceLabel)
+        {
+            try
+            {
+                var inviteUrl = string.IsNullOrWhiteSpace(url) ? Constants.DISCORD_INVITE_URL : url;
+                Application.OpenURL(inviteUrl);
+                DraftUIPlugin.Log($"Discord invite opened via {sourceLabel}: {inviteUrl}");
+            }
+            catch (Exception ex)
+            {
+                DraftUIPlugin.LogError($"Failed to open Discord invite from {sourceLabel}: {ex}");
+            }
         }
 
         private static void OnPostMatchContinueClicked()
@@ -913,7 +1028,12 @@ namespace schrader
                 return false;
             }
 
-            if (currentUiState == OverlayUiState.Draft || currentUiState == OverlayUiState.PostMatch)
+            if (currentUiState == OverlayUiState.PostMatch && HasCachedPostMatchResult())
+            {
+                return true;
+            }
+
+            if (currentUiState == OverlayUiState.Draft)
             {
                 ForceRecoverToTeamSelect($"Blocking UI state {currentUiState} has no visible overlay");
             }
@@ -925,7 +1045,7 @@ namespace schrader
         {
             return ShouldAwaitWelcomeFlow()
                 || currentUiState == OverlayUiState.Draft
-                || currentUiState == OverlayUiState.PostMatch;
+                || IsPostMatchStateLocked();
         }
 
         private static bool ShouldBlockGameplayState(object state)
@@ -938,7 +1058,7 @@ namespace schrader
 
         private static bool IsPostMatchBlockingGameplayUi()
         {
-            return currentUiState == OverlayUiState.PostMatch || ShouldShowPostMatchUi();
+            return IsPostMatchStateLocked();
         }
 
         private static bool ShouldAwaitWelcomeFlow()
@@ -1055,9 +1175,14 @@ namespace schrader
         {
             SendPostMatchDismiss();
             currentMatchResultState = MatchResultMessage.Hidden();
+            cachedMatchResultState = MatchResultMessage.Hidden();
+            lastVisibleMatchResultReceivedAt = -1f;
+            hasLoggedPostMatchFallback = false;
             postMatchDismissed = true;
             DraftUIPlugin.Log(actionLabel);
             ApplyUiState(OverlayUiState.None, forceRefresh: true);
+            RestoreSuppressedGameplayUi();
+            RefreshUi(forceRefresh: true);
         }
 
         private static void DismissWelcomeScreen(string actionLabel)
@@ -1118,6 +1243,12 @@ namespace schrader
 
         private static void UpdateStateFailsafes()
         {
+            UpdateWelcomeFailsafe();
+            UpdatePostMatchFailsafe();
+        }
+
+        private static void UpdateWelcomeFailsafe()
+        {
             if (!ShouldAwaitWelcomeFlow() || welcomeRequestedAt < 0f)
             {
                 return;
@@ -1143,6 +1274,35 @@ namespace schrader
             ForceRecoverToTeamSelect("Welcome UI visibility failsafe triggered");
         }
 
+        private static void UpdatePostMatchFailsafe()
+        {
+            if (!HasCachedPostMatchResult() || lastVisibleMatchResultReceivedAt < 0f)
+            {
+                return;
+            }
+
+            if (ShouldShowPostMatchUi() && IsPostMatchOverlayVisible())
+            {
+                return;
+            }
+
+            var elapsed = Time.unscaledTime - Mathf.Max(0f, lastVisibleMatchResultReceivedAt);
+            if (elapsed < PostMatchVisibilityFailsafeDelay)
+            {
+                return;
+            }
+
+            if (!hasLoggedPostMatchFallback)
+            {
+                hasLoggedPostMatchFallback = true;
+                DraftUIPlugin.LogError($"Post-match UI recovery triggered after {elapsed:0.00}s without a visible result overlay.");
+            }
+
+            currentMatchResultState = cachedMatchResultState;
+            EnsureViewSetup();
+            RefreshUi(forceRefresh: true);
+        }
+
         private static void ForceRecoverToTeamSelect(string reason)
         {
             welcomePendingAcknowledgement = false;
@@ -1157,6 +1317,16 @@ namespace schrader
             ReleaseCursor();
             ApplyUiState(OverlayUiState.TeamSelect, forceRefresh: true);
             RestoreSuppressedGameplayUi();
+        }
+
+        private static void FreezeLocalGameplayInputIfBlocked()
+        {
+            if (!IsPostMatchStateLocked())
+            {
+                return;
+            }
+
+            ResetLocalInputs();
         }
 
         private static bool HasVisibleBlockingOverlay()
@@ -1617,11 +1787,14 @@ namespace schrader
             currentDraftState = DraftOverlayStateMessage.Hidden();
             currentDraftExtendedState = DraftOverlayExtendedMessage.Hidden();
             currentMatchResultState = MatchResultMessage.Hidden();
+            cachedMatchResultState = MatchResultMessage.Hidden();
             postMatchDismissed = false;
             welcomePendingAcknowledgement = true;
             currentStateEnteredAt = -1f;
             welcomeRequestedAt = -1f;
+            lastVisibleMatchResultReceivedAt = -1f;
             hasLoggedWelcomeFallback = false;
+            hasLoggedPostMatchFallback = false;
             currentUiOpacity = 0f;
             targetUiOpacity = 0f;
             pendingHideAfterFade = false;

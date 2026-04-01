@@ -63,12 +63,6 @@ namespace schrader.Server
                 return true;
             }
 
-            if (trimmed.StartsWith("/dummy ", StringComparison.OrdinalIgnoreCase))
-            {
-                HandleDummyCommand(player, clientId, trimmed.Substring(7).Trim());
-                return true;
-            }
-
             if (trimmed.StartsWith("/pick ", StringComparison.OrdinalIgnoreCase))
             {
                 HandleDraftPick(player, clientId, trimmed.Substring(6).Trim());

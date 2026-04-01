@@ -29,11 +29,9 @@ namespace schrader.Server
         private static float lastRankedEndTime = -999f;
         private static List<RankedParticipant> rankedParticipants = new List<RankedParticipant>();
         private static bool rankedMatchEndPatched = false;
-        private static bool allowSinglePlayerRanked = true;
-        private static bool testModeSinglePlayer = true;
-        private static bool controlledRankedTestModeActive = false;
         // Captured eligible participants at the moment a vote starts; used as fallback
         private static List<RankedParticipant> lastVoteEligible = null;
+        private static List<RankedParticipant> forfeitEligibleSnapshot = null;
         private static int manualSpawnDepth = 0;
         private static readonly string[] WinnerKeywords = { "score", "goal", "winner", "winning", "team", "result" };
         private const int MaxLoggedMembers = 12;
@@ -55,14 +53,14 @@ namespace schrader.Server
         private static readonly object goalLock = new object();
         private static readonly object playerGoalLock = new object();
         private static Dictionary<string,int> playerGoalCounts = new Dictionary<string,int>();
+        private static readonly object matchEndLock = new object();
+        private static bool rankedMatchEnding = false;
         private static bool forfeitActive = false;
         private static float forfeitStartTime = -999f;
         private static float forfeitDuration = 30f;
         private static Dictionary<TeamResult, HashSet<ulong>> forfeitVotes = new Dictionary<TeamResult, HashSet<ulong>>();
         private static TeamResult forfeitTeam = TeamResult.Unknown;
         private static Dictionary<TeamResult, HashSet<ulong>> forfeitNoVotes = new Dictionary<TeamResult, HashSet<ulong>>();
-        private static bool forfeitOverrideActive = false;
-        private static TeamResult forfeitOverrideWinner = TeamResult.Unknown;
         private const float HookRetryInterval = 2f;
         private static float lastHookAttemptTime = -999f;
         private static readonly object teamStateLock = new object();
@@ -90,9 +88,13 @@ namespace schrader.Server
         private static string lastAnnouncedTurnId = null;
         private static string lastAnnouncedAvailablePlayersSignature = null;
         private static int lastAnnouncedAvailableCount = -1;
+        private static bool controlledTestModeEnabled = false;
+        private static string controlledTestModeInitiatorKey = null;
+        private static ulong controlledTestModeInitiatorClientId = 0;
         private static string redCaptainId = null;
         private static string blueCaptainId = null;
         private static string currentCaptainTurnId = null;
+        private static readonly List<string> captainRotationQueue = new List<string>();
         private static List<string> draftAvailablePlayerIds = new List<string>();
         private static Dictionary<string, TeamResult> draftAssignedTeams = new Dictionary<string, TeamResult>(StringComparer.OrdinalIgnoreCase);
         private static Dictionary<string, RankedParticipant> pendingLateJoiners = new Dictionary<string, RankedParticipant>(StringComparer.OrdinalIgnoreCase);
@@ -151,6 +153,21 @@ namespace schrader.Server
         public static bool IsForfeitActive()
         {
             try { return forfeitActive; } catch { return false; }
+        }
+
+        public static bool IsControlledTestModeEnabled()
+        {
+            try { return controlledTestModeEnabled; } catch { return false; }
+        }
+
+        public static void SetControlledTestModeEnabled(bool enabled)
+        {
+            controlledTestModeEnabled = enabled;
+            if (!enabled)
+            {
+                controlledTestModeInitiatorKey = null;
+                controlledTestModeInitiatorClientId = 0;
+            }
         }
 
         // Returns true if any game/match appears to be active (ranked or normal)
@@ -590,9 +607,7 @@ namespace schrader.Server
                 var eligible = ResolveCurrentVoteEligibleParticipants();
                 if (eligible != null)
                 {
-                    var total = eligible.Count;
-                    var yes = 0; var no = 0;
-                    foreach (var kvp in rankedVotes) { if (kvp.Value) yes++; else no++; }
+                    CountSnapshotVotes(eligible, rankedVotes, out var total, out var yes, out var no);
                     var requiredYes = (total / 2) + 1;
                     if (yes >= requiredYes) FinalizeRankedVote();
                     else if (no > total - requiredYes) FinalizeRankedVote();
@@ -605,88 +620,208 @@ namespace schrader.Server
         {
             try
             {
-                if (controlledRankedTestModeActive && lastVoteEligible != null && lastVoteEligible.Count > 0)
-                {
-                    return lastVoteEligible
-                        .Select(CloneParticipant)
-                        .Where(p => p != null)
-                        .ToList();
-                }
-
-                if (!TryGetEligiblePlayers(out var eligible, out _)) eligible = lastVoteEligible;
-                if (eligible == null) return null;
-
-                return eligible
-                    .Select(CloneParticipant)
-                    .Where(p => p != null)
-                    .ToList();
+                if (lastVoteEligible == null) return null;
+                return OrderParticipantsForDeterminism(lastVoteEligible);
             }
             catch { }
 
             return null;
         }
 
-        private static TeamResult DetermineControlledTestBotTeam(List<RankedParticipant> eligible, ulong initiatorClientId)
+        public static bool TryGetEligiblePlayersForStartPublic(object player, ulong clientId, out List<RankedParticipant> eligible, out string reason)
         {
-            try
-            {
-                var initiator = eligible?
-                    .FirstOrDefault(p => p != null && p.clientId == initiatorClientId)
-                    ?? eligible?.FirstOrDefault(p => p != null && !IsDummyParticipant(p));
-
-                if (initiator != null)
-                {
-                    if (initiator.team == TeamResult.Red) return TeamResult.Blue;
-                    if (initiator.team == TeamResult.Blue) return TeamResult.Red;
-                }
-
-                var redCount = eligible?.Count(p => p != null && p.team == TeamResult.Red) ?? 0;
-                var blueCount = eligible?.Count(p => p != null && p.team == TeamResult.Blue) ?? 0;
-                return redCount <= blueCount ? TeamResult.Red : TeamResult.Blue;
-            }
-            catch { }
-
-            return TeamResult.Blue;
+            return TryGetEligiblePlayersForStart(player, clientId, out eligible, out reason);
         }
 
-        private static bool TryInjectControlledTestBot(List<RankedParticipant> eligible, ulong initiatorClientId)
+        private static bool TryGetEligiblePlayersForStart(object player, ulong clientId, out List<RankedParticipant> eligible, out string reason)
         {
+            eligible = new List<RankedParticipant>();
+            reason = "not enough players";
+
+            if (!controlledTestModeEnabled)
+            {
+                return TryGetEligiblePlayers(out eligible, out reason);
+            }
+
+            var unique = new Dictionary<ulong, RankedParticipant>();
+            foreach (var candidate in GetAllPlayers())
+            {
+                if (!TryBuildStartEligibleParticipant(candidate, out var participant)) continue;
+                unique[participant.clientId] = participant;
+            }
+
+            if (player != null && TryBuildStartEligibleParticipant(player, out var initiatorParticipant))
+            {
+                unique[initiatorParticipant.clientId] = initiatorParticipant;
+            }
+
+            eligible = OrderParticipantsForDeterminism(unique.Values);
+            if (eligible.Count == 0)
+            {
+                reason = "need at least one eligible non-goalie player";
+                return false;
+            }
+
+            if (clientId != 0 && !eligible.Any(participant => participant != null && participant.clientId == clientId))
+            {
+                reason = "you are not an eligible ranked participant";
+                return false;
+            }
+
+            reason = null;
+            return true;
+        }
+
+        private static bool TryBuildStartEligibleParticipant(object player, out RankedParticipant participant)
+        {
+            participant = null;
+
             try
             {
-                if (eligible == null) return false;
+                if (!TryBuildConnectedPlayerSnapshot(player, out participant) || participant == null)
+                {
+                    return false;
+                }
 
-                var preferredTeam = DetermineControlledTestBotTeam(eligible, initiatorClientId);
-                var botParticipant = SpawnTrackedBotParticipant(preferredTeam, false);
-                if (botParticipant == null) return false;
+                if (participant.clientId == 0 || string.IsNullOrWhiteSpace(participant.playerId))
+                {
+                    return false;
+                }
 
-                botParticipant.team = preferredTeam;
-                eligible.Add(CloneParticipant(botParticipant));
-                Debug.Log($"[{Constants.MOD_NAME}] Injected bot player for test mode: {botParticipant.displayName} ({ResolveParticipantIdToKey(botParticipant)})");
+                if (BotManager.TryGetBotIdByClientId(participant.clientId, out _))
+                {
+                    return false;
+                }
+
+                if (TryIsGoalie(player, out var isGoalie) && isGoalie)
+                {
+                    return false;
+                }
+
+                participant.displayName = participant.displayName ?? $"Player {participant.clientId}";
                 return true;
             }
             catch { }
 
+            participant = null;
             return false;
         }
 
-        private static void AutoAcceptBotVotes(IEnumerable<RankedParticipant> eligible)
+        private static List<RankedParticipant> OrderParticipantsForDeterminism(IEnumerable<RankedParticipant> participants)
+        {
+            return (participants ?? Enumerable.Empty<RankedParticipant>())
+                .Where(participant => participant != null)
+                .Select(CloneParticipant)
+                .Where(participant => participant != null)
+                .GroupBy(participant =>
+                {
+                    var participantKey = ResolveParticipantIdToKey(participant);
+                    if (!string.IsNullOrWhiteSpace(participantKey)) return participantKey;
+                    if (participant.clientId != 0) return $"clientId:{participant.clientId}";
+                    return participant.displayName ?? string.Empty;
+                }, StringComparer.OrdinalIgnoreCase)
+                .Select(group => group.First())
+                .OrderBy(participant => ResolveParticipantIdToKey(participant) ?? string.Empty, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(participant => participant.displayName ?? string.Empty, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(participant => participant.clientId)
+                .ToList();
+        }
+
+        private static List<RankedParticipant> ResolveCurrentForfeitEligibleParticipants()
         {
             try
             {
-                if (eligible == null) return;
+                if (forfeitEligibleSnapshot == null) return null;
+                return OrderParticipantsForDeterminism(forfeitEligibleSnapshot);
+            }
+            catch { }
 
-                foreach (var participant in eligible)
+            return null;
+        }
+
+        private static List<RankedParticipant> CaptureForfeitEligibleParticipants(TeamResult team)
+        {
+            try
+            {
+                if (team != TeamResult.Red && team != TeamResult.Blue) return null;
+
+                RefreshRankedParticipantsFromLiveState();
+
+                lock (rankedLock)
                 {
-                    if (participant == null || participant.clientId == 0) continue;
-
-                    var participantKey = ResolveParticipantIdToKey(participant);
-                    if (!IsDummyParticipant(participant) && !BotManager.IsBotKey(participantKey)) continue;
-
-                    rankedVotes[participant.clientId] = true;
-                    Debug.Log($"[{Constants.MOD_NAME}] Bot auto-voted READY: {participant.displayName} ({participantKey ?? participant.clientId.ToString()})");
+                    return OrderParticipantsForDeterminism(rankedParticipants
+                        .Where(participant => participant != null)
+                        .Where(participant => !IsDummyParticipant(participant))
+                        .Where(participant => participant.team == team)
+                        .ToList());
                 }
             }
             catch { }
+
+            return null;
+        }
+
+        private static void CountForfeitVotes(TeamResult team, IEnumerable<RankedParticipant> snapshot, out int total, out int yes, out int no)
+        {
+            var eligibleClientIds = new HashSet<ulong>((snapshot ?? Enumerable.Empty<RankedParticipant>())
+                .Where(participant => participant != null && participant.clientId != 0)
+                .Select(participant => participant.clientId));
+
+            total = eligibleClientIds.Count;
+            yes = 0;
+            no = 0;
+            if (eligibleClientIds.Count == 0)
+            {
+                return;
+            }
+
+            lock (forfeitVotes)
+            {
+                if (forfeitVotes.TryGetValue(team, out var yesSet)) yes = yesSet.Count(clientId => eligibleClientIds.Contains(clientId));
+                if (forfeitNoVotes.TryGetValue(team, out var noSet)) no = noSet.Count(clientId => eligibleClientIds.Contains(clientId));
+            }
+        }
+
+        private static void ClearForfeitVoteState()
+        {
+            lock (forfeitVotes)
+            {
+                forfeitVotes.Clear();
+                forfeitNoVotes.Clear();
+                forfeitActive = false;
+                forfeitStartTime = -999f;
+                forfeitTeam = TeamResult.Unknown;
+                forfeitEligibleSnapshot = null;
+            }
+        }
+
+        private static bool IsClientInSnapshot(IEnumerable<RankedParticipant> snapshot, ulong clientId)
+        {
+            return (snapshot ?? Enumerable.Empty<RankedParticipant>())
+                .Any(participant => participant != null && participant.clientId == clientId);
+        }
+
+        private static void CountSnapshotVotes(IEnumerable<RankedParticipant> snapshot, IReadOnlyDictionary<ulong, bool> votes, out int total, out int yes, out int no)
+        {
+            var eligibleClientIds = new HashSet<ulong>((snapshot ?? Enumerable.Empty<RankedParticipant>())
+                .Where(participant => participant != null && participant.clientId != 0)
+                .Select(participant => participant.clientId));
+
+            total = eligibleClientIds.Count;
+            yes = 0;
+            no = 0;
+
+            if (votes == null || eligibleClientIds.Count == 0)
+            {
+                return;
+            }
+
+            foreach (var vote in votes)
+            {
+                if (!eligibleClientIds.Contains(vote.Key)) continue;
+                if (vote.Value) yes++;
+                else no++;
+            }
         }
 
         public static void HandleRankedVoteStart(object player, ulong clientId)
@@ -701,44 +836,23 @@ namespace schrader.Server
                     if (rankedVoteActive) { SendSystemChatToClient("<size=14><color=#ffcc66>Ranked</color> vote already in progress.</size>", clientId); return; }
                     if (Time.unscaledTime - lastRankedVoteTime < rankedVoteCooldown) { SendSystemChatToClient("<size=14><color=#ff6666>Ranked</color> vote is on cooldown.</size>", clientId); return; }
 
-                    if (!TryGetEligiblePlayers(out var eligible, out var reason))
+                    if (!TryGetEligiblePlayersForStart(player, clientId, out var eligible, out var reason))
                     {
-                        if (allowSinglePlayerRanked)
-                        {
-                            // Fallback: allow the initiator as the single eligible participant for testing
-                            try
-                            {
-                                var pid = TryGetPlayerId(player, clientId);
-                                var forcedName = TryGetPlayerName(player) ?? $"Player {clientId}";
-                                eligible = new List<RankedParticipant>() { new RankedParticipant { clientId = clientId, playerId = pid, displayName = forcedName, team = TeamResult.Red } };
-                                Debug.Log($"[{Constants.MOD_NAME}] allowSinglePlayerRanked: forcing eligible list to initiator {forcedName} ({pid})");
-                            }
-                            catch { }
-                        }
-                        else
-                        {
-                            SendSystemChatToClient($"<size=14><color=#ff6666>Ranked</color> cannot start: {reason}</size>", clientId);
-                            return;
-                        }
+                        SendSystemChatToClient($"<size=14><color=#ff6666>Ranked</color> cannot start: {reason}</size>", clientId);
+                        return;
                     }
 
                     rankedVoteStartedByName = TryGetPlayerName(player) ?? "Player";
                     rankedVoteStartedByKey = ResolvePlayerObjectKey(player, clientId) ?? TryGetPlayerId(player, clientId) ?? $"clientId:{clientId}";
                     rankedVoteStartedByClientId = clientId;
-                    controlledRankedTestModeActive = false;
+                    controlledTestModeInitiatorKey = rankedVoteStartedByKey;
+                    controlledTestModeInitiatorClientId = clientId;
 
-                    if (testModeSinglePlayer && eligible != null && eligible.Count == 1)
+                    if (controlledTestModeEnabled)
                     {
-                        Debug.Log($"[{Constants.MOD_NAME}] Auto-start disabled");
-                        if (!TryInjectControlledTestBot(eligible, clientId))
-                        {
-                            rankedVoteStartedByKey = null;
-                            rankedVoteStartedByClientId = 0;
-                            SendSystemChatToClient("<size=14><color=#ff6666>Ranked</color> test mode bot injection failed.</size>", clientId);
-                            return;
-                        }
-
-                        controlledRankedTestModeActive = true;
+                        SendSystemChatToAll($"<size=14><color=#ffcc66>Ranked</color> controlled test mode enabled by {rankedVoteStartedByName}. Skipping the vote and starting the draft.</size>");
+                        StartRankedFromEligible(eligible, false);
+                        return;
                     }
 
                     rankedVoteActive = true;
@@ -746,17 +860,13 @@ namespace schrader.Server
                     lastVoteSecondsRemaining = Mathf.CeilToInt(rankedVoteDuration);
                     lastRankedVoteTime = rankedVoteStartTime;
                     rankedVotes.Clear();
-                    if (!controlledRankedTestModeActive)
-                    {
-                        rankedVotes[clientId] = true;
-                    }
+                    rankedVotes[clientId] = true;
 
-                    // Capture eligible at vote start so single-player/test mode can fall back later
+                    // Capture eligible at vote start so the vote can be finalized consistently.
                     lastVoteEligible = eligible?
                         .Select(CloneParticipant)
                         .Where(p => p != null)
                         .ToList();
-                    AutoAcceptBotVotes(lastVoteEligible);
 
                     var pname = rankedVoteStartedByName;
                     SendSystemChatToAll($"<size=14><color=#00ff00>Ranked vote started</color> by {pname}. Type <b>/y</b> to accept or <b>/n</b> to reject. ({Mathf.CeilToInt(rankedVoteDuration)}s)</size>");
@@ -772,16 +882,18 @@ namespace schrader.Server
             {
                 if (eligible == null || eligible.Count == 0) return false;
 
+                eligible = OrderParticipantsForDeterminism(eligible);
+
                 rankedVoteActive = false;
                 rankedVotes.Clear();
                 rankedVoteStartTime = -999f;
                 lastVoteSecondsRemaining = -1;
-                rankedVoteStartedByName = null;
+                lastVoteEligible = null;
 
                 PublishVoteOverlayState();
 
                 rankedActive = true;
-                rankedParticipants = eligible;
+                rankedParticipants = eligible.Select(CloneParticipant).Where(participant => participant != null).ToList();
                 lock (forfeitVotes)
                 {
                     forfeitVotes.Clear();
@@ -789,6 +901,7 @@ namespace schrader.Server
                     forfeitActive = false;
                     forfeitStartTime = -999f;
                     forfeitTeam = TeamResult.Unknown;
+                    forfeitEligibleSnapshot = null;
                 }
 
                 if (!TryStartCaptainDraft(eligible, forcedByAdmin))
@@ -797,6 +910,10 @@ namespace schrader.Server
                     ResetRankedState(true, true);
                     return false;
                 }
+
+                rankedVoteStartedByName = null;
+                rankedVoteStartedByKey = null;
+                rankedVoteStartedByClientId = 0;
 
                 return true;
             }
@@ -812,18 +929,28 @@ namespace schrader.Server
                 if (NetworkManager.Singleton == null || !NetworkManager.Singleton.IsServer) return;
                 if (!rankedVoteActive) { SendSystemChatToClient("<size=14>No ranked vote in progress.</size>", clientId); return; }
 
+                var eligible = ResolveCurrentVoteEligibleParticipants();
+                if (eligible == null || eligible.Count == 0)
+                {
+                    SendSystemChatToClient("<size=14><color=#ff6666>Ranked</color> vote snapshot is unavailable.</size>", clientId);
+                    return;
+                }
+
+                if (!IsClientInSnapshot(eligible, clientId))
+                {
+                    SendSystemChatToClient("<size=14><color=#ff6666>Ranked</color> you are not part of this vote.</size>", clientId);
+                    return;
+                }
+
                 rankedVotes[clientId] = accept;
                 PublishVoteOverlayState();
 
                 // If everyone voted yes, start immediately. Use captured eligible as fallback.
                 if (accept)
                 {
-                    var eligible = ResolveCurrentVoteEligibleParticipants();
                     if (eligible != null)
                     {
-                        var total = eligible.Count;
-                        var yes = 0;
-                        foreach (var kvp in rankedVotes) { if (kvp.Value) yes++; }
+                        CountSnapshotVotes(eligible, rankedVotes, out var total, out var yes, out _);
                         if (total > 0 && yes >= total) FinalizeRankedVote();
                     }
                 }
@@ -848,41 +975,21 @@ namespace schrader.Server
                 {
                     TryGetEligiblePlayers(out _, out var reason);
                     SendSystemChatToAll($"<size=14><color=#ff6666>Ranked</color> vote failed: {reason}</size>");
-                    if (controlledRankedTestModeActive) ResetRankedState(true, true);
                     return;
                 }
 
-                var total = eligible.Count; var yes = 0; var no = 0;
-                foreach (var kvp in rankedVotes) { if (kvp.Value) yes++; else no++; }
+                CountSnapshotVotes(eligible, rankedVotes, out var total, out var yes, out var no);
                 var requiredYes = (total / 2) + 1;
                 var timedOut = voteStartTime >= 0f && Time.unscaledTime - voteStartTime >= rankedVoteDuration;
                 if (yes >= requiredYes)
                 {
                     Debug.Log($"[{Constants.MOD_NAME}] Vote finished -> starting draft");
-                    rankedActive = true; rankedParticipants = eligible;
-                    lock (forfeitVotes)
-                    {
-                        forfeitVotes.Clear();
-                        forfeitNoVotes.Clear();
-                        forfeitActive = false;
-                        forfeitStartTime = -999f;
-                        forfeitTeam = TeamResult.Unknown;
-                    }
-                    if (!TryStartCaptainDraft(eligible, false))
-                    {
-                        SendSystemChatToAll("<size=14><color=#ff6666>Ranked</color> draft could not be started.</size>");
-                        ResetRankedState(true, true);
-                    }
+                    StartRankedFromEligible(eligible, false);
                 }
                 else
                 {
                     if (timedOut) SendSystemChatToAll("<size=14><color=#ff6666>Ranked</color> vote timed out: not enough votes.</size>");
                     else SendSystemChatToAll("<size=14><color=#ff6666>Ranked</color> vote failed.</size>");
-                    if (controlledRankedTestModeActive)
-                    {
-                        ResetRankedState(true, true);
-                        return;
-                    }
                 }
                 // clear captured eligible after vote finalizes
                 lastVoteEligible = null;
@@ -903,9 +1010,7 @@ namespace schrader.Server
 
                     var eligible = ResolveCurrentVoteEligibleParticipants();
 
-                    var total = eligible?.Count ?? 0;
-                    var yes = rankedVotes.Count(entry => entry.Value);
-                    var no = rankedVotes.Count(entry => !entry.Value);
+                    CountSnapshotVotes(eligible, rankedVotes, out var total, out var yes, out var no);
                     var requiredYes = total > 0 ? ((total / 2) + 1) : 1;
                     var secondsRemaining = Mathf.Max(0, Mathf.CeilToInt(rankedVoteDuration - (Time.unscaledTime - rankedVoteStartTime)));
 
@@ -2472,44 +2577,162 @@ namespace schrader.Server
             {
                 if (!rankedActive) return;
                 if (Time.unscaledTime - lastRankedEndTime < 1f) return;
-                lastRankedEndTime = Time.unscaledTime;
-
-                TeamResult winner = TeamResult.Unknown;
-
-                if (forfeitOverrideActive && forfeitOverrideWinner != TeamResult.Unknown)
+                var winner = ResolveBestRankedWinner(__instance, TeamResult.Unknown);
+                if (winner == TeamResult.Unknown)
                 {
-                    winner = forfeitOverrideWinner;
-                    forfeitOverrideActive = false;
-                    forfeitOverrideWinner = TeamResult.Unknown;
-                    Debug.Log($"[{Constants.MOD_NAME}] Winner overridden by forfeit: {winner}");
-                }
-                
-                // Try GameState scores first (most reliable)
-                if (winner == TeamResult.Unknown && TryGetScoresFromGameState(__instance, out var red, out var blue))
-                {
-                    if (red > blue) winner = TeamResult.Red;
-                    else if (blue > red) winner = TeamResult.Blue;
-                    Debug.Log($"[{Constants.MOD_NAME}] Winner from GameState scores: Red={red}, Blue={blue} -> {winner}");
-                }
-                
-                // Fallback to other detection methods
-                if (winner == TeamResult.Unknown && !TryGetWinnerTeam(__instance, out winner))
-                {
-                    Debug.LogError($"[{Constants.MOD_NAME}] RankedMatchEnd no pudo detectar ganador; contexto: {__instance?.GetType().FullName ?? "null"}");
+                    Debug.LogError($"[{Constants.MOD_NAME}] RankedMatchEnd could not detect a winner; treating the result as a draw.");
                     LogWinnerCandidateValues("RankedMatchEnd context", __instance);
                     LogManagerWinnerCandidates();
-                    SendSystemChatToAll("<size=14><color=#ff6666>Ranked</color> ended, but winner was not detected. MMR unchanged.</size>");
-                    ResetGoalCounts();
-                    rankedActive = false; rankedParticipants.Clear(); return;
                 }
 
-                ApplyRankedResults(winner);
-                ResetGoalCounts();
+                EndMatch(winner, requestRuntimeEnd: false, forceRequestedWinner: true);
             }
             catch { }
         }
 
+        public static bool EndMatch(TeamResult requestedWinner, bool requestRuntimeEnd, bool forceRequestedWinner)
+        {
+            try
+            {
+                lock (matchEndLock)
+                {
+                    if (!rankedActive || rankedMatchEnding)
+                    {
+                        return false;
+                    }
+
+                    rankedMatchEnding = true;
+                    lastRankedEndTime = Time.unscaledTime;
+                }
+
+                var resolvedWinner = forceRequestedWinner
+                    ? requestedWinner
+                    : ResolveBestRankedWinner(null, requestedWinner);
+                if (resolvedWinner == TeamResult.Unknown && requestedWinner != TeamResult.Unknown)
+                {
+                    resolvedWinner = requestedWinner;
+                }
+
+                if (requestRuntimeEnd && !TryEndMatch())
+                {
+                    Debug.LogWarning($"[{Constants.MOD_NAME}] EndMatch could not trigger the runtime game-over path. Applying ranked results directly.");
+                }
+
+                FinalizeRankedMatchEnd(resolvedWinner);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[{Constants.MOD_NAME}] EndMatch failed: {ex.Message}");
+                return false;
+            }
+            finally
+            {
+                lock (matchEndLock)
+                {
+                    rankedMatchEnding = false;
+                }
+            }
+        }
+
+        private static TeamResult ResolveBestRankedWinner(object context, TeamResult fallbackWinner)
+        {
+            try
+            {
+                if (fallbackWinner != TeamResult.Unknown)
+                {
+                    return fallbackWinner;
+                }
+
+                if (TryGetWinnerTeam(context, out var winner) && winner != TeamResult.Unknown)
+                {
+                    return winner;
+                }
+            }
+            catch { }
+
+            return TeamResult.Unknown;
+        }
+
+        private static void FinalizeRankedMatchEnd(TeamResult winner)
+        {
+            ClearForfeitVoteState();
+            ApplyRankedResults(winner);
+        }
+
         #endif
+
+        public static bool EndMatch(TeamResult requestedWinner, bool requestRuntimeEnd, bool forceRequestedWinner)
+        {
+            try
+            {
+                Debug.Log($"[{Constants.MOD_NAME}] EndMatch called. requestedWinner={requestedWinner} requestRuntimeEnd={requestRuntimeEnd} forceRequestedWinner={forceRequestedWinner}");
+
+                lock (matchEndLock)
+                {
+                    if (!rankedActive || rankedMatchEnding)
+                    {
+                        return false;
+                    }
+
+                    rankedMatchEnding = true;
+                    lastRankedEndTime = Time.unscaledTime;
+                }
+
+                var resolvedWinner = forceRequestedWinner
+                    ? requestedWinner
+                    : ResolveBestRankedWinner(requestedWinner);
+                if (resolvedWinner == TeamResult.Unknown && requestedWinner != TeamResult.Unknown)
+                {
+                    resolvedWinner = requestedWinner;
+                }
+
+                if (requestRuntimeEnd && !TryEndMatch())
+                {
+                    Debug.LogWarning($"[{Constants.MOD_NAME}] EndMatch could not trigger the runtime game-over path. Applying ranked results directly.");
+                }
+
+                FinalizeRankedMatchEnd(resolvedWinner);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[{Constants.MOD_NAME}] EndMatch failed: {ex.Message}");
+                return false;
+            }
+            finally
+            {
+                lock (matchEndLock)
+                {
+                    rankedMatchEnding = false;
+                }
+            }
+        }
+
+        private static TeamResult ResolveBestRankedWinner(TeamResult fallbackWinner)
+        {
+            try
+            {
+                if (fallbackWinner != TeamResult.Unknown)
+                {
+                    return fallbackWinner;
+                }
+
+                if (TryGetWinnerTeam(null, out var winner) && winner != TeamResult.Unknown)
+                {
+                    return winner;
+                }
+            }
+            catch { }
+
+            return TeamResult.Unknown;
+        }
+
+        private static void FinalizeRankedMatchEnd(TeamResult winner)
+        {
+            ClearForfeitVoteState();
+            ApplyRankedResults(winner);
+        }
 
         public static void HandleForfeitVote(object player, ulong clientId)
         {
@@ -2541,11 +2764,19 @@ namespace schrader.Server
                 {
                     if (!forfeitActive)
                     {
+                        var snapshot = CaptureForfeitEligibleParticipants(team);
+                        if (snapshot == null || snapshot.Count == 0 || !IsClientInSnapshot(snapshot, clientId))
+                        {
+                            SendSystemChatToClient("<size=13><color=#ff6666>Forfeit</color> no eligible teammates were found for this vote.</size>", clientId);
+                            return;
+                        }
+
                         forfeitActive = true;
                         forfeitStartTime = Time.unscaledTime;
                         forfeitTeam = team;
                         forfeitVotes.Clear();
                         forfeitNoVotes.Clear();
+                        forfeitEligibleSnapshot = snapshot;
                     }
                     else if (forfeitTeam != TeamResult.Unknown && team != forfeitTeam)
                     {
@@ -2559,11 +2790,14 @@ namespace schrader.Server
                     }
 
                     if (!forfeitVotes.TryGetValue(team, out var set)) { set = new HashSet<ulong>(); forfeitVotes[team] = set; }
+                    set.Add(clientId);
+                    if (forfeitNoVotes.TryGetValue(team, out var noSet)) noSet.Remove(clientId);
                 }
 
                 var pname = TryGetPlayerName(player) ?? $"Player {clientId}";
-                SendSystemChatToAll($"<size=14><color=#ffcc66>Forfeit</color> vote started by {pname}. Use <b>/y</b> or <b>/n</b>. ({Mathf.CeilToInt(forfeitDuration)}s)</size>");
+                SendSystemChatToAll($"<size=14><color=#ffcc66>Forfeit</color> vote started by {pname}. Their vote was counted as <b>yes</b>. Use <b>/y</b> or <b>/n</b>. ({Mathf.CeilToInt(forfeitDuration)}s)</size>");
                 BroadcastForfeitVoteCount(team);
+                TryFinalizeForfeitIfAllVoted(team);
             }
             catch { }
         }
@@ -2584,6 +2818,20 @@ namespace schrader.Server
                 if (forfeitTeam != TeamResult.Unknown && team != forfeitTeam)
                 {
                     SendSystemChatToClient("<size=13>Only the team that started the forfeit can vote.</size>", clientId);
+                    return;
+                }
+
+                var snapshot = ResolveCurrentForfeitEligibleParticipants();
+                if (snapshot == null || snapshot.Count == 0)
+                {
+                    SendSystemChatToClient("<size=13><color=#ff6666>Forfeit</color> vote snapshot is unavailable.</size>", clientId);
+                    ClearForfeitVoteState();
+                    return;
+                }
+
+                if (!IsClientInSnapshot(snapshot, clientId))
+                {
+                    SendSystemChatToClient("<size=13><color=#ff6666>Forfeit</color> you are not part of this forfeit vote.</size>", clientId);
                     return;
                 }
 
@@ -2650,88 +2898,47 @@ namespace schrader.Server
 
         private static void BroadcastForfeitVoteCount(TeamResult team)
         {
-            var teamCount = GetForfeitTeamCount(team);
-            int yesVotes = 0; int noVotes = 0;
-            lock (forfeitVotes)
+            var snapshot = ResolveCurrentForfeitEligibleParticipants();
+            if (snapshot == null || snapshot.Count == 0)
             {
-                if (forfeitVotes.TryGetValue(team, out var yesSet)) yesVotes = yesSet.Count;
-                if (forfeitNoVotes.TryGetValue(team, out var noSet)) noVotes = noSet.Count;
+                SendSystemChatToAll("<size=14><color=#ffcc66>Forfeit</color> vote: snapshot unavailable.</size>");
+                return;
             }
-            SendSystemChatToAll($"<size=14><color=#ffcc66>Forfeit</color> vote: {yesVotes} yes / {noVotes} no (total {yesVotes + noVotes}/{Math.Max(1, teamCount)})</size>");
-        }
 
-        private static int GetForfeitTeamCount(TeamResult team)
-        {
-            int teamCount = 0;
-            try
-            {
-                if (TryGetPlayerManager(out var manager))
-                {
-                    var enumType = FindTypeByName("PlayerTeam", "Puck.PlayerTeam");
-                    if (enumType != null)
-                    {
-                        var managerType = manager.GetType();
-                        var getPlayersByTeam = managerType.GetMethod("GetPlayersByTeam", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
-                        var getSpawnedPlayersByTeam = managerType.GetMethod("GetSpawnedPlayersByTeam", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
-                        var enumValue = Enum.Parse(enumType, team == TeamResult.Red ? "Red" : "Blue", true);
-
-                        System.Collections.IEnumerable list = null;
-                        if (getPlayersByTeam != null)
-                        {
-                            list = getPlayersByTeam.Invoke(manager, new object[] { enumValue, true }) as System.Collections.IEnumerable;
-                        }
-                        if (list == null && getSpawnedPlayersByTeam != null)
-                        {
-                            list = getSpawnedPlayersByTeam.Invoke(manager, new object[] { enumValue, true }) as System.Collections.IEnumerable;
-                        }
-                        if (list != null)
-                        {
-                            foreach (var _ in list) teamCount++;
-                            if (teamCount > 0) return teamCount;
-                        }
-                    }
-                }
-            }
-            catch { }
-
-            var players = GetAllPlayers();
-            foreach (var p in players) { if (TryGetPlayerTeam(p, out var t) && t == team) teamCount++; }
-            return teamCount;
+            CountForfeitVotes(team, snapshot, out var total, out var yesVotes, out var noVotes);
+            SendSystemChatToAll($"<size=14><color=#ffcc66>Forfeit</color> vote: {yesVotes} yes / {noVotes} no (total {yesVotes + noVotes}/{Math.Max(1, total)})</size>");
         }
 
         private static void TryFinalizeForfeitIfAllVoted(TeamResult team)
         {
-            var teamCount = GetForfeitTeamCount(team);
-            int yesVotes = 0; int noVotes = 0;
-            lock (forfeitVotes)
+            var snapshot = ResolveCurrentForfeitEligibleParticipants();
+            if (snapshot == null || snapshot.Count == 0)
             {
-                if (forfeitVotes.TryGetValue(team, out var yesSet)) yesVotes = yesSet.Count;
-                if (forfeitNoVotes.TryGetValue(team, out var noSet)) noVotes = noSet.Count;
-            }
-            if (teamCount <= 0) teamCount = Math.Max(1, yesVotes + noVotes);
-            if (yesVotes + noVotes < teamCount) return;
-
-            var requiredYes = (teamCount / 2) + 1;
-            if (yesVotes >= requiredYes)
-            {
-                var winner = team == TeamResult.Red ? TeamResult.Blue : TeamResult.Red;
-                SendSystemChatToAll($"<size=14><color=#ff6666>Forfeit</color> vote passed. {winner} wins the match.</size>");
-                forfeitOverrideActive = true;
-                forfeitOverrideWinner = winner;
-                if (!TryEndMatch())
-                {
-                    ApplyRankedResults(winner);
-                    ResetGoalCounts();
-                }
-                rankedVoteActive = false;
-                lastRankedVoteTime = -999f;
+                ClearForfeitVoteState();
                 return;
             }
 
+            CountForfeitVotes(team, snapshot, out var total, out var yesVotes, out var noVotes);
+            if (total <= 0)
+            {
+                ClearForfeitVoteState();
+                return;
+            }
+
+            var requiredYes = (total / 2) + 1;
+            if (yesVotes >= requiredYes)
+            {
+                var winner = team == TeamResult.Red ? TeamResult.Blue : TeamResult.Red;
+                ClearForfeitVoteState();
+                SendSystemChatToAll($"<size=14><color=#ff6666>Forfeit</color> vote passed. {winner} wins the match.</size>");
+                EndMatch(winner, requestRuntimeEnd: true, forceRequestedWinner: true);
+                return;
+            }
+
+            if (yesVotes + noVotes < total && noVotes <= total - requiredYes) return;
+
+            ClearForfeitVoteState();
             SendSystemChatToAll("<size=14><color=#ff6666>Forfeit</color> vote failed.</size>");
-            lock (forfeitVotes) { forfeitVotes.Clear(); forfeitNoVotes.Clear(); forfeitActive = false; forfeitStartTime = -999f; forfeitTeam = TeamResult.Unknown; }
-            rankedVoteActive = false;
-            lastRankedVoteTime = -999f;
         }
 
         private static void ProcessForfeitVotes()
@@ -2741,49 +2948,29 @@ namespace schrader.Server
                 if (!forfeitActive) return;
                 if (Time.unscaledTime - forfeitStartTime < forfeitDuration) return;
 
-                // Evaluate votes for each team
-                lock (forfeitVotes)
+                var team = forfeitTeam;
+                var snapshot = ResolveCurrentForfeitEligibleParticipants();
+                if (team == TeamResult.Unknown || snapshot == null || snapshot.Count == 0)
                 {
-                    if (forfeitTeam == TeamResult.Unknown || !forfeitVotes.TryGetValue(forfeitTeam, out var set))
-                    {
-                        forfeitVotes.Clear(); forfeitNoVotes.Clear(); forfeitActive = false; forfeitStartTime = -999f; forfeitTeam = TeamResult.Unknown;
-                        return;
-                    }
-
-                    var teamCount = GetForfeitTeamCount(forfeitTeam);
-                    var requiredYes = (teamCount / 2) + 1;
-                    var yesVotes = set.Count;
-                    var noVotes = 0;
-                    if (forfeitNoVotes.TryGetValue(forfeitTeam, out var noSet)) noVotes = noSet.Count;
-
-                    if (teamCount > 0 && yesVotes + noVotes >= teamCount)
-                    {
-                        if (yesVotes >= requiredYes)
-                        {
-                            var winner = forfeitTeam == TeamResult.Red ? TeamResult.Blue : TeamResult.Red;
-                            SendSystemChatToAll($"<size=14><color=#ff6666>Forfeit</color> vote passed. {winner} wins the match.</size>");
-                            forfeitOverrideActive = true;
-                            forfeitOverrideWinner = winner;
-                            if (!TryEndMatch())
-                            {
-                                ApplyRankedResults(winner);
-                                ResetGoalCounts();
-                            }
-                            rankedVoteActive = false;
-                            lastRankedVoteTime = -999f;
-                            return;
-                        }
-                        SendSystemChatToAll("<size=14><color=#ff6666>Forfeit</color> vote failed.</size>");
-                        forfeitVotes.Clear(); forfeitNoVotes.Clear(); forfeitActive = false; forfeitStartTime = -999f; forfeitTeam = TeamResult.Unknown;
-                        rankedVoteActive = false;
-                        lastRankedVoteTime = -999f;
-                        return;
-                    }
+                    ClearForfeitVoteState();
+                    return;
                 }
 
-                // No successful forfeit
-                SendSystemChatToAll("<size=14><color=#ff6666>Forfeit</color> vote failed.</size>");
-                lock (forfeitVotes) { forfeitVotes.Clear(); forfeitActive = false; forfeitStartTime = -999f; forfeitTeam = TeamResult.Unknown; }
+                CountForfeitVotes(team, snapshot, out var total, out var yesVotes, out var noVotes);
+                var requiredYes = (total / 2) + 1;
+                if (yesVotes >= requiredYes)
+                {
+                    var winner = team == TeamResult.Red ? TeamResult.Blue : TeamResult.Red;
+                    ClearForfeitVoteState();
+                    SendSystemChatToAll($"<size=14><color=#ff6666>Forfeit</color> vote passed. {winner} wins the match.</size>");
+                    EndMatch(winner, requestRuntimeEnd: true, forceRequestedWinner: true);
+                    return;
+                }
+
+                ClearForfeitVoteState();
+                SendSystemChatToAll(total > 0 && yesVotes + noVotes < total
+                    ? "<size=14><color=#ff6666>Forfeit</color> vote timed out.</size>"
+                    : "<size=14><color=#ff6666>Forfeit</color> vote failed.</size>");
             }
             catch { }
         }
@@ -3211,6 +3398,7 @@ namespace schrader.Server
                 forfeitActive = false;
                 forfeitStartTime = -999f;
                 forfeitTeam = TeamResult.Unknown;
+                forfeitEligibleSnapshot = null;
             }
             lock (phaseLock)
             {
@@ -3222,9 +3410,12 @@ namespace schrader.Server
             }
         }
 
-        private static void ResetRankedState(bool keepPhaseState, bool keepRankedVoteCooldown)
+        private static void ResetRankedState(bool keepPhaseState, bool keepRankedVoteCooldown, bool preservePostMatchLock = false)
         {
-            ClearPostMatchLockState();
+            if (!preservePostMatchLock)
+            {
+                ClearPostMatchLockState();
+            }
 
             lock (rankedLock)
             {
@@ -3234,12 +3425,16 @@ namespace schrader.Server
                 rankedVoteStartedByName = null;
                 rankedVoteStartedByKey = null;
                 rankedVoteStartedByClientId = 0;
-                controlledRankedTestModeActive = false;
                 rankedParticipants.Clear();
                 rankedVotes.Clear();
                 lastVoteEligible = null;
                 lastVoteSecondsRemaining = -1;
                 if (!keepRankedVoteCooldown) lastRankedVoteTime = -999f;
+            }
+
+            lock (matchEndLock)
+            {
+                rankedMatchEnding = false;
             }
 
             lock (forfeitVotes)
@@ -3249,11 +3444,12 @@ namespace schrader.Server
                 forfeitActive = false;
                 forfeitStartTime = -999f;
                 forfeitTeam = TeamResult.Unknown;
+                forfeitEligibleSnapshot = null;
             }
 
-            forfeitOverrideActive = false;
-            forfeitOverrideWinner = TeamResult.Unknown;
             rankedNoMatchDetectedTime = -999f;
+            controlledTestModeInitiatorKey = null;
+            controlledTestModeInitiatorClientId = 0;
 
             lock (goalLock)
             {
@@ -3296,6 +3492,11 @@ namespace schrader.Server
                 rejectedLateJoinTeams.Clear();
             }
 
+            lock (joinStateLock)
+            {
+                joinStateByPlayerKey.Clear();
+            }
+
             PublishHiddenApprovalStateToAllClients();
 
             ResetDraftAnnouncementState();
@@ -3304,6 +3505,7 @@ namespace schrader.Server
             PublishDraftOverlayState();
 
             ClearAllDummies();
+            BotManager.RemoveAllBots();
 
             if (!keepPhaseState)
             {
@@ -4720,15 +4922,9 @@ namespace schrader.Server
                         : $"<color=#ffef9a>Available Count:</color> {draftAvailablePlayerIds.Count}";
 
                     var pendingLine = $"<color=#ffef9a>Late Joiners:</color> {pendingCount}";
-                    var dummyLine = rankedParticipants.Any(IsDummyParticipant)
-                        ? "\n<size=12><color=#cccc66>Dummy Mode:</color> Logical dummies are present in this draft.</size>"
-                        : string.Empty;
-                    var controlledManualHold = controlledRankedTestModeActive && draftActive && draftAvailablePlayerIds.Count == 0;
                     var guidanceLine = completed
                         ? "<size=12><color=#dddddd>Match is ready to start.</color></size>"
-                        : controlledManualHold
-                            ? "<size=12><color=#dddddd>Auto-start is disabled for test mode. Draft remains open for manual inspection.</color></size>"
-                            : "<size=12><color=#dddddd>Use /pick player. Scoreboard click remains available where supported.</color></size>";
+                        : "<size=12><color=#dddddd>Use /pick player. Scoreboard click remains available where supported.</color></size>";
 
                     return
                         "<size=15><b><color=#f2f2f2>RANKED DRAFT</color></b></size>\n"
@@ -4737,7 +4933,7 @@ namespace schrader.Server
                         + $"<size=13><color=#66b3ff>BLUE Captain:</color> <b>{blueCaptainName}</b></size>\n"
                         + $"<size=13>{statusLine}</size>\n"
                         + $"<size=13>{availableLine}</size>\n"
-                        + $"<size=13>{pendingLine}</size>{dummyLine}\n"
+                        + $"<size=13>{pendingLine}</size>\n"
                         + guidanceLine;
                 }
             }
@@ -5245,30 +5441,72 @@ namespace schrader.Server
             return storedId;
         }
 
-        // For a RankedParticipant, prefer SteamID key when available
-        private static string ResolveParticipantIdToKey(RankedParticipant p)
+        private static string GetPlayerKey(object player, ulong clientId = 0)
         {
             try
             {
-                if (p == null) return null;
-                if (!string.IsNullOrEmpty(p.playerId) && !p.playerId.StartsWith("clientId:")) return p.playerId;
-                // try to find connected player by clientId and get their SteamID
-                var players = GetAllPlayers();
-                foreach (var pl in players)
+                var resolvedKey = ResolvePlayerObjectKey(player, clientId);
+                if (!string.IsNullOrWhiteSpace(resolvedKey))
                 {
-                    try
-                    {
-                        if (TryGetClientId(pl, out var cid) && cid == p.clientId)
-                        {
-                            var sid = TryGetPlayerId(pl, cid);
-                            if (!string.IsNullOrEmpty(sid)) return sid;
-                        }
-                    }
-                    catch { }
+                    return ResolveStoredIdToSteam(resolvedKey);
                 }
-                return p.playerId;
+
+                if (clientId != 0)
+                {
+                    return $"clientId:{clientId}";
+                }
             }
-            catch { return p?.playerId; }
+            catch { }
+
+            return null;
+        }
+
+        private static string GetPlayerKey(RankedParticipant participant)
+        {
+            try
+            {
+                if (participant == null)
+                {
+                    return null;
+                }
+
+                if (!string.IsNullOrWhiteSpace(participant.playerId) && !participant.playerId.StartsWith("clientId:", StringComparison.OrdinalIgnoreCase))
+                {
+                    return participant.playerId;
+                }
+
+                if (participant.clientId != 0)
+                {
+                    foreach (var player in GetAllPlayers())
+                    {
+                        try
+                        {
+                            if (TryGetClientId(player, out var liveClientId) && liveClientId == participant.clientId)
+                            {
+                                return GetPlayerKey(player, liveClientId) ?? participant.playerId;
+                            }
+                        }
+                        catch { }
+                    }
+                }
+
+                if (!string.IsNullOrWhiteSpace(participant.playerId))
+                {
+                    return ResolveStoredIdToSteam(participant.playerId);
+                }
+
+                return participant.clientId != 0 ? $"clientId:{participant.clientId}" : null;
+            }
+            catch
+            {
+                return participant?.playerId;
+            }
+        }
+
+        // For a RankedParticipant, prefer SteamID key when available
+        private static string ResolveParticipantIdToKey(RankedParticipant p)
+        {
+            return GetPlayerKey(p);
         }
 
         public static bool TryGetEligiblePlayers(out List<RankedParticipant> eligible, out string reason)
@@ -5308,11 +5546,6 @@ namespace schrader.Server
             var redCount = eligible.Count(p => p.team == TeamResult.Red);
             var blueCount = eligible.Count(p => p.team == TeamResult.Blue);
 
-            if (allowSinglePlayerRanked && eligible.Count == 1)
-            {
-                reason = null;
-                return true;
-            }
             if (redCount < 1 || blueCount < 1) { reason = "need at least 1 red and 1 blue (non-goalie)"; return false; }
             if (eligible.Count < 2) { reason = "need at least 2 non-goalie players"; return false; }
             reason = null; return true;
@@ -5338,6 +5571,11 @@ namespace schrader.Server
                 }
 
                 var isBotPlayer = BotManager.TryGetBotIdByClientId(clientId, out var botKey);
+                if (isBotPlayer)
+                {
+                    reason = "bots cannot play ranked";
+                    return false;
+                }
 
                 if (TryIsGoalie(player, out var isGoalie) && isGoalie)
                 {
@@ -5441,17 +5679,35 @@ namespace schrader.Server
                         if (wrap != null)
                         {
                             var wrapped = wrap.Invoke(chat, new object[] { player }) as string;
-                            var clean = StripRichTextTags(wrapped);
+                            var clean = NormalizeVisiblePlayerName(wrapped);
                             if (!string.IsNullOrWhiteSpace(clean)) return clean;
                         }
                     }
                 }
                 catch { }
 
-                var t = player.GetType(); string[] propNames = { "Name", "PlayerName", "playerName", "steamName", "DisplayName" };
-                foreach (var pn in propNames) { var prop = t.GetProperty(pn, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance); if (prop != null && prop.PropertyType == typeof(string)) { var val = prop.GetValue(player) as string; if (!string.IsNullOrWhiteSpace(val)) return val; } }
-                foreach (var fn in propNames) { var field = t.GetField(fn, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic); if (field != null && field.FieldType == typeof(string)) { var val = field.GetValue(player) as string; if (!string.IsNullOrWhiteSpace(val)) return val; } }
-                if (player is Component comp) { if (!string.IsNullOrWhiteSpace(comp.name)) return comp.name; }
+                var t = player.GetType(); string[] propNames = { "Name", "PlayerName", "playerName", "steamName", "DisplayName", "Username", "username", "UserName", "Nickname", "NickName" };
+                foreach (var pn in propNames)
+                {
+                    var prop = t.GetProperty(pn, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                    if (prop == null || prop.PropertyType != typeof(string)) continue;
+                    var clean = NormalizeVisiblePlayerName(prop.GetValue(player) as string);
+                    if (!string.IsNullOrWhiteSpace(clean)) return clean;
+                }
+
+                foreach (var fn in propNames)
+                {
+                    var field = t.GetField(fn, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                    if (field == null || field.FieldType != typeof(string)) continue;
+                    var clean = NormalizeVisiblePlayerName(field.GetValue(player) as string);
+                    if (!string.IsNullOrWhiteSpace(clean)) return clean;
+                }
+
+                if (player is Component comp)
+                {
+                    var clean = NormalizeVisiblePlayerName(comp.name);
+                    if (!string.IsNullOrWhiteSpace(clean)) return clean;
+                }
             }
             catch { }
             return null;
@@ -5469,6 +5725,17 @@ namespace schrader.Server
                 if (!inside) sb.Append(c);
             }
             return sb.ToString();
+        }
+
+        private static string NormalizeVisiblePlayerName(string candidate)
+        {
+            var clean = StripRichTextTags(candidate)?.Trim();
+            if (string.IsNullOrWhiteSpace(clean))
+            {
+                return null;
+            }
+
+            return LooksLikeIdentityKey(clean) ? null : clean;
         }
 
         
@@ -5639,15 +5906,9 @@ namespace schrader.Server
         {
             try
             {
-                lock (rankedLock)
+                if (!StartRankedFromEligible(participants, true))
                 {
-                    rankedActive = true;
-                    rankedParticipants = participants ?? new List<RankedParticipant>();
-                    if (!TryStartCaptainDraft(rankedParticipants, true))
-                    {
-                        SendSystemChatToAll("<size=14><color=#ff6666>Ranked</color> admin start failed: could not initialize the captain draft.</size>");
-                        ResetRankedState(true, false);
-                    }
+                    SendSystemChatToAll("<size=14><color=#ff6666>Ranked</color> admin start failed: could not initialize the captain draft.</size>");
                 }
             }
             catch { }

@@ -9,6 +9,7 @@ namespace schrader
 {
     internal static class RankedOverlayNetwork
     {
+        private const NetworkDelivery MatchResultDelivery = NetworkDelivery.ReliableFragmentedSequenced;
         private static readonly Dictionary<ulong, string> lastApprovalRequestSignatureByClient = new Dictionary<ulong, string>();
         private static string lastDraftSignature;
         private static string lastDraftExtendedSignature;
@@ -65,35 +66,39 @@ namespace schrader
         public static void PublishDraftState(Server.RankedSystem.DraftOverlayState state)
         {
             var message = ToDraftMessage(state);
+            var extendedMessage = ToDraftExtendedMessage(state);
+            var extendedSignature = BuildDraftExtendedSignature(extendedMessage);
             var signature = BuildDraftSignature(message);
-            if (!string.Equals(signature, lastDraftSignature, StringComparison.Ordinal))
+            var shouldBroadcastExtended = !string.Equals(extendedSignature, lastDraftExtendedSignature, StringComparison.Ordinal);
+            var shouldBroadcastBasic = !string.Equals(signature, lastDraftSignature, StringComparison.Ordinal);
+
+            if (shouldBroadcastExtended)
+            {
+                lastDraftExtendedSignature = extendedSignature;
+                Broadcast(RankedOverlayChannels.DraftStateExtended, extendedMessage);
+            }
+
+            if (shouldBroadcastBasic)
             {
                 lastDraftSignature = signature;
                 Broadcast(RankedOverlayChannels.DraftState, message);
             }
-
-            var extendedMessage = ToDraftExtendedMessage(state);
-            var extendedSignature = BuildDraftExtendedSignature(extendedMessage);
-            if (string.Equals(extendedSignature, lastDraftExtendedSignature, StringComparison.Ordinal)) return;
-
-            lastDraftExtendedSignature = extendedSignature;
-            Broadcast(RankedOverlayChannels.DraftStateExtended, extendedMessage);
         }
 
         public static void PublishDraftStateToClient(ulong clientId, Server.RankedSystem.DraftOverlayState state)
         {
-            SendToClient(RankedOverlayChannels.DraftState, ToDraftMessage(state), clientId);
             SendToClient(RankedOverlayChannels.DraftStateExtended, ToDraftExtendedMessage(state), clientId);
+            SendToClient(RankedOverlayChannels.DraftState, ToDraftMessage(state), clientId);
         }
 
         public static void PublishMatchResult(MatchResultMessage state)
         {
-            Broadcast(RankedOverlayChannels.MatchResult, state ?? MatchResultMessage.Hidden());
+            BroadcastReliable(RankedOverlayChannels.MatchResult, state ?? MatchResultMessage.Hidden(), MatchResultDelivery);
         }
 
         public static void PublishMatchResultToClient(ulong clientId, MatchResultMessage state)
         {
-            SendToClient(RankedOverlayChannels.MatchResult, state ?? MatchResultMessage.Hidden(), clientId);
+            SendToClientReliable(RankedOverlayChannels.MatchResult, state ?? MatchResultMessage.Hidden(), clientId, MatchResultDelivery);
         }
 
         public static void PublishApprovalRequestStateToClient(ulong clientId, ApprovalRequestStateMessage state)
@@ -108,6 +113,14 @@ namespace schrader
 
             lastApprovalRequestSignatureByClient[clientId] = signature;
             SendToClient(RankedOverlayChannels.ApprovalRequestState, message, clientId);
+        }
+
+        public static void PublishDiscordInviteOpenToClient(ulong clientId, string url = null)
+        {
+            SendToClient(RankedOverlayChannels.DiscordInviteOpen, new OpenDiscordInviteMessage
+            {
+                Url = string.IsNullOrWhiteSpace(url) ? Constants.DISCORD_INVITE_URL : url
+            }, clientId);
         }
 
         public static void ResyncClient(ulong clientId)
@@ -156,6 +169,24 @@ namespace schrader
             }
         }
 
+        private static void BroadcastReliable<T>(string messageName, T message, NetworkDelivery delivery)
+        {
+            var manager = GetMessagingManager();
+            if (manager == null) return;
+
+            var capacity = RankedOverlayNetcode.EstimateCapacity(message);
+            var writer = new FastBufferWriter(capacity, Allocator.Temp);
+            try
+            {
+                RankedOverlayNetcode.WriteJson(ref writer, message);
+                manager.SendNamedMessageToAll(messageName, writer, delivery);
+            }
+            finally
+            {
+                writer.Dispose();
+            }
+        }
+
         private static void SendToClient<T>(string messageName, T message, ulong clientId)
         {
             var manager = GetMessagingManager();
@@ -167,6 +198,24 @@ namespace schrader
             {
                 RankedOverlayNetcode.WriteJson(ref writer, message);
                 manager.SendNamedMessage(messageName, clientId, writer);
+            }
+            finally
+            {
+                writer.Dispose();
+            }
+        }
+
+        private static void SendToClientReliable<T>(string messageName, T message, ulong clientId, NetworkDelivery delivery)
+        {
+            var manager = GetMessagingManager();
+            if (manager == null) return;
+
+            var capacity = RankedOverlayNetcode.EstimateCapacity(message);
+            var writer = new FastBufferWriter(capacity, Allocator.Temp);
+            try
+            {
+                RankedOverlayNetcode.WriteJson(ref writer, message);
+                manager.SendNamedMessage(messageName, clientId, writer, delivery);
             }
             finally
             {
@@ -283,6 +332,7 @@ namespace schrader
             return string.Join("~",
                 entry.CommandTarget ?? string.Empty,
                 entry.DisplayName ?? string.Empty,
+                entry.PlayerNumber,
                 entry.HasMmr,
                 entry.Mmr,
                 entry.IsCaptain,

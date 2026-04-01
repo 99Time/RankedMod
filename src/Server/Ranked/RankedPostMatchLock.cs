@@ -12,7 +12,9 @@ namespace schrader.Server
         private static readonly object postMatchLock = new object();
         private static bool postMatchLockActive;
         private static float postMatchLockStartedAt = -999f;
+        private static float lastPostMatchResultBroadcastAt = -999f;
         private const float PostMatchLockTimeout = 90f;
+        private const float PostMatchResultRebroadcastInterval = 1.5f;
         private static MatchResultMessage activeMatchResultState = MatchResultMessage.Hidden();
         private static readonly HashSet<ulong> pendingPostMatchDismissClientIds = new HashSet<ulong>();
         private static readonly Dictionary<ulong, string> deferredPostMatchPositionStates = new Dictionary<ulong, string>();
@@ -33,6 +35,7 @@ namespace schrader.Server
             {
                 postMatchLockActive = pendingClientIds.Count > 0;
                 postMatchLockStartedAt = postMatchLockActive ? Time.unscaledTime : -999f;
+                lastPostMatchResultBroadcastAt = postMatchLockActive ? Time.unscaledTime : -999f;
                 activeMatchResultState = matchResult;
                 pendingPostMatchDismissClientIds.Clear();
                 pendingPostMatchDismissClientIds.UnionWith(pendingClientIds);
@@ -100,6 +103,8 @@ namespace schrader.Server
             {
                 bool shouldFinalize;
                 string finalizeReason;
+                MatchResultMessage rebroadcastState = null;
+                ulong[] rebroadcastClientIds = null;
 
                 lock (postMatchLock)
                 {
@@ -123,6 +128,25 @@ namespace schrader.Server
                     {
                         shouldFinalize = false;
                         finalizeReason = null;
+
+                        if (activeMatchResultState != null
+                            && activeMatchResultState.IsVisible
+                            && pendingPostMatchDismissClientIds.Count > 0
+                            && lastPostMatchResultBroadcastAt >= 0f
+                            && Time.unscaledTime - lastPostMatchResultBroadcastAt >= PostMatchResultRebroadcastInterval)
+                        {
+                            rebroadcastState = activeMatchResultState;
+                            rebroadcastClientIds = pendingPostMatchDismissClientIds.ToArray();
+                            lastPostMatchResultBroadcastAt = Time.unscaledTime;
+                        }
+                    }
+                }
+
+                if (rebroadcastState != null && rebroadcastClientIds != null)
+                {
+                    foreach (var clientId in rebroadcastClientIds)
+                    {
+                        RankedOverlayNetwork.PublishMatchResultToClient(clientId, rebroadcastState);
                     }
                 }
 
@@ -299,6 +323,7 @@ namespace schrader.Server
         {
             postMatchLockActive = false;
             postMatchLockStartedAt = -999f;
+            lastPostMatchResultBroadcastAt = -999f;
             activeMatchResultState = MatchResultMessage.Hidden();
             pendingPostMatchDismissClientIds.Clear();
             deferredPostMatchPositionStates.Clear();

@@ -8,8 +8,19 @@ namespace schrader.Server
 {
     public static partial class RankedSystem
     {
+        private enum RankedJoinState
+        {
+            Idle,
+            PendingApproval,
+            Approved,
+            Rejected,
+            InTeam
+        }
+
         private static readonly object approvalRequestLock = new object();
+        private static readonly object joinStateLock = new object();
         private static readonly Dictionary<string, TeamApprovalRequest> pendingTeamApprovalRequests = new Dictionary<string, TeamApprovalRequest>(StringComparer.OrdinalIgnoreCase);
+        private static readonly Dictionary<string, RankedJoinState> joinStateByPlayerKey = new Dictionary<string, RankedJoinState>(StringComparer.OrdinalIgnoreCase);
         private static readonly Dictionary<string, HashSet<TeamResult>> rejectedLateJoinTeams = new Dictionary<string, HashSet<TeamResult>>(StringComparer.OrdinalIgnoreCase);
         private static int nextApprovalRequestSequence = 1;
 
@@ -30,13 +41,68 @@ namespace schrader.Server
             public string PreviousPositionKey;
             public float Timestamp;
             public TeamApprovalRequestKind Kind;
+            public string TargetCaptainKey;
+            public ulong TargetCaptainClientId;
+        }
+
+        private static RankedJoinState GetJoinState(string playerKey)
+        {
+            if (string.IsNullOrWhiteSpace(playerKey))
+            {
+                return RankedJoinState.Idle;
+            }
+
+            lock (joinStateLock)
+            {
+                return joinStateByPlayerKey.TryGetValue(playerKey, out var state)
+                    ? state
+                    : RankedJoinState.Idle;
+            }
+        }
+
+        private static void SetJoinState(string playerKey, RankedJoinState state)
+        {
+            if (string.IsNullOrWhiteSpace(playerKey))
+            {
+                return;
+            }
+
+            lock (joinStateLock)
+            {
+                if (state == RankedJoinState.Idle)
+                {
+                    joinStateByPlayerKey.Remove(playerKey);
+                }
+                else
+                {
+                    joinStateByPlayerKey[playerKey] = state;
+                }
+            }
+        }
+
+        private static void ClearJoinState(string playerKey)
+        {
+            if (string.IsNullOrWhiteSpace(playerKey))
+            {
+                return;
+            }
+
+            lock (joinStateLock)
+            {
+                joinStateByPlayerKey.Remove(playerKey);
+            }
+        }
+
+        private static bool IsPendingJoinState(string playerKey)
+        {
+            return GetJoinState(playerKey) == RankedJoinState.PendingApproval;
         }
 
         public static ApprovalRequestStateMessage GetApprovalRequestStateForClient(ulong clientId)
         {
             try
             {
-                if (!TryGetCaptainTeamForClient(clientId, out var captainTeam))
+                if (!TryGetCaptainIdentityForClient(clientId, out _, out var captainKey))
                 {
                     return ApprovalRequestStateMessage.Hidden();
                 }
@@ -44,7 +110,7 @@ namespace schrader.Server
                 TeamApprovalRequest request;
                 lock (approvalRequestLock)
                 {
-                    request = CloneApprovalRequest(GetNextApprovalRequestForTeamLocked(captainTeam));
+                    request = CloneApprovalRequest(GetNextApprovalRequestForCaptainLocked(captainKey, clientId));
                 }
 
                 if (request == null)
@@ -109,7 +175,7 @@ namespace schrader.Server
                             continue;
                         }
 
-                        if (!TryGetCaptainClientIdForTeam(request.TargetTeam, out _, out _, out _))
+                        if (!TryResolveApprovalRequestCaptain(request, out _, out _))
                         {
                             if (captainUnavailableRequests == null) captainUnavailableRequests = new List<TeamApprovalRequest>();
                             captainUnavailableRequests.Add(CloneApprovalRequest(request));
@@ -122,6 +188,7 @@ namespace schrader.Server
                 {
                     foreach (var request in playerDisconnectedRequests)
                     {
+                        ClearJoinState(request.PlayerId);
                         SendCaptainChatForRequest(request.TargetTeam, $"<size=13><color=#ffcc66>Ranked</color> pending request removed because <b>{request.PlayerName}</b> disconnected.</size>");
                     }
                 }
@@ -130,6 +197,16 @@ namespace schrader.Server
                 {
                     foreach (var request in captainUnavailableRequests)
                     {
+                        if (request.Kind == TeamApprovalRequestKind.TeamSwitch)
+                        {
+                            SetJoinState(request.PlayerId, RankedJoinState.InTeam);
+                        }
+                        else
+                        {
+                            SetJoinState(request.PlayerId, RankedJoinState.Idle);
+                            TryOpenPlayerTeamSelection(request.PlayerId, request.ClientId);
+                        }
+
                         if (request.ClientId != 0)
                         {
                             SendSystemChatToClient($"<size=13><color=#ffcc66>Ranked</color> your request to join {FormatTeamLabel(request.TargetTeam)} was cancelled because that captain is no longer available.</size>", request.ClientId);
@@ -186,6 +263,12 @@ namespace schrader.Server
                     return true;
                 }
 
+                if (currentResolvedTeam == TeamResult.Red || currentResolvedTeam == TeamResult.Blue)
+                {
+                    TryWarnTeamSwitchBlocked(player);
+                    return true;
+                }
+
                 if (TryQueueTeamApprovalRequest(player, clientId, targetTeam))
                 {
                     return true;
@@ -220,8 +303,8 @@ namespace schrader.Server
                     return false;
                 }
 
-                var targetTeam = currentTeam == TeamResult.Red ? TeamResult.Blue : TeamResult.Red;
-                return TryQueueTeamApprovalRequest(player, clientId, targetTeam);
+                TryWarnTeamSwitchBlocked(player);
+                return true;
             }
             catch { }
 
@@ -263,6 +346,19 @@ namespace schrader.Server
                     return true;
                 }
 
+                if (isSwitchRequest)
+                {
+                    TryWarnTeamSwitchBlocked(player);
+                    SetJoinState(playerKey, RankedJoinState.InTeam);
+                    return true;
+                }
+
+                if (IsPendingJoinState(playerKey))
+                {
+                    SendSystemChatToClient($"<size=13><color=#ffcc66>Ranked</color> you already have a pending request for {FormatTeamLabel(targetTeam)}.</size>", clientId);
+                    return true;
+                }
+
                 TeamApprovalRequest existingRequest;
                 lock (approvalRequestLock)
                 {
@@ -276,9 +372,28 @@ namespace schrader.Server
                     return true;
                 }
 
-                if (!TryGetCaptainClientIdForTeam(targetTeam, out var captainClientId, out _, out var captainName))
+                if (!TryGetCaptainClientIdForTeam(targetTeam, out var captainClientId, out var captainKey, out var captainName))
                 {
+                    SetJoinState(playerKey, isSwitchRequest ? RankedJoinState.InTeam : RankedJoinState.Idle);
+                    if (!isSwitchRequest)
+                    {
+                        TryOpenPlayerTeamSelection(playerKey, snapshot.clientId);
+                    }
+
                     SendSystemChatToClient($"<size=13><color=#ffcc66>Ranked</color> {FormatTeamLabel(targetTeam)} captain is unavailable right now. Try again when that captain reconnects.</size>", clientId);
+                    return true;
+                }
+
+                if (string.Equals(captainKey, playerKey, StringComparison.OrdinalIgnoreCase))
+                {
+                    SetJoinState(playerKey, isSwitchRequest ? RankedJoinState.InTeam : RankedJoinState.Idle);
+                    if (!isSwitchRequest)
+                    {
+                        TryOpenPlayerTeamSelection(playerKey, snapshot.clientId);
+                    }
+
+                    SendSystemChatToClient($"<size=13><color=#ff6666>Ranked</color> you cannot send an approval request to yourself.</size>", clientId);
+                    Debug.Log($"[{Constants.MOD_NAME}] [JOIN] Blocked self-request for {snapshot.displayName} ({playerKey}) targeting {FormatTeamLabel(targetTeam)}.");
                     return true;
                 }
 
@@ -293,7 +408,9 @@ namespace schrader.Server
                     PreviousTeam = currentTeam,
                     PreviousPositionKey = TryGetCurrentPositionKey(player),
                     Timestamp = Time.unscaledTime,
-                    Kind = isSwitchRequest ? TeamApprovalRequestKind.TeamSwitch : TeamApprovalRequestKind.LateJoin
+                    Kind = isSwitchRequest ? TeamApprovalRequestKind.TeamSwitch : TeamApprovalRequestKind.LateJoin,
+                    TargetCaptainKey = captainKey,
+                    TargetCaptainClientId = captainClientId
                 };
 
                 lock (approvalRequestLock)
@@ -301,15 +418,30 @@ namespace schrader.Server
                     pendingTeamApprovalRequests[request.RequestId] = request;
                 }
 
+                SetJoinState(playerKey, RankedJoinState.PendingApproval);
+                Debug.Log($"[{Constants.MOD_NAME}] [JOIN] Player requested join: {request.PlayerName} ({playerKey}) -> {FormatTeamLabel(targetTeam)}.");
+
                 if (!isSwitchRequest)
                 {
                     TrySetPlayerWaitingState(request.PlayerId, request.ClientId);
                 }
 
+                if (controlledTestModeEnabled && (IsDummyKey(captainKey) || BotManager.IsBotKey(captainKey)))
+                {
+                    lock (approvalRequestLock)
+                    {
+                        pendingTeamApprovalRequests.Remove(request.RequestId);
+                    }
+
+                    ResolveApprovedRequest(CloneApprovalRequest(request), captainKey);
+                    RefreshCaptainApprovalPanels();
+                    return true;
+                }
+
                 var requestLabel = isSwitchRequest ? "switch" : "join";
                 SendSystemChatToClient($"<size=13><color=#66ccff>Ranked</color> {requestLabel} request sent to {FormatTeamLabel(targetTeam)} captain.</size>", clientId);
                 SendSystemChatToClient($"<size=13><color=#ffcc66>Ranked</color> {request.PlayerName} wants to {(isSwitchRequest ? $"switch into {FormatTeamLabel(targetTeam)}" : $"join {FormatTeamLabel(targetTeam)}")}. Use the approval popup.</size>", captainClientId);
-                Debug.Log($"[{Constants.MOD_NAME}] Queued {(isSwitchRequest ? "team-switch" : "late-join")} request {request.RequestId} for {request.PlayerName} -> {FormatTeamLabel(targetTeam)} captain {captainName ?? "unknown"}");
+                Debug.Log($"[{Constants.MOD_NAME}] [JOIN] Sent to captain {captainName ?? captainKey ?? "unknown"}: request {request.RequestId} for {request.PlayerName} -> {FormatTeamLabel(targetTeam)}.");
                 RefreshCaptainApprovalPanels();
                 return true;
             }
@@ -337,8 +469,10 @@ namespace schrader.Server
                     return;
                 }
 
-                var actorKey = ResolvePlayerObjectKey(player, clientId);
-                if (!TryGetCaptainTeam(actorKey, out var captainTeam))
+                EnsureValidCaptainAssignments(publishOverlayState: false, refreshApprovalPanels: false);
+
+                var actorKey = GetPlayerKey(player, clientId);
+                if (!TryGetCaptainTeam(actorKey, out _))
                 {
                     SendSystemChatToClient("<size=13><color=#ff6666>Ranked</color> only team captains can approve or reject requests.</size>", clientId);
                     return;
@@ -353,7 +487,9 @@ namespace schrader.Server
                         return;
                     }
 
-                    if (request.TargetTeam != captainTeam)
+                    TryResolveApprovalRequestCaptain(request, out _, out _);
+
+                    if (!IsApprovalRequestOwner(actorKey, clientId, request))
                     {
                         SendSystemChatToClient("<size=13><color=#ff6666>Ranked</color> that request belongs to the other captain.</size>", clientId);
                         return;
@@ -385,11 +521,19 @@ namespace schrader.Server
         {
             if (request == null) return;
 
+            SetJoinState(request.PlayerId, RankedJoinState.Approved);
+
             if (!TryApplyOfficialTeamJoin(request.PlayerId, request.ClientId, request.TargetTeam))
             {
                 if (request.Kind == TeamApprovalRequestKind.TeamSwitch)
                 {
                     EnsureRejectedSwitchState(request);
+                    SetJoinState(request.PlayerId, RankedJoinState.InTeam);
+                }
+                else
+                {
+                    TryOpenPlayerTeamSelection(request.PlayerId, request.ClientId);
+                    SetJoinState(request.PlayerId, RankedJoinState.Idle);
                 }
 
                 if (request.ClientId != 0)
@@ -419,6 +563,7 @@ namespace schrader.Server
 
             MergeOrReplaceParticipant(participant, request.TargetTeam);
             ClearRejectedLateJoinState(request.PlayerId);
+            SetJoinState(request.PlayerId, RankedJoinState.InTeam);
 
             var captainName = GetCaptainDisplayNameByKey(captainKey) ?? "Captain";
             if (request.ClientId != 0)
@@ -426,6 +571,7 @@ namespace schrader.Server
                 SendSystemChatToClient($"<size=13><color=#00ff99>Ranked</color> approved for {FormatTeamLabel(request.TargetTeam)}. Select a position to enter the match.</size>", request.ClientId);
             }
 
+            Debug.Log($"[{Constants.MOD_NAME}] [JOIN] Approved: {request.PlayerName} ({request.PlayerId}) -> {FormatTeamLabel(request.TargetTeam)} by {captainName}.");
             SendSystemChatToAll($"<size=14><color=#ffcc66>Ranked</color> {captainName} approved <b>{request.PlayerName}</b> for {FormatTeamLabel(request.TargetTeam)}.</size>");
         }
 
@@ -434,14 +580,17 @@ namespace schrader.Server
             if (request == null) return;
 
             var captainName = GetCaptainDisplayNameByKey(captainKey) ?? "Captain";
+            SetJoinState(request.PlayerId, RankedJoinState.Rejected);
             if (request.Kind == TeamApprovalRequestKind.TeamSwitch)
             {
                 EnsureRejectedSwitchState(request);
+                SetJoinState(request.PlayerId, RankedJoinState.InTeam);
                 if (request.ClientId != 0)
                 {
                     SendSystemChatToClient($"<size=13><color=#ff6666>Ranked</color> {captainName} rejected your switch request. You remain on {FormatTeamLabel(request.PreviousTeam)}.</size>", request.ClientId);
                 }
 
+                Debug.Log($"[{Constants.MOD_NAME}] [JOIN] Rejected: {request.PlayerName} ({request.PlayerId}) switch to {FormatTeamLabel(request.TargetTeam)} by {captainName}.");
                 SendSystemChatToAll($"<size=14><color=#ffcc66>Ranked</color> {captainName} rejected {request.PlayerName}'s switch request to {FormatTeamLabel(request.TargetTeam)}.</size>");
                 return;
             }
@@ -452,6 +601,10 @@ namespace schrader.Server
                 SendSystemChatToClient($"<size=13><color=#ff6666>Ranked</color> {captainName} rejected your request to join {FormatTeamLabel(request.TargetTeam)}.</size>", request.ClientId);
             }
 
+            TryOpenPlayerTeamSelection(request.PlayerId, request.ClientId);
+            SetJoinState(request.PlayerId, RankedJoinState.Idle);
+
+            Debug.Log($"[{Constants.MOD_NAME}] [JOIN] Rejected: {request.PlayerName} ({request.PlayerId}) from {FormatTeamLabel(request.TargetTeam)} by {captainName}.");
             SendSystemChatToAll($"<size=14><color=#ffcc66>Ranked</color> {captainName} rejected <b>{request.PlayerName}</b> from joining {FormatTeamLabel(request.TargetTeam)}.</size>");
 
             if (rejectedByBothTeams)
@@ -558,6 +711,27 @@ namespace schrader.Server
             catch { }
         }
 
+        private static void TryOpenPlayerTeamSelection(string playerKey, ulong clientId)
+        {
+            try
+            {
+                if (!TryResolveConnectedPlayer(playerKey, clientId, out var player, out _, out _))
+                {
+                    return;
+                }
+
+                var playerStateType = FindTypeByName("PlayerState", "Puck.PlayerState");
+                if (playerStateType == null || !playerStateType.IsEnum)
+                {
+                    return;
+                }
+
+                var teamSelectState = Enum.Parse(playerStateType, "TeamSelect", true);
+                TryInvokeRpcExecute(player, "Client_SetPlayerStateRpc", teamSelectState, 0f);
+            }
+            catch { }
+        }
+
         private static void TryOpenPlayerPositionSelection(object player, TeamResult team)
         {
             if (player == null) return;
@@ -620,6 +794,8 @@ namespace schrader.Server
 
         private static bool TryGetCaptainClientIdForTeam(TeamResult team, out ulong clientId, out string captainKey, out string captainName)
         {
+            EnsureValidCaptainAssignments(publishOverlayState: false, refreshApprovalPanels: false);
+
             clientId = 0;
             captainKey = team == TeamResult.Red ? redCaptainId : team == TeamResult.Blue ? blueCaptainId : null;
             captainName = GetCaptainDisplayNameByKey(captainKey);
@@ -661,10 +837,71 @@ namespace schrader.Server
             return false;
         }
 
-        private static TeamApprovalRequest GetNextApprovalRequestForTeamLocked(TeamResult team)
+        private static bool TryGetCaptainIdentityForClient(ulong clientId, out TeamResult team, out string captainKey)
+        {
+            team = TeamResult.Unknown;
+            captainKey = null;
+
+            try
+            {
+                EnsureValidCaptainAssignments(publishOverlayState: false, refreshApprovalPanels: false);
+
+                if (clientId == 0) return false;
+                if (!TryGetPlayerByClientId(clientId, out var player) || player == null) return false;
+
+                captainKey = GetPlayerKey(player, clientId);
+                if (string.IsNullOrWhiteSpace(captainKey)) return false;
+                return TryGetCaptainTeam(captainKey, out team);
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static bool TryResolveApprovalRequestCaptain(TeamApprovalRequest request, out ulong clientId, out string captainKey)
+        {
+            clientId = 0;
+            captainKey = null;
+            if (request == null) return false;
+
+            try
+            {
+                if (TryGetCaptainClientIdForTeam(request.TargetTeam, out var currentCaptainClientId, out var currentCaptainKey, out _))
+                {
+                    request.TargetCaptainKey = currentCaptainKey;
+                    request.TargetCaptainClientId = currentCaptainClientId;
+                    clientId = currentCaptainClientId;
+                    captainKey = currentCaptainKey;
+                    return true;
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static bool IsApprovalRequestOwner(string actorKey, ulong clientId, TeamApprovalRequest request)
+        {
+            if (request == null) return false;
+
+            if (!string.IsNullOrWhiteSpace(actorKey) && !string.IsNullOrWhiteSpace(request.TargetCaptainKey)
+                && string.Equals(actorKey, request.TargetCaptainKey, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            return clientId != 0 && request.TargetCaptainClientId != 0 && clientId == request.TargetCaptainClientId;
+        }
+
+        private static TeamApprovalRequest GetNextApprovalRequestForCaptainLocked(string captainKey, ulong clientId)
         {
             return pendingTeamApprovalRequests.Values
-                .Where(request => request != null && request.TargetTeam == team)
+                .Where(request => request != null)
+                .Where(request =>
+                    (!string.IsNullOrWhiteSpace(captainKey)
+                        && !string.IsNullOrWhiteSpace(request.TargetCaptainKey)
+                        && string.Equals(request.TargetCaptainKey, captainKey, StringComparison.OrdinalIgnoreCase))
+                    || (clientId != 0 && request.TargetCaptainClientId == clientId))
                 .OrderBy(request => request.Timestamp)
                 .ThenBy(request => request.RequestId, StringComparer.OrdinalIgnoreCase)
                 .FirstOrDefault();
@@ -683,7 +920,9 @@ namespace schrader.Server
                 PreviousTeam = request.PreviousTeam,
                 PreviousPositionKey = request.PreviousPositionKey,
                 Timestamp = request.Timestamp,
-                Kind = request.Kind
+                Kind = request.Kind,
+                TargetCaptainKey = request.TargetCaptainKey,
+                TargetCaptainClientId = request.TargetCaptainClientId
             };
         }
 

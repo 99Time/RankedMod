@@ -42,7 +42,7 @@ namespace schrader
             internal PostMatchUIRenderer.View PostMatch;
         }
 
-        public static void CreateUI(UIHUD hud, VisualElement rootVisualElement, out View view, Action onVoteAccepted, Action onVoteRejected, Action onApprovalAccepted, Action onApprovalRejected, Action<string> onPickPlayer, Action<string> onAcceptLateJoiner, Action onWelcomeContinue, Action onPostMatchContinue, Action onPostMatchClose)
+        public static void CreateUI(UIHUD hud, VisualElement rootVisualElement, out View view, Action onVoteAccepted, Action onVoteRejected, Action onApprovalAccepted, Action onApprovalRejected, Action<string> onPickPlayer, Action<string> onAcceptLateJoiner, Action onWelcomeDiscordOpen, Action onWelcomeContinue, Action onPostMatchContinue, Action onPostMatchClose)
         {
             view = null;
 
@@ -110,7 +110,7 @@ namespace schrader
             BuildVotingUI(view, onVoteAccepted, onVoteRejected);
             BuildApprovalUI(view, onApprovalAccepted, onApprovalRejected);
             BuildDraftUI(view);
-            WelcomeUIRenderer.BuildUI(view, onWelcomeContinue);
+            WelcomeUIRenderer.BuildUI(view, onWelcomeDiscordOpen, onWelcomeContinue);
             PostMatchUIRenderer.BuildUI(view, onPostMatchContinue, onPostMatchClose);
 
             DraftUIPlugin.Log("UI BUILD COMPLETE");
@@ -569,9 +569,19 @@ namespace schrader
 
             foreach (var entry in orderedEntries)
             {
+                var commandTarget = string.IsNullOrWhiteSpace(entry.CommandTarget)
+                    ? null
+                    : entry.CommandTarget.Trim();
+
                 if (clickable)
                 {
-                    var button = new Button(() => onClick?.Invoke(entry.CommandTarget ?? entry.DisplayName))
+                    var button = new Button(() =>
+                    {
+                        if (!string.IsNullOrWhiteSpace(commandTarget))
+                        {
+                            onClick?.Invoke(commandTarget);
+                        }
+                    })
                     {
                         text = FormatPlayerLine(entry)
                     };
@@ -583,9 +593,11 @@ namespace schrader
                         Tint(backgroundColor, 1.12f, 0.08f),
                         Tint(backgroundColor, 0.88f, 0.02f),
                         textColor));
+                    button.style.width = new StyleLength(new Length(100, LengthUnit.Percent));
                     button.style.height = 42;
-                    button.style.minWidth = 220;
+                    button.style.minWidth = 0;
                     button.style.marginRight = new StyleLength(new Length(8, LengthUnit.Pixel));
+                    button.SetEnabled(!string.IsNullOrWhiteSpace(commandTarget));
                     container.Add(button);
                 }
                 else
@@ -614,10 +626,11 @@ namespace schrader
                 .Where(name => !string.IsNullOrWhiteSpace(name))
                 .Select(name => new DraftOverlayPlayerEntryMessage
                 {
-                    CommandTarget = name,
+                    CommandTarget = null,
                     DisplayName = name,
-                    HasMmr = false,
-                    Mmr = 0,
+                    PlayerNumber = 0,
+                    HasMmr = true,
+                    Mmr = Constants.DEFAULT_MMR,
                     IsCaptain = false,
                     Team = fallbackTeam
                 });
@@ -662,12 +675,15 @@ namespace schrader
                 nameRow.Add(crown);
             }
 
-            var nameLabel = CreateLabel(entry.DisplayName ?? "---", 14, entry.IsCaptain ? FontStyle.Bold : FontStyle.Normal, TextAnchor.MiddleLeft, entry.IsCaptain ? new Color(1f, 0.95f, 0.84f, 1f) : ReadableTeamColor(entry.Team));
+            var nameLabel = CreateLabel(FormatPlayerIdentity(entry), 14, entry.IsCaptain ? FontStyle.Bold : FontStyle.Normal, TextAnchor.MiddleLeft, entry.IsCaptain ? new Color(1f, 0.95f, 0.84f, 1f) : ReadableTeamColor(entry.Team));
             nameLabel.style.flexGrow = 1;
+            nameLabel.style.whiteSpace = WhiteSpace.NoWrap;
+            nameLabel.style.overflow = Overflow.Hidden;
             nameRow.Add(nameLabel);
 
-            var mmrLabel = CreateLabel(FormatMmr(entry), 13, entry.IsCaptain ? FontStyle.Bold : FontStyle.Normal, TextAnchor.MiddleRight, entry.HasMmr ? new Color(0.98f, 0.94f, 0.72f, 1f) : new Color(0.76f, 0.82f, 0.88f, 1f));
+            var mmrLabel = CreateLabel(FormatMmr(entry), 13, entry.IsCaptain ? FontStyle.Bold : FontStyle.Normal, TextAnchor.MiddleRight, new Color(0.98f, 0.94f, 0.72f, 1f));
             mmrLabel.style.marginLeft = new StyleLength(new Length(12, LengthUnit.Pixel));
+            mmrLabel.style.flexShrink = 0;
 
             card.Add(nameRow);
             card.Add(mmrLabel);
@@ -681,17 +697,54 @@ namespace schrader
                 return "---";
             }
 
-            return $"{entry.DisplayName ?? "---"}   {FormatMmr(entry)}";
+            return $"{FormatPlayerIdentity(entry)} • {FormatMmr(entry)}";
         }
 
         private static string FormatMmr(DraftOverlayPlayerEntryMessage entry)
         {
-            if (entry == null || !entry.HasMmr)
+            if (entry == null)
             {
-                return "—";
+                return $"{Constants.DEFAULT_MMR} MMR";
             }
 
-            return $"{entry.Mmr} MMR";
+            var visibleMmr = entry.Mmr > 0 ? entry.Mmr : Constants.DEFAULT_MMR;
+            return $"{visibleMmr} MMR";
+        }
+
+        private static string FormatPlayerIdentity(DraftOverlayPlayerEntryMessage entry)
+        {
+            if (entry == null)
+            {
+                return "---";
+            }
+
+            var displayName = NormalizeDraftDisplayName(entry.DisplayName);
+            if (entry.PlayerNumber > 0)
+            {
+                var playerPrefix = $"#{entry.PlayerNumber} ";
+                if (!displayName.StartsWith(playerPrefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    return playerPrefix + displayName;
+                }
+            }
+
+            return displayName;
+        }
+
+        private static string NormalizeDraftDisplayName(string displayName)
+        {
+            var clean = string.IsNullOrWhiteSpace(displayName) ? "---" : displayName.Trim();
+            var bulletIndex = clean.LastIndexOf('•');
+            if (bulletIndex > 0)
+            {
+                var suffix = clean.Substring(bulletIndex + 1).Trim();
+                if (suffix.EndsWith("MMR", StringComparison.OrdinalIgnoreCase))
+                {
+                    clean = clean.Substring(0, bulletIndex).TrimEnd();
+                }
+            }
+
+            return string.IsNullOrWhiteSpace(clean) ? "---" : clean;
         }
 
         private static Color TeamColor(TeamResult team)
@@ -733,7 +786,7 @@ namespace schrader
 
         private static void StyleButton(Button button, ButtonPalette palette)
         {
-            button.style.minWidth = 190;
+            button.style.minWidth = 0;
             button.style.height = 42;
             button.style.paddingLeft = new StyleLength(new Length(16, LengthUnit.Pixel));
             button.style.paddingRight = new StyleLength(new Length(16, LengthUnit.Pixel));
@@ -741,6 +794,11 @@ namespace schrader
             button.style.paddingBottom = new StyleLength(new Length(8, LengthUnit.Pixel));
             button.style.backgroundColor = new StyleColor(palette.Normal);
             button.style.color = new StyleColor(palette.Text);
+            button.style.fontSize = 13;
+            button.style.whiteSpace = WhiteSpace.NoWrap;
+            button.style.overflow = Overflow.Hidden;
+            button.style.flexGrow = 1;
+            button.style.flexShrink = 1;
             button.style.unityFontStyleAndWeight = FontStyle.Bold;
             button.style.borderTopLeftRadius = new StyleLength(new Length(14, LengthUnit.Pixel));
             button.style.borderTopRightRadius = new StyleLength(new Length(14, LengthUnit.Pixel));

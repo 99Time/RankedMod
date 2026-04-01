@@ -96,6 +96,12 @@ namespace schrader.Server
                 if (val is uint ui && ui <= int.MaxValue) { result = (int)ui; return true; }
                 if (val is string s && int.TryParse(s, out var parsed)) { result = parsed; return true; }
                 if (val is double d) { result = (int)d; return true; }
+                var valueProp = val.GetType().GetProperty("Value", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                if (valueProp != null)
+                {
+                    var inner = valueProp.GetValue(val);
+                    if (!ReferenceEquals(inner, val) && TryConvertToInt(inner, out result)) return true;
+                }
             }
             catch { }
             return false;
@@ -226,6 +232,48 @@ namespace schrader.Server
             }
             catch { }
             return fallbackClientId == 0 ? null : $"clientId:{fallbackClientId}";
+        }
+
+        private static bool TryGetPlayerNumber(object player, out int playerNumber)
+        {
+            playerNumber = 0;
+            if (player == null) return false;
+
+            var type = player.GetType();
+            string[] names = { "Number", "number", "PlayerNumber", "playerNumber", "JerseyNumber", "jerseyNumber", "UniformNumber", "uniformNumber" };
+            foreach (var name in names)
+            {
+                var property = type.GetProperty(name, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                if (property != null)
+                {
+                    var value = property.GetValue(player);
+                    if (TryConvertToInt(value, out playerNumber)) return true;
+                }
+
+                var field = type.GetField(name, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                if (field != null)
+                {
+                    var value = field.GetValue(player);
+                    if (TryConvertToInt(value, out playerNumber)) return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static int ResolveParticipantPlayerNumber(RankedParticipant participant)
+        {
+            if (participant == null || participant.clientId == 0)
+            {
+                return 0;
+            }
+
+            if (TryGetPlayerByClientId(participant.clientId, out var player) && TryGetPlayerNumber(player, out var playerNumber))
+            {
+                return playerNumber;
+            }
+
+            return 0;
         }
 
         private static bool TryGetPlayerManager(out object manager)

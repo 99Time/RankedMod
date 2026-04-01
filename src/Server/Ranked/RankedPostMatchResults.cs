@@ -81,8 +81,9 @@ namespace schrader.Server
                 return null;
             }
 
-            var resolvedId = ResolveMatchResultParticipantId(participant);
-            var scoreboard = ResolveScoreboardStatsForParticipant(participant, resolvedId, scoreboardStats);
+            var provisionalResolvedId = ResolveMatchResultParticipantId(participant);
+            var scoreboard = ResolveScoreboardStatsForParticipant(participant, provisionalResolvedId, scoreboardStats);
+            var resolvedId = ResolveAuthoritativeParticipantKey(participant, scoreboard, provisionalResolvedId);
             var team = participant.team != TeamResult.Unknown
                 ? participant.team
                 : (scoreboard != null ? scoreboard.Team : TeamResult.Unknown);
@@ -92,8 +93,12 @@ namespace schrader.Server
             var assists = scoreboard != null && scoreboard.HasAssists ? scoreboard.Assists : 0;
             var saves = scoreboard != null && scoreboard.HasSaves ? scoreboard.Saves : 0;
             var shots = scoreboard != null && scoreboard.HasShots ? scoreboard.Shots : 0;
-            var username = participant.displayName ?? scoreboard?.DisplayName ?? resolvedId ?? $"Player {participant.clientId}";
-            var mmrBefore = GetStoredParticipantMmr(resolvedId);
+            var username = ResolvePreferredParticipantDisplayName(participant, scoreboard?.DisplayName, resolvedId);
+            var mmrBefore = GetAuthoritativeMmrOrDefault(participant, resolvedId, out var canonicalMmrKey);
+            if (!string.IsNullOrWhiteSpace(canonicalMmrKey))
+            {
+                resolvedId = canonicalMmrKey;
+            }
             var performanceScore = ComputePerformanceScore(goals, assists, saves, shots, team, winner);
 
             return new MatchResultComputation
@@ -221,6 +226,152 @@ namespace schrader.Server
             return $"clientId:{participant?.clientId ?? 0}";
         }
 
+        private static string ResolveAuthoritativeParticipantKey(RankedParticipant participant, ScoreboardPlayerStatsSnapshot scoreboard, string fallbackId)
+        {
+            var participantKey = NormalizeResolvedPlayerKey(ResolveParticipantIdToKey(participant));
+            if (!string.IsNullOrWhiteSpace(participantKey) && !IsClientIdFallbackKey(participantKey))
+            {
+                return participantKey;
+            }
+
+            var scoreboardKey = NormalizeResolvedPlayerKey(scoreboard?.ResolvedId);
+            var scoreboardDisplayName = NormalizeVisiblePlayerName(scoreboard?.DisplayName);
+            if (!string.IsNullOrWhiteSpace(scoreboardKey)
+                && (string.IsNullOrWhiteSpace(scoreboardDisplayName)
+                    || !string.Equals(scoreboardKey, scoreboardDisplayName, StringComparison.OrdinalIgnoreCase)))
+            {
+                return scoreboardKey;
+            }
+
+            if (!string.IsNullOrWhiteSpace(participantKey))
+            {
+                return participantKey;
+            }
+
+            var fallbackKey = NormalizeResolvedPlayerKey(fallbackId);
+            if (!string.IsNullOrWhiteSpace(fallbackKey))
+            {
+                return fallbackKey;
+            }
+
+            return participant != null && participant.clientId != 0
+                ? $"clientId:{participant.clientId}"
+                : null;
+        }
+
+        private static string ResolvePreferredParticipantDisplayName(RankedParticipant participant, string scoreboardDisplayName, string resolvedId)
+        {
+            var participantName = NormalizeVisiblePlayerName(participant?.displayName);
+            if (!string.IsNullOrWhiteSpace(participantName))
+            {
+                return participantName;
+            }
+
+            var scoreboardName = NormalizeVisiblePlayerName(scoreboardDisplayName);
+            if (!string.IsNullOrWhiteSpace(scoreboardName))
+            {
+                return scoreboardName;
+            }
+
+            var liveName = TryResolveLivePlayerDisplayName(participant, resolvedId);
+            if (!string.IsNullOrWhiteSpace(liveName))
+            {
+                return liveName;
+            }
+
+            if (participant != null && participant.clientId != 0)
+            {
+                return $"Player {participant.clientId}";
+            }
+
+            var fallbackName = NormalizeVisiblePlayerName(resolvedId);
+            if (!string.IsNullOrWhiteSpace(fallbackName))
+            {
+                return fallbackName;
+            }
+
+            return "Player";
+        }
+
+        private static string TryResolveLivePlayerDisplayName(RankedParticipant participant, string resolvedId)
+        {
+            if (participant != null && participant.clientId != 0 && TryGetPlayerByClientId(participant.clientId, out var player))
+            {
+                var liveName = NormalizeVisiblePlayerName(TryGetPlayerName(player));
+                if (!string.IsNullOrWhiteSpace(liveName))
+                {
+                    return liveName;
+                }
+            }
+
+            var normalizedResolvedId = NormalizeResolvedPlayerKey(resolvedId);
+            if (string.IsNullOrWhiteSpace(normalizedResolvedId))
+            {
+                return null;
+            }
+
+            foreach (var livePlayer in GetAllPlayers())
+            {
+                var playerKey = ResolvePlayerObjectKey(livePlayer, 0);
+                if (string.IsNullOrWhiteSpace(playerKey)
+                    || !string.Equals(playerKey, normalizedResolvedId, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                var liveName = NormalizeVisiblePlayerName(TryGetPlayerName(livePlayer));
+                if (!string.IsNullOrWhiteSpace(liveName))
+                {
+                    return liveName;
+                }
+            }
+
+            return null;
+        }
+
+        private static string NormalizeResolvedPlayerKey(string candidate)
+        {
+            var clean = StripRichTextTags(candidate)?.Trim();
+            if (string.IsNullOrWhiteSpace(clean))
+            {
+                return null;
+            }
+
+            var resolved = ResolveStoredIdToSteam(clean);
+            return string.IsNullOrWhiteSpace(resolved) ? clean : resolved;
+        }
+
+        private static bool IsClientIdFallbackKey(string candidate)
+        {
+            return !string.IsNullOrWhiteSpace(candidate)
+                && candidate.StartsWith("clientId:", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool LooksLikeIdentityKey(string candidate)
+        {
+            var clean = StripRichTextTags(candidate)?.Trim();
+            if (string.IsNullOrWhiteSpace(clean))
+            {
+                return false;
+            }
+
+            if (clean.StartsWith("clientId:", StringComparison.OrdinalIgnoreCase)
+                || clean.StartsWith("steam:", StringComparison.OrdinalIgnoreCase)
+                || clean.StartsWith("steam_", StringComparison.OrdinalIgnoreCase)
+                || clean.StartsWith("bot:", StringComparison.OrdinalIgnoreCase)
+                || clean.StartsWith("dummy:", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            if (clean.IndexOf(' ') >= 0)
+            {
+                return false;
+            }
+
+            return clean.Length >= 6 && clean.All(char.IsDigit);
+        }
+
         private static int GetTrackedGoalsForParticipant(RankedParticipant participant, string resolvedId)
         {
             lock (playerGoalLock)
@@ -324,6 +475,7 @@ namespace schrader.Server
             }
 
             SaveMmr();
+            Debug.Log($"[{Constants.MOD_NAME}] MMR applied. Winner={winner} Players={computations.Count(computation => computation?.Message != null)}");
         }
 
         private static int GetTeamAverageMmr(IEnumerable<MatchResultComputation> computations, TeamResult team)
