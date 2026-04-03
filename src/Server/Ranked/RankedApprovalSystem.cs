@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
@@ -167,6 +168,13 @@ namespace schrader.Server
                     {
                         if (request == null) continue;
 
+                        if (ShouldAutoApproveTeamSelection(request.TargetTeam, request.PlayerId))
+                        {
+                            ResolveApprovedRequest(CloneApprovalRequest(request), null);
+                            pendingTeamApprovalRequests.Remove(request.RequestId);
+                            continue;
+                        }
+
                         if (!TryResolveConnectedPlayer(request.PlayerId, request.ClientId, out _, out _, out _))
                         {
                             if (playerDisconnectedRequests == null) playerDisconnectedRequests = new List<TeamApprovalRequest>();
@@ -252,20 +260,7 @@ namespace schrader.Server
                         return false;
                     }
 
-                    TryWarnTeamSwitchBlocked(player);
-                    return true;
-                }
-
-                var currentResolvedTeam = ConvertTeamValue(currentTeam);
-                if (currentResolvedTeam == targetTeam)
-                {
-                    SendSystemChatToClient($"<size=13><color=#ffcc66>Ranked</color> you are already on {FormatTeamLabel(targetTeam)}.</size>", clientId);
-                    return true;
-                }
-
-                if (currentResolvedTeam == TeamResult.Red || currentResolvedTeam == TeamResult.Blue)
-                {
-                    TryWarnTeamSwitchBlocked(player);
+                    Debug.Log($"[{Constants.MOD_NAME}] [JOIN] Ignoring non-playable in-match team selection request: requested={FormatTeamValue(requestedTeam)} current={FormatTeamValue(currentTeam)}.");
                     return true;
                 }
 
@@ -277,6 +272,52 @@ namespace schrader.Server
             catch { }
 
             return false;
+        }
+
+        private static TeamResult ResolveEffectiveCurrentTeamForSelection(object player, ulong clientId, object currentTeam)
+        {
+            try
+            {
+                var resolvedTeam = ConvertTeamValue(currentTeam);
+                if (resolvedTeam == TeamResult.Red || resolvedTeam == TeamResult.Blue)
+                {
+                    return resolvedTeam;
+                }
+
+                if (player == null && clientId != 0)
+                {
+                    TryGetPlayerByClientId(clientId, out player);
+                }
+
+                if (TryGetPlayerTeam(player, out var liveTeam) && (liveTeam == TeamResult.Red || liveTeam == TeamResult.Blue))
+                {
+                    return liveTeam;
+                }
+
+                if (TryGetPlayerTeamFromManager(clientId, out var managerTeam) && (managerTeam == TeamResult.Red || managerTeam == TeamResult.Blue))
+                {
+                    return managerTeam;
+                }
+
+                var playerKey = TryGetPlayerId(player, clientId);
+                if (!string.IsNullOrWhiteSpace(playerKey))
+                {
+                    lock (teamStateLock)
+                    {
+                        if (lastKnownPlayerTeam.TryGetValue(playerKey, out var lastKnownTeamValue))
+                        {
+                            var lastKnownTeam = ConvertTeamValue(lastKnownTeamValue);
+                            if (lastKnownTeam == TeamResult.Red || lastKnownTeam == TeamResult.Blue)
+                            {
+                                return lastKnownTeam;
+                            }
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            return ConvertTeamValue(currentTeam);
         }
 
         private static bool TryHandleSwitchTeamMenuRequest(object player, ulong clientId)
@@ -303,8 +344,7 @@ namespace schrader.Server
                     return false;
                 }
 
-                TryWarnTeamSwitchBlocked(player);
-                return true;
+                return false;
             }
             catch { }
 
@@ -338,20 +378,9 @@ namespace schrader.Server
                     return true;
                 }
 
-                var currentTeam = snapshot.team;
+                var currentTeam = ResolveEffectiveCurrentTeamForSelection(player, snapshot.clientId, snapshot.team);
                 var isSwitchRequest = currentTeam == TeamResult.Red || currentTeam == TeamResult.Blue;
-                if (isSwitchRequest && currentTeam == targetTeam)
-                {
-                    SendSystemChatToClient($"<size=13><color=#ffcc66>Ranked</color> you are already on {FormatTeamLabel(targetTeam)}.</size>", clientId);
-                    return true;
-                }
-
-                if (isSwitchRequest)
-                {
-                    TryWarnTeamSwitchBlocked(player);
-                    SetJoinState(playerKey, RankedJoinState.InTeam);
-                    return true;
-                }
+                var isSameTeamRequest = isSwitchRequest && currentTeam == targetTeam;
 
                 if (IsPendingJoinState(playerKey))
                 {
@@ -372,6 +401,28 @@ namespace schrader.Server
                     return true;
                 }
 
+                var requestId = $"req{nextApprovalRequestSequence++:0000}";
+                var request = new TeamApprovalRequest
+                {
+                    RequestId = requestId,
+                    PlayerId = playerKey,
+                    ClientId = snapshot.clientId,
+                    PlayerName = snapshot.displayName ?? $"Player {snapshot.clientId}",
+                    TargetTeam = targetTeam,
+                    PreviousTeam = currentTeam,
+                    PreviousPositionKey = TryGetCurrentPositionKey(player),
+                    Timestamp = Time.unscaledTime,
+                    Kind = isSwitchRequest ? TeamApprovalRequestKind.TeamSwitch : TeamApprovalRequestKind.LateJoin
+                };
+
+                if (ShouldAutoApproveTeamSelection(targetTeam, playerKey))
+                {
+                    Debug.Log($"[{Constants.MOD_NAME}] [JOIN] Auto-approving request {request.RequestId} for {request.PlayerName} -> {FormatTeamLabel(targetTeam)} because no other approver is available on that team.");
+                    ResolveApprovedRequest(CloneApprovalRequest(request), null);
+                    RefreshCaptainApprovalPanels();
+                    return true;
+                }
+
                 if (!TryGetCaptainClientIdForTeam(targetTeam, out var captainClientId, out var captainKey, out var captainName))
                 {
                     SetJoinState(playerKey, isSwitchRequest ? RankedJoinState.InTeam : RankedJoinState.Idle);
@@ -386,32 +437,22 @@ namespace schrader.Server
 
                 if (string.Equals(captainKey, playerKey, StringComparison.OrdinalIgnoreCase))
                 {
-                    SetJoinState(playerKey, isSwitchRequest ? RankedJoinState.InTeam : RankedJoinState.Idle);
-                    if (!isSwitchRequest)
-                    {
-                        TryOpenPlayerTeamSelection(playerKey, snapshot.clientId);
-                    }
-
-                    SendSystemChatToClient($"<size=13><color=#ff6666>Ranked</color> you cannot send an approval request to yourself.</size>", clientId);
-                    Debug.Log($"[{Constants.MOD_NAME}] [JOIN] Blocked self-request for {snapshot.displayName} ({playerKey}) targeting {FormatTeamLabel(targetTeam)}.");
+                    Debug.Log($"[{Constants.MOD_NAME}] [JOIN] Auto-approving self-owned captain request {request.RequestId} for {snapshot.displayName} ({playerKey}) targeting {FormatTeamLabel(targetTeam)}.");
+                    ResolveApprovedRequest(CloneApprovalRequest(request), null);
+                    RefreshCaptainApprovalPanels();
                     return true;
                 }
 
-                var requestId = $"req{nextApprovalRequestSequence++:0000}";
-                var request = new TeamApprovalRequest
+                if (!controlledTestModeEnabled && (IsDummyKey(captainKey) || BotManager.IsBotKey(captainKey)))
                 {
-                    RequestId = requestId,
-                    PlayerId = playerKey,
-                    ClientId = snapshot.clientId,
-                    PlayerName = snapshot.displayName ?? $"Player {snapshot.clientId}",
-                    TargetTeam = targetTeam,
-                    PreviousTeam = currentTeam,
-                    PreviousPositionKey = TryGetCurrentPositionKey(player),
-                    Timestamp = Time.unscaledTime,
-                    Kind = isSwitchRequest ? TeamApprovalRequestKind.TeamSwitch : TeamApprovalRequestKind.LateJoin,
-                    TargetCaptainKey = captainKey,
-                    TargetCaptainClientId = captainClientId
-                };
+                    Debug.Log($"[{Constants.MOD_NAME}] [JOIN] Auto-approving request {request.RequestId} for {request.PlayerName} -> {FormatTeamLabel(targetTeam)} because the only available captain is a dummy/bot.");
+                    ResolveApprovedRequest(CloneApprovalRequest(request), null);
+                    RefreshCaptainApprovalPanels();
+                    return true;
+                }
+
+                request.TargetCaptainKey = captainKey;
+                request.TargetCaptainClientId = captainClientId;
 
                 lock (approvalRequestLock)
                 {
@@ -438,9 +479,9 @@ namespace schrader.Server
                     return true;
                 }
 
-                var requestLabel = isSwitchRequest ? "switch" : "join";
+                var requestLabel = isSameTeamRequest ? "rejoin" : isSwitchRequest ? "switch" : "join";
                 SendSystemChatToClient($"<size=13><color=#66ccff>Ranked</color> {requestLabel} request sent to {FormatTeamLabel(targetTeam)} captain.</size>", clientId);
-                SendSystemChatToClient($"<size=13><color=#ffcc66>Ranked</color> {request.PlayerName} wants to {(isSwitchRequest ? $"switch into {FormatTeamLabel(targetTeam)}" : $"join {FormatTeamLabel(targetTeam)}")}. Use the approval popup.</size>", captainClientId);
+                SendSystemChatToClient($"<size=13><color=#ffcc66>Ranked</color> {request.PlayerName} wants to {(isSameTeamRequest ? $"re-enter {FormatTeamLabel(targetTeam)}" : isSwitchRequest ? $"switch into {FormatTeamLabel(targetTeam)}" : $"join {FormatTeamLabel(targetTeam)}")}. Use the approval popup.</size>", captainClientId);
                 Debug.Log($"[{Constants.MOD_NAME}] [JOIN] Sent to captain {captainName ?? captainKey ?? "unknown"}: request {request.RequestId} for {request.PlayerName} -> {FormatTeamLabel(targetTeam)}.");
                 RefreshCaptainApprovalPanels();
                 return true;
@@ -451,6 +492,61 @@ namespace schrader.Server
                 SendSystemChatToClient("<size=13><color=#ff6666>Ranked</color> could not create a team approval request.</size>", clientId);
                 return true;
             }
+        }
+
+        private static bool ShouldAutoApproveTeamSelection(TeamResult targetTeam, string requesterPlayerKey)
+        {
+            if (targetTeam != TeamResult.Red && targetTeam != TeamResult.Blue)
+            {
+                return false;
+            }
+
+            try
+            {
+                return GetConnectedHumanTeamMemberKeys(targetTeam, requesterPlayerKey).Count == 0;
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static List<string> GetConnectedHumanTeamMemberKeys(TeamResult targetTeam, string excludedPlayerKey = null)
+        {
+            var connectedKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            try
+            {
+                foreach (var player in GetAllPlayers())
+                {
+                    if (!TryBuildConnectedPlayerSnapshot(player, out var snapshot) || snapshot == null)
+                    {
+                        continue;
+                    }
+
+                    var playerKey = ResolveParticipantIdToKey(snapshot);
+                    if (string.IsNullOrWhiteSpace(playerKey))
+                    {
+                        continue;
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(excludedPlayerKey)
+                        && string.Equals(playerKey, excludedPlayerKey, StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    var snapshotTeam = ResolveEffectiveCurrentTeamForSelection(player, snapshot.clientId, snapshot.team);
+                    if (snapshotTeam != targetTeam)
+                    {
+                        continue;
+                    }
+
+                    connectedKeys.Add(playerKey);
+                }
+            }
+            catch { }
+
+            return connectedKeys.ToList();
         }
 
         private static void HandleApprovalDecision(object player, ulong clientId, string requestId, bool approved)
@@ -522,6 +618,7 @@ namespace schrader.Server
             if (request == null) return;
 
             SetJoinState(request.PlayerId, RankedJoinState.Approved);
+            Debug.Log($"[{Constants.MOD_NAME}] [JOIN] request approved for player {request.PlayerName} ({request.PlayerId}) targeting {FormatTeamLabel(request.TargetTeam)}.");
 
             if (!TryApplyOfficialTeamJoin(request.PlayerId, request.ClientId, request.TargetTeam))
             {
@@ -565,7 +662,9 @@ namespace schrader.Server
             ClearRejectedLateJoinState(request.PlayerId);
             SetJoinState(request.PlayerId, RankedJoinState.InTeam);
 
-            var captainName = GetCaptainDisplayNameByKey(captainKey) ?? "Captain";
+            var captainName = string.IsNullOrWhiteSpace(captainKey)
+                ? "System"
+                : GetCaptainDisplayNameByKey(captainKey) ?? "Captain";
             if (request.ClientId != 0)
             {
                 SendSystemChatToClient($"<size=13><color=#00ff99>Ranked</color> approved for {FormatTeamLabel(request.TargetTeam)}. Select a position to enter the match.</size>", request.ClientId);
@@ -631,7 +730,7 @@ namespace schrader.Server
             }
         }
 
-        private static bool TryApplyOfficialTeamJoin(string playerKey, ulong clientId, TeamResult team, bool openPositionSelection = true)
+        private static bool TryApplyOfficialTeamJoin(string playerKey, ulong clientId, TeamResult team, bool openPositionSelection = true, string preferredPositionKey = null)
         {
             if (team != TeamResult.Red && team != TeamResult.Blue) return false;
 
@@ -649,6 +748,7 @@ namespace schrader.Server
                 }
 
                 var runtimeTeamValue = Enum.Parse(runtimeTeamType, team == TeamResult.Red ? "Red" : "Blue", true);
+                var desiredPositionKey = NormalizePositionKeyForTeam(preferredPositionKey, team);
                 RegisterInternalTeamAssignment(resolvedPlayerKey, runtimeTeamValue);
 
                 var applied = false;
@@ -666,9 +766,24 @@ namespace schrader.Server
                     return false;
                 }
 
-                if (!TryGetPlayerTeam(player, out var actualTeam) || actualTeam != team)
+                var assignmentVerified = TryGetPlayerTeam(player, out var actualTeam) && actualTeam == team;
+                if (!assignmentVerified && resolvedClientId != 0)
                 {
-                    return false;
+                    assignmentVerified = TryGetPlayerTeamFromManager(resolvedClientId, out actualTeam) && actualTeam == team;
+                }
+
+                if (!assignmentVerified)
+                {
+                    var playerName = TryGetPlayerName(player);
+                    if (!string.IsNullOrWhiteSpace(playerName))
+                    {
+                        assignmentVerified = TryGetTeamFromScoreboard(resolvedClientId, playerName, out actualTeam) && actualTeam == team;
+                    }
+                }
+
+                if (!assignmentVerified)
+                {
+                    Debug.LogWarning($"[{Constants.MOD_NAME}] [JOIN] immediate team verification lagged after approval for {resolvedPlayerKey ?? playerKey ?? $"clientId:{resolvedClientId}"}. Continuing with applied internal assignment to {FormatTeamLabel(team)}.");
                 }
 
                 lock (teamStateLock)
@@ -676,7 +791,19 @@ namespace schrader.Server
                     lastKnownPlayerTeam[resolvedPlayerKey] = runtimeTeamValue;
                 }
 
-                if (openPositionSelection)
+                Debug.Log($"[{Constants.MOD_NAME}] [JOIN] assigned to team {FormatTeamLabel(team)} for {resolvedPlayerKey ?? playerKey ?? $"clientId:{resolvedClientId}"}.");
+
+                var restoredPosition = false;
+                if (!string.IsNullOrWhiteSpace(desiredPositionKey))
+                {
+                    restoredPosition = TryClaimPlayerPositionByKey(player, runtimeTeamValue, desiredPositionKey);
+                    if (restoredPosition)
+                    {
+                        Debug.Log($"[{Constants.MOD_NAME}] [JOIN] preserved position {desiredPositionKey} for {resolvedPlayerKey ?? playerKey ?? $"clientId:{resolvedClientId}"} during team assignment.");
+                    }
+                }
+
+                if (!restoredPosition && openPositionSelection)
                 {
                     TryOpenPlayerPositionSelection(player, team);
                 }
@@ -750,6 +877,157 @@ namespace schrader.Server
                 TryInvokeRpcExecute(player, "Client_SetPlayerStateRpc", positionSelectState, 0f);
             }
             catch { }
+        }
+
+        private static string NormalizePositionKeyForTeam(string positionKey, TeamResult team)
+        {
+            if (string.IsNullOrWhiteSpace(positionKey) || (team != TeamResult.Red && team != TeamResult.Blue))
+            {
+                return null;
+            }
+
+            var targetPrefix = team == TeamResult.Red ? "RedPositions:" : "BluePositions:";
+            var separatorIndex = positionKey.IndexOf(':');
+            if (separatorIndex < 0)
+            {
+                return positionKey;
+            }
+
+            var suffix = positionKey.Substring(separatorIndex + 1);
+            if (positionKey.StartsWith("RedPositions:", StringComparison.OrdinalIgnoreCase)
+                || positionKey.StartsWith("BluePositions:", StringComparison.OrdinalIgnoreCase))
+            {
+                return targetPrefix + suffix;
+            }
+
+            return positionKey;
+        }
+
+        private static bool TryClaimPlayerPositionByKey(object player, object teamValue, string preferredPositionKey)
+        {
+            if (player == null || teamValue == null || string.IsNullOrWhiteSpace(preferredPositionKey))
+            {
+                return false;
+            }
+
+            try
+            {
+                var ppmType = FindTypeByName("PlayerPositionManager", "Puck.PlayerPositionManager");
+                if (ppmType == null)
+                {
+                    return false;
+                }
+
+                var ppm = GetManagerInstance(ppmType);
+                if (ppm == null)
+                {
+                    return false;
+                }
+
+                string listName = null;
+                var teamName = teamValue.ToString();
+                if (string.Equals(teamName, "Red", StringComparison.OrdinalIgnoreCase)) listName = "RedPositions";
+                else if (string.Equals(teamName, "Blue", StringComparison.OrdinalIgnoreCase)) listName = "BluePositions";
+                if (string.IsNullOrEmpty(listName))
+                {
+                    return false;
+                }
+
+                var listProp = ppmType.GetProperty(listName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                var positions = listProp != null ? listProp.GetValue(ppm) as IEnumerable : null;
+                if (positions == null)
+                {
+                    return false;
+                }
+
+                var index = 0;
+                foreach (var position in positions)
+                {
+                    var positionKey = $"{listName}:{index++}";
+                    if (!string.Equals(positionKey, preferredPositionKey, StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    if (position == null)
+                    {
+                        return false;
+                    }
+
+                    if (IsPositionClaimed(position))
+                    {
+                        return IsPositionOwnedByPlayer(position, player);
+                    }
+
+                    var claimMethod = position.GetType().GetMethod("Server_Claim", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                    if (claimMethod == null)
+                    {
+                        return false;
+                    }
+
+                    claimMethod.Invoke(position, new[] { player });
+                    return true;
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static bool IsPositionClaimed(object position)
+        {
+            if (position == null) return false;
+
+            try
+            {
+                var posType = position.GetType();
+                var claimedProp = posType.GetProperty("IsClaimed", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (claimedProp == null)
+                {
+                    return false;
+                }
+
+                var claimedValue = claimedProp.GetValue(position);
+                return claimedValue is bool claimed && claimed;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool IsPositionOwnedByPlayer(object position, object playerObject)
+        {
+            if (position == null || playerObject == null) return false;
+
+            try
+            {
+                var posType = position.GetType();
+                object owner = null;
+
+                var ownerProp = posType.GetProperty("Player", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (ownerProp != null) owner = ownerProp.GetValue(position);
+
+                if (owner == null)
+                {
+                    var ownerField = posType.GetField("player", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                                   ?? posType.GetField("Player", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                    if (ownerField != null) owner = ownerField.GetValue(position);
+                }
+
+                if (owner == null) return true;
+                if (ReferenceEquals(owner, playerObject)) return true;
+
+                var ownerComponent = owner as Component;
+                var playerComponent = playerObject as Component;
+                if (ownerComponent != null && playerComponent != null)
+                {
+                    return ownerComponent == playerComponent;
+                }
+            }
+            catch { }
+
+            return false;
         }
 
         private static bool TryResolveConnectedPlayer(string playerKey, ulong clientId, out object player, out ulong resolvedClientId, out string resolvedPlayerKey)
@@ -868,6 +1146,11 @@ namespace schrader.Server
             {
                 if (TryGetCaptainClientIdForTeam(request.TargetTeam, out var currentCaptainClientId, out var currentCaptainKey, out _))
                 {
+                    if (!controlledTestModeEnabled && (IsDummyKey(currentCaptainKey) || BotManager.IsBotKey(currentCaptainKey)))
+                    {
+                        return false;
+                    }
+
                     request.TargetCaptainKey = currentCaptainKey;
                     request.TargetCaptainClientId = currentCaptainClientId;
                     clientId = currentCaptainClientId;

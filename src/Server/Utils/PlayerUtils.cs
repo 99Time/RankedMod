@@ -285,6 +285,31 @@ namespace schrader.Server
             return manager != null;
         }
 
+        private static bool TryGetLocalPlayer(out object player, out ulong clientId)
+        {
+            player = null;
+            clientId = 0;
+
+            if (!TryGetPlayerManager(out var manager)) return false;
+            try
+            {
+                var method = manager.GetType().GetMethod("GetLocalPlayer", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                if (method == null) return false;
+
+                player = method.Invoke(manager, null);
+                if (player == null) return false;
+
+                TryGetClientId(player, out clientId);
+                return true;
+            }
+            catch
+            {
+                player = null;
+                clientId = 0;
+                return false;
+            }
+        }
+
         private static bool TryGetPlayerByClientId(ulong clientId, out object player)
         {
             player = null;

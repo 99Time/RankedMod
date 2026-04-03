@@ -10,6 +10,7 @@ namespace schrader
     internal static class RankedOverlayNetwork
     {
         private const NetworkDelivery MatchResultDelivery = NetworkDelivery.ReliableFragmentedSequenced;
+        private const NetworkDelivery DraftExtendedDelivery = NetworkDelivery.ReliableFragmentedSequenced;
         private static readonly Dictionary<ulong, string> lastApprovalRequestSignatureByClient = new Dictionary<ulong, string>();
         private static string lastDraftSignature;
         private static string lastDraftExtendedSignature;
@@ -72,23 +73,49 @@ namespace schrader
             var shouldBroadcastExtended = !string.Equals(extendedSignature, lastDraftExtendedSignature, StringComparison.Ordinal);
             var shouldBroadcastBasic = !string.Equals(signature, lastDraftSignature, StringComparison.Ordinal);
 
-            if (shouldBroadcastExtended)
+            if (shouldBroadcastBasic)
             {
-                lastDraftExtendedSignature = extendedSignature;
-                Broadcast(RankedOverlayChannels.DraftStateExtended, extendedMessage);
+                shouldBroadcastExtended = true;
+            }
+
+            if (!message.IsVisible)
+            {
+                Debug.Log($"[{Constants.MOD_NAME}] [OVERLAY] Publish requested while draft inactive/hidden.");
+            }
+
+            if (!shouldBroadcastBasic)
+            {
+                Debug.Log($"[{Constants.MOD_NAME}] [OVERLAY] Publish skipped because DraftState signature unchanged.");
+            }
+
+            if (!shouldBroadcastExtended)
+            {
+                Debug.Log($"[{Constants.MOD_NAME}] [OVERLAY] Publish skipped because DraftStateExtended signature unchanged.");
             }
 
             if (shouldBroadcastBasic)
             {
+                Debug.Log($"[{Constants.MOD_NAME}] [OVERLAY] Publishing DraftState. Visible={message.IsVisible} Available={(message.AvailablePlayers?.Length ?? 0)} Red={(message.RedPlayers?.Length ?? 0)} Blue={(message.BluePlayers?.Length ?? 0)} Pending={(message.PendingLateJoiners?.Length ?? 0)}");
                 lastDraftSignature = signature;
                 Broadcast(RankedOverlayChannels.DraftState, message);
+            }
+
+            if (shouldBroadcastExtended)
+            {
+                Debug.Log($"[{Constants.MOD_NAME}] [OVERLAY] Publishing DraftStateExtended. Visible={extendedMessage.IsVisible} Available={(extendedMessage.AvailablePlayerEntries?.Length ?? 0)} Red={(extendedMessage.RedPlayerEntries?.Length ?? 0)} Blue={(extendedMessage.BluePlayerEntries?.Length ?? 0)} Pending={(extendedMessage.PendingLateJoinerEntries?.Length ?? 0)}");
+                lastDraftExtendedSignature = extendedSignature;
+                BroadcastReliable(RankedOverlayChannels.DraftStateExtended, extendedMessage, DraftExtendedDelivery);
             }
         }
 
         public static void PublishDraftStateToClient(ulong clientId, Server.RankedSystem.DraftOverlayState state)
         {
-            SendToClient(RankedOverlayChannels.DraftStateExtended, ToDraftExtendedMessage(state), clientId);
-            SendToClient(RankedOverlayChannels.DraftState, ToDraftMessage(state), clientId);
+            var basicMessage = ToDraftMessage(state);
+            var extendedMessage = ToDraftExtendedMessage(state);
+            Debug.Log($"[{Constants.MOD_NAME}] [OVERLAY] Resync DraftState to client {clientId}. Visible={basicMessage.IsVisible}");
+            SendToClient(RankedOverlayChannels.DraftState, basicMessage, clientId);
+            Debug.Log($"[{Constants.MOD_NAME}] [OVERLAY] Resync DraftStateExtended to client {clientId}. Visible={extendedMessage.IsVisible}");
+            SendToClientReliable(RankedOverlayChannels.DraftStateExtended, extendedMessage, clientId, DraftExtendedDelivery);
         }
 
         public static void PublishMatchResult(MatchResultMessage state)
@@ -252,6 +279,8 @@ namespace schrader
                 RedCaptainName = state.RedCaptainName,
                 BlueCaptainName = state.BlueCaptainName,
                 CurrentTurnName = state.CurrentTurnName,
+                CurrentTurnClientId = state.CurrentTurnClientId,
+                CurrentTurnSteamId = state.CurrentTurnSteamId,
                 AvailablePlayers = state.AvailablePlayers ?? Array.Empty<string>(),
                 RedPlayers = state.RedPlayers ?? Array.Empty<string>(),
                 BluePlayers = state.BluePlayers ?? Array.Empty<string>(),
@@ -287,11 +316,31 @@ namespace schrader
                 state.PromptText ?? string.Empty,
                 state.InitiatorName ?? string.Empty,
                 state.SecondsRemaining,
+                state.VoteDurationSeconds,
                 state.EligibleCount,
                 state.YesVotes,
                 state.NoVotes,
                 state.RequiredYesVotes,
+                string.Join(",", (state.PlayerEntries ?? Array.Empty<VoteOverlayPlayerEntryMessage>()).Select(BuildVoteEntrySignature)),
                 state.FooterText ?? string.Empty);
+        }
+
+        private static string BuildVoteEntrySignature(VoteOverlayPlayerEntryMessage entry)
+        {
+            if (entry == null)
+            {
+                return string.Empty;
+            }
+
+            return string.Join("~",
+                entry.ClientId,
+                entry.PlayerId ?? string.Empty,
+                entry.SteamId ?? string.Empty,
+                entry.DisplayName ?? string.Empty,
+                entry.PlayerNumber,
+                entry.HasVoted,
+                entry.VoteAccepted,
+                entry.IsInitiator);
         }
 
         private static string BuildDraftSignature(DraftOverlayStateMessage state)
@@ -303,6 +352,8 @@ namespace schrader
                 state.RedCaptainName ?? string.Empty,
                 state.BlueCaptainName ?? string.Empty,
                 state.CurrentTurnName ?? string.Empty,
+                state.CurrentTurnClientId,
+                state.CurrentTurnSteamId ?? string.Empty,
                 state.PendingLateJoinerCount,
                 state.DummyModeActive,
                 string.Join(",", state.AvailablePlayers ?? Array.Empty<string>()),
@@ -330,6 +381,8 @@ namespace schrader
             }
 
             return string.Join("~",
+                entry.ClientId,
+                entry.SteamId ?? string.Empty,
                 entry.CommandTarget ?? string.Empty,
                 entry.DisplayName ?? string.Empty,
                 entry.PlayerNumber,

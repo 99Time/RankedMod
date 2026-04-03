@@ -10,6 +10,8 @@ namespace schrader
         public string RedCaptainName;
         public string BlueCaptainName;
         public string CurrentTurnName;
+        public ulong CurrentTurnClientId;
+        public string CurrentTurnSteamId;
         public string[] AvailablePlayers;
         public string[] RedPlayers;
         public string[] BluePlayers;
@@ -23,6 +25,8 @@ namespace schrader
             return new DraftOverlayStateMessage
             {
                 IsVisible = false,
+                CurrentTurnClientId = 0,
+                CurrentTurnSteamId = string.Empty,
                 AvailablePlayers = Array.Empty<string>(),
                 RedPlayers = Array.Empty<string>(),
                 BluePlayers = Array.Empty<string>(),

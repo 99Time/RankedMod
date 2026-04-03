@@ -79,6 +79,9 @@ namespace schrader.Server
         private static float lastGamePhaseUpdateTime = -999f;
         private static float rankedNoMatchDetectedTime = -999f;
         private const float RankedStaleResetDelay = 3f;
+        private static float lastPracticeExpiryInterceptAt = -999f;
+        private const float PracticeExpiryInterceptRetryInterval = 1.5f;
+        private static int intentionalRankedStartPhaseDepth = 0;
         private static bool draftActive = false;
         private static bool draftTeamLockActive = false;
         private const float DraftStatePollInterval = 0.5f;
@@ -126,6 +129,8 @@ namespace schrader.Server
             public string RedCaptainName { get; set; }
             public string BlueCaptainName { get; set; }
             public string CurrentTurnName { get; set; }
+            public ulong CurrentTurnClientId { get; set; }
+            public string CurrentTurnSteamId { get; set; }
             public string[] AvailablePlayers { get; set; }
             public DraftOverlayPlayerEntryMessage[] AvailablePlayerEntries { get; set; }
             public string[] RedPlayers { get; set; }
@@ -238,6 +243,69 @@ namespace schrader.Server
             }
             catch { }
             return false;
+        }
+
+        private static bool PracticePhaseSetPrefix(object __instance, object __0, object __1)
+        {
+            try
+            {
+                if (intentionalRankedStartPhaseDepth > 0)
+                {
+                    return true;
+                }
+
+                if (!ShouldInterceptPracticeExpiryTransition(__0))
+                {
+                    return true;
+                }
+
+                if (Time.unscaledTime - lastPracticeExpiryInterceptAt < PracticeExpiryInterceptRetryInterval)
+                {
+                    return false;
+                }
+
+                lastPracticeExpiryInterceptAt = Time.unscaledTime;
+                Debug.Log($"[{Constants.MOD_NAME}] [PRACTICE] practice timer expired.");
+
+                if (rankedActive || draftActive)
+                {
+                    Debug.Log($"[{Constants.MOD_NAME}] [PRACTICE] ranked auto-start skipped: ranked flow already active.");
+                    Debug.Log($"[{Constants.MOD_NAME}] [PRACTICE] normal match start blocked when practice expires.");
+                    return false;
+                }
+
+                if (rankedVoteActive)
+                {
+                    Debug.Log($"[{Constants.MOD_NAME}] [PRACTICE] ranked auto-start skipped: ranked vote already in progress.");
+                    Debug.Log($"[{Constants.MOD_NAME}] [PRACTICE] normal match start blocked when practice expires.");
+                    return false;
+                }
+
+                var autoStartReady = TryGetEligiblePlayers(out var eligible, out var reason);
+                eligible = eligible ?? new List<RankedParticipant>();
+                var redEligible = eligible.Count(participant => participant != null && participant.team == TeamResult.Red);
+                var blueEligible = eligible.Count(participant => participant != null && participant.team == TeamResult.Blue);
+                Debug.Log($"[{Constants.MOD_NAME}] [PRACTICE] eligible ranked players count per side: red={redEligible}, blue={blueEligible}.");
+
+                if (autoStartReady && StartRankedFromEligible(eligible, false))
+                {
+                    Debug.Log($"[{Constants.MOD_NAME}] [PRACTICE] ranked auto-start triggered.");
+                }
+                else
+                {
+                    var skipReason = string.IsNullOrWhiteSpace(reason) ? "ranked draft could not be started" : reason;
+                    Debug.Log($"[{Constants.MOD_NAME}] [PRACTICE] ranked auto-start skipped: {skipReason}.");
+                }
+
+                Debug.Log($"[{Constants.MOD_NAME}] [PRACTICE] normal match start blocked when practice expires.");
+                return false;
+            }
+            catch (Exception ex)
+            {
+                try { Debug.LogError($"[{Constants.MOD_NAME}] Practice expiry interception failed: {ex.Message}"); } catch { }
+            }
+
+            return true;
         }
 
         private static bool TryGetTrackedMatchActive(out bool isActive)
@@ -388,14 +456,19 @@ namespace schrader.Server
                     var phase = lastGamePhaseName ?? string.Empty;
                     var p = phase.ToLowerInvariant();
 
-                    if (string.IsNullOrWhiteSpace(p)) return IsMatchActive();
+                    if (string.IsNullOrWhiteSpace(p)) return rankedActive || IsMatchActive();
 
-                    // Not active / safe phases
-                    if (p.Contains("gameover") || p.Contains("periodover") || p.Contains("warm") || p.Contains("intermission") || p.Contains("practice") || p.Contains("training") || p.Contains("mainmenu") || p.Contains("menu"))
+                    // Fully ended / safe phases
+                    if (IsTrackedFinalNonMatchPhase(p))
                         return false;
 
-                    // Active match phases
-                    if (p.Contains("playing") || p.Contains("faceoff"))
+                    // Ranked join protection must stay active for the whole ranked lifecycle,
+                    // including goal/replay/intermission windows between live faceoffs.
+                    if (rankedActive)
+                        return true;
+
+                    // Active non-ranked match phases.
+                    if (IsTrackedLiveMatchPhase(p))
                         return true;
 
                     // Unknown phase: fall back to existing heuristic
@@ -575,6 +648,35 @@ namespace schrader.Server
 
         #endif
 
+        private static bool ShouldInterceptPracticeExpiryTransition(object requestedPhase)
+        {
+            try
+            {
+                if (!TryGetGamePhaseValue(requestedPhase, out var requestedPhaseName))
+                {
+                    return false;
+                }
+
+                var requested = (requestedPhaseName ?? string.Empty).ToLowerInvariant();
+                if (!requested.Contains("faceoff"))
+                {
+                    return false;
+                }
+
+                string currentPhaseName;
+                lock (phaseLock)
+                {
+                    currentPhaseName = lastGamePhaseName;
+                }
+
+                var current = (currentPhaseName ?? string.Empty).ToLowerInvariant();
+                return current.Contains("warm") || current.Contains("practice") || current.Contains("training");
+            }
+            catch { }
+
+            return false;
+        }
+
         private static void UpdateRankedVote()
         {
             try
@@ -646,11 +748,11 @@ namespace schrader.Server
             var unique = new Dictionary<ulong, RankedParticipant>();
             foreach (var candidate in GetAllPlayers())
             {
-                if (!TryBuildStartEligibleParticipant(candidate, out var participant)) continue;
+                if (!TryBuildStartEligibleParticipant(candidate, out var participant, includeBots: true)) continue;
                 unique[participant.clientId] = participant;
             }
 
-            if (player != null && TryBuildStartEligibleParticipant(player, out var initiatorParticipant))
+            if (player != null && TryBuildStartEligibleParticipant(player, out var initiatorParticipant, includeBots: true))
             {
                 unique[initiatorParticipant.clientId] = initiatorParticipant;
             }
@@ -672,7 +774,7 @@ namespace schrader.Server
             return true;
         }
 
-        private static bool TryBuildStartEligibleParticipant(object player, out RankedParticipant participant)
+        private static bool TryBuildStartEligibleParticipant(object player, out RankedParticipant participant, bool includeBots = false)
         {
             participant = null;
 
@@ -688,7 +790,7 @@ namespace schrader.Server
                     return false;
                 }
 
-                if (BotManager.TryGetBotIdByClientId(participant.clientId, out _))
+                if (!includeBots && BotManager.TryGetBotIdByClientId(participant.clientId, out _))
                 {
                     return false;
                 }
@@ -705,6 +807,30 @@ namespace schrader.Server
 
             participant = null;
             return false;
+        }
+
+        private static void AutoAcceptControlledTestBotVotes(IEnumerable<RankedParticipant> eligible)
+        {
+            if (!controlledTestModeEnabled)
+            {
+                return;
+            }
+
+            foreach (var participant in eligible ?? Enumerable.Empty<RankedParticipant>())
+            {
+                if (participant == null || participant.clientId == 0)
+                {
+                    continue;
+                }
+
+                var participantKey = ResolveParticipantIdToKey(participant) ?? participant.playerId;
+                if (!BotManager.IsBotKey(participantKey))
+                {
+                    continue;
+                }
+
+                rankedVotes[participant.clientId] = true;
+            }
         }
 
         private static List<RankedParticipant> OrderParticipantsForDeterminism(IEnumerable<RankedParticipant> participants)
@@ -848,19 +974,15 @@ namespace schrader.Server
                     controlledTestModeInitiatorKey = rankedVoteStartedByKey;
                     controlledTestModeInitiatorClientId = clientId;
 
-                    if (controlledTestModeEnabled)
-                    {
-                        SendSystemChatToAll($"<size=14><color=#ffcc66>Ranked</color> controlled test mode enabled by {rankedVoteStartedByName}. Skipping the vote and starting the draft.</size>");
-                        StartRankedFromEligible(eligible, false);
-                        return;
-                    }
-
                     rankedVoteActive = true;
                     rankedVoteStartTime = Time.unscaledTime;
                     lastVoteSecondsRemaining = Mathf.CeilToInt(rankedVoteDuration);
                     lastRankedVoteTime = rankedVoteStartTime;
                     rankedVotes.Clear();
-                    rankedVotes[clientId] = true;
+                    if (!controlledTestModeEnabled)
+                    {
+                        rankedVotes[clientId] = true;
+                    }
 
                     // Capture eligible at vote start so the vote can be finalized consistently.
                     lastVoteEligible = eligible?
@@ -869,7 +991,10 @@ namespace schrader.Server
                         .ToList();
 
                     var pname = rankedVoteStartedByName;
-                    SendSystemChatToAll($"<size=14><color=#00ff00>Ranked vote started</color> by {pname}. Type <b>/y</b> to accept or <b>/n</b> to reject. ({Mathf.CeilToInt(rankedVoteDuration)}s)</size>");
+                    var controlledTestSuffix = controlledTestModeEnabled
+                        ? " Test mode active: bots auto-accept after your /y vote."
+                        : string.Empty;
+                    SendSystemChatToAll($"<size=14><color=#00ff00>Ranked vote started</color> by {pname}. Type <b>/y</b> to accept or <b>/n</b> to reject. ({Mathf.CeilToInt(rankedVoteDuration)}s){controlledTestSuffix}</size>");
                     PublishVoteOverlayState();
                 }
             }
@@ -943,6 +1068,12 @@ namespace schrader.Server
                 }
 
                 rankedVotes[clientId] = accept;
+
+                if (accept)
+                {
+                    AutoAcceptControlledTestBotVotes(eligible);
+                }
+
                 PublishVoteOverlayState();
 
                 // If everyone voted yes, start immediately. Use captured eligible as fallback.
@@ -997,6 +1128,77 @@ namespace schrader.Server
             catch { }
         }
 
+        private static VoteOverlayPlayerEntryMessage[] BuildVotePlayerEntries(IEnumerable<RankedParticipant> eligible)
+        {
+            return (eligible ?? Enumerable.Empty<RankedParticipant>())
+                .Where(participant => participant != null)
+                .Select(CloneParticipant)
+                .Where(participant => participant != null)
+                .OrderByDescending(participant => IsVoteInitiatorParticipant(participant))
+                .ThenBy(participant => participant.displayName ?? string.Empty, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(participant => participant.clientId)
+                .Select(BuildVotePlayerEntry)
+                .Where(entry => entry != null)
+                .ToArray();
+        }
+
+        private static VoteOverlayPlayerEntryMessage BuildVotePlayerEntry(RankedParticipant participant)
+        {
+            if (participant == null)
+            {
+                return null;
+            }
+
+            var participantKey = NormalizeResolvedPlayerKey(ResolveParticipantIdToKey(participant) ?? participant.playerId);
+            if (string.IsNullOrWhiteSpace(participantKey) && participant.clientId == 0)
+            {
+                return null;
+            }
+
+            object livePlayer = null;
+            if (participant.clientId != 0)
+            {
+                TryGetPlayerByClientId(participant.clientId, out livePlayer);
+            }
+
+            var steamId = NormalizeResolvedPlayerKey((livePlayer != null ? TryGetPlayerIdNoFallback(livePlayer) : null) ?? participant.playerId ?? participantKey);
+            var displayName = ResolvePreferredParticipantDisplayName(participant, null, participantKey)
+                ?? participant.displayName
+                ?? (participant.clientId != 0 ? $"Player {participant.clientId}" : "Player");
+            var voteAccepted = false;
+            var hasVoted = participant.clientId != 0 && rankedVotes.TryGetValue(participant.clientId, out voteAccepted);
+
+            return new VoteOverlayPlayerEntryMessage
+            {
+                ClientId = participant.clientId,
+                PlayerId = participantKey,
+                SteamId = steamId,
+                DisplayName = displayName,
+                PlayerNumber = ResolveParticipantPlayerNumber(participant),
+                HasVoted = hasVoted,
+                VoteAccepted = hasVoted && voteAccepted,
+                IsInitiator = IsVoteInitiatorParticipant(participant)
+            };
+        }
+
+        private static bool IsVoteInitiatorParticipant(RankedParticipant participant)
+        {
+            if (participant == null)
+            {
+                return false;
+            }
+
+            var participantKey = NormalizeResolvedPlayerKey(ResolveParticipantIdToKey(participant) ?? participant.playerId);
+            if (!string.IsNullOrWhiteSpace(rankedVoteStartedByKey)
+                && !string.IsNullOrWhiteSpace(participantKey)
+                && string.Equals(participantKey, rankedVoteStartedByKey, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            return participant.clientId != 0 && participant.clientId == rankedVoteStartedByClientId;
+        }
+
         public static VoteOverlayStateMessage GetVoteOverlayState()
         {
             try
@@ -1012,20 +1214,24 @@ namespace schrader.Server
 
                     CountSnapshotVotes(eligible, rankedVotes, out var total, out var yes, out var no);
                     var requiredYes = total > 0 ? ((total / 2) + 1) : 1;
-                    var secondsRemaining = Mathf.Max(0, Mathf.CeilToInt(rankedVoteDuration - (Time.unscaledTime - rankedVoteStartTime)));
+                    var preciseSecondsRemaining = Mathf.Max(0f, rankedVoteDuration - (Time.unscaledTime - rankedVoteStartTime));
+                    var secondsRemaining = Mathf.Max(0, Mathf.CeilToInt(preciseSecondsRemaining));
 
                     return new VoteOverlayStateMessage
                     {
                         IsVisible = true,
-                        Title = "RANKED VOTE",
-                        PromptText = "Enable ranked captain draft for this lobby?",
+                        Title = "RANKED MATCH FOUND",
+                        PromptText = "Accept to start a ranked captain draft for this lobby.",
                         InitiatorName = rankedVoteStartedByName,
                         SecondsRemaining = secondsRemaining,
+                        SecondsRemainingPrecise = preciseSecondsRemaining,
+                        VoteDurationSeconds = Mathf.Max(1, Mathf.CeilToInt(rankedVoteDuration)),
                         EligibleCount = total,
                         YesVotes = yes,
                         NoVotes = no,
                         RequiredYesVotes = requiredYes,
-                        FooterText = "Vote with the overlay buttons or use /y and /n."
+                        FooterText = "Majority ready starts ranked. You can also vote with /y and /n.",
+                        PlayerEntries = BuildVotePlayerEntries(eligible)
                     };
                 }
             }
@@ -1292,6 +1498,86 @@ namespace schrader.Server
                 return player != null;
             }
             catch { }
+            return false;
+        }
+
+        private static bool IsReplayPlayerObject(object player, ulong fallbackClientId = 0)
+        {
+            try
+            {
+                if (player == null)
+                {
+                    return false;
+                }
+
+                var typeName = player.GetType().FullName ?? player.GetType().Name ?? string.Empty;
+                if (typeName.IndexOf("replay", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return true;
+                }
+
+                if (!TryGetPlayerManager(out var manager) || manager == null)
+                {
+                    return false;
+                }
+
+                var managerType = manager.GetType();
+                var getReplayPlayers = managerType.GetMethod("GetReplayPlayers", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                if (getReplayPlayers != null)
+                {
+                    var replayPlayers = getReplayPlayers.Invoke(manager, null) as System.Collections.IEnumerable;
+                    if (replayPlayers != null)
+                    {
+                        foreach (var replayPlayer in replayPlayers)
+                        {
+                            if (ReferenceEquals(replayPlayer, player))
+                            {
+                                return true;
+                            }
+                        }
+                    }
+                }
+
+                var clientId = fallbackClientId;
+                if (clientId == 0)
+                {
+                    TryGetClientId(player, out clientId);
+                }
+
+                if (clientId != 0)
+                {
+                    var getReplayPlayerByClientId = managerType.GetMethod("GetReplayPlayerByClientId", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                    if (getReplayPlayerByClientId != null)
+                    {
+                        var replayPlayer = getReplayPlayerByClientId.Invoke(manager, new object[] { clientId });
+                        if (replayPlayer != null && ReferenceEquals(replayPlayer, player))
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static bool ShouldIgnoreTransientTeamHookPlayer(object player, ulong clientId, string steamId)
+        {
+            try
+            {
+                if (IsReplayPlayerObject(player, clientId))
+                {
+                    return true;
+                }
+
+                if (clientId == 0 && string.IsNullOrWhiteSpace(steamId))
+                {
+                    return true;
+                }
+            }
+            catch { }
+
             return false;
         }
 
@@ -2168,17 +2454,7 @@ namespace schrader.Server
             {
                 var active = IsTeamSwitchProtectionActive();
                 Debug.Log($"[{Constants.MOD_NAME}] TeamSelectPrefix called. protectActive={active}");
-                if (!active) return true;
-                ulong clientId = 0;
-                if (__0 is Dictionary<string, object> dict && dict.ContainsKey("clientId"))
-                {
-                    try { clientId = Convert.ToUInt64(dict["clientId"]); } catch { }
-                }
-                if (clientId != 0)
-                {
-                    SendSystemChatToClient("<size=13>Team changes are locked during active matches.</size>", clientId);
-                }
-                return false;
+                return true;
             }
             catch { }
             return true;
@@ -2191,7 +2467,7 @@ namespace schrader.Server
                 if (forcedTeamAssignmentDepth > 0) return true;
                 var active = IsTeamSwitchProtectionActive();
                 Debug.Log($"[{Constants.MOD_NAME}] TeamChangePrefix called. protectActive={active}");
-                if (active) return false;
+                return true;
             }
             catch { }
             return true;
@@ -2203,17 +2479,7 @@ namespace schrader.Server
             {
                 var active = IsTeamSwitchProtectionActive();
                 Debug.Log($"[{Constants.MOD_NAME}] SwitchTeamMenuPrefix called. protectActive={active}");
-                if (!active) return true;
-                ulong clientId = 0;
-                if (__0 is Dictionary<string, object> dict && dict.ContainsKey("clientId"))
-                {
-                    try { clientId = Convert.ToUInt64(dict["clientId"]); } catch { }
-                }
-                if (clientId != 0)
-                {
-                    SendSystemChatToClient("<size=13>Switch Team is disabled during active matches.</size>", clientId);
-                }
-                return false;
+                return true;
             }
             catch { }
             return true;
@@ -2225,10 +2491,44 @@ namespace schrader.Server
             {
                 var active = IsTeamSwitchProtectionActive();
                 Debug.Log($"[{Constants.MOD_NAME}] SwitchTeamMenuPrefixNoArgs called. protectActive={active}");
-                if (active) return false;
+                return true;
             }
             catch { }
             return true;
+        }
+
+        private static bool TryHandleSameTeamPositionSelectionRequest(object player, object currentTeam, object requestedTeam)
+        {
+            try
+            {
+                if (player == null)
+                {
+                    return false;
+                }
+
+                if (draftActive || draftTeamLockActive)
+                {
+                    return false;
+                }
+
+                var currentResolvedTeam = ConvertTeamValue(currentTeam);
+                var requestedResolvedTeam = ConvertTeamValue(requestedTeam);
+                if (currentResolvedTeam != TeamResult.Red && currentResolvedTeam != TeamResult.Blue)
+                {
+                    return false;
+                }
+
+                if (currentResolvedTeam != requestedResolvedTeam)
+                {
+                    return false;
+                }
+
+                TryOpenPlayerPositionSelection(player, currentResolvedTeam);
+                return true;
+            }
+            catch { }
+
+            return false;
         }
 
         private static bool PlayerTeamChangedEventPrefix(object __0)
@@ -2249,6 +2549,12 @@ namespace schrader.Server
                 if (string.IsNullOrEmpty(steamId) && clientId != 0 && TryGetPlayerByClientId(clientId, out var p))
                 {
                     steamId = TryGetPlayerId(p, clientId);
+                }
+
+                if (ShouldIgnoreTransientTeamHookPlayer(playerObj, clientId, steamId))
+                {
+                    Debug.Log($"[{Constants.MOD_NAME}] Ignoring transient replay/anonymous team change: steamId={steamId ?? "?"} clientId={clientId}");
+                    return true;
                 }
 
                 var newTeam = TryGetTeamFromDict(dict);
@@ -2368,6 +2674,12 @@ namespace schrader.Server
                 if (player == null) player = TryGetPlayerFromController(__instance);
                 if (player == null) player = TryGetPlayerFromDict(dict);
 
+                var playerKey = TryGetPlayerIdNoFallback(player);
+                if (ShouldIgnoreTransientTeamHookPlayer(player, clientId, playerKey))
+                {
+                    return true;
+                }
+
                 var currentTeam = GetCurrentTeamValue(player);
 
                 Debug.Log($"[{Constants.MOD_NAME}] Event_Client_OnPlayerSelectTeam protectActive={protectActive} clientId={clientId} current={FormatTeamValue(currentTeam)} requested={FormatTeamValue(requestedTeam)}");
@@ -2381,6 +2693,7 @@ namespace schrader.Server
                 // Selecting same team: do nothing and avoid side effects.
                 if (AreTeamValuesEqual(currentTeam, requestedTeam))
                 {
+                    TryHandleSameTeamPositionSelectionRequest(player, currentTeam, requestedTeam);
                     Debug.Log($"[{Constants.MOD_NAME}] PlayerSelectTeamPrefix: same team selected, skipping.");
                     return false;
                 }
@@ -2409,6 +2722,12 @@ namespace schrader.Server
             {
                 if (forcedTeamAssignmentDepth > 0) return true;
 
+                var playerKey = TryGetPlayerIdNoFallback(__instance);
+                if (ShouldIgnoreTransientTeamHookPlayer(__instance, 0UL, playerKey))
+                {
+                    return true;
+                }
+
                 var protectActive = IsTeamSwitchProtectionActive();
                 if (!protectActive) return true;
 
@@ -2424,6 +2743,7 @@ namespace schrader.Server
 
                 if (AreTeamValuesEqual(currentTeam, requestedTeam))
                 {
+                    TryHandleSameTeamPositionSelectionRequest(__instance, currentTeam, requestedTeam);
                     // Same team selected: do nothing (avoid double-switch side effects)
                     Debug.Log($"[{Constants.MOD_NAME}] PlayerTeamSetPrefix: same team selected ({FormatTeamValue(currentTeam)}), skipping.");
                     return false;
@@ -2613,12 +2933,12 @@ namespace schrader.Server
                     resolvedWinner = requestedWinner;
                 }
 
+                FinalizeRankedMatchEnd(resolvedWinner);
+
                 if (requestRuntimeEnd && !TryEndMatch())
                 {
-                    Debug.LogWarning($"[{Constants.MOD_NAME}] EndMatch could not trigger the runtime game-over path. Applying ranked results directly.");
+                    Debug.LogWarning($"[{Constants.MOD_NAME}] EndMatch could not trigger the runtime game-over path after publishing post-match results.");
                 }
-
-                FinalizeRankedMatchEnd(resolvedWinner);
                 return true;
             }
             catch (Exception ex)
@@ -2687,12 +3007,12 @@ namespace schrader.Server
                     resolvedWinner = requestedWinner;
                 }
 
+                FinalizeRankedMatchEnd(resolvedWinner);
+
                 if (requestRuntimeEnd && !TryEndMatch())
                 {
-                    Debug.LogWarning($"[{Constants.MOD_NAME}] EndMatch could not trigger the runtime game-over path. Applying ranked results directly.");
+                    Debug.LogWarning($"[{Constants.MOD_NAME}] EndMatch could not trigger the runtime game-over path after publishing post-match results.");
                 }
-
-                FinalizeRankedMatchEnd(resolvedWinner);
                 return true;
             }
             catch (Exception ex)
@@ -4846,6 +5166,21 @@ namespace schrader.Server
                         return new DraftOverlayState { IsVisible = false };
                     }
 
+                    ulong currentTurnClientId = 0;
+                    string currentTurnSteamId = null;
+                    if (draftActive
+                        && !string.IsNullOrWhiteSpace(currentCaptainTurnId)
+                        && TryGetParticipantByKey(currentCaptainTurnId, out var currentTurnParticipant)
+                        && currentTurnParticipant != null)
+                    {
+                        var currentTurnEntry = BuildDraftOverlayEntry(currentTurnParticipant, TeamResult.Unknown, currentCaptainTurnId);
+                        if (currentTurnEntry != null)
+                        {
+                            currentTurnClientId = currentTurnEntry.ClientId;
+                            currentTurnSteamId = currentTurnEntry.SteamId;
+                        }
+                    }
+
                     return new DraftOverlayState
                     {
                         IsVisible = true,
@@ -4854,12 +5189,14 @@ namespace schrader.Server
                         RedCaptainName = GetCaptainDisplayNameByKey(redCaptainId) ?? "Pending",
                         BlueCaptainName = GetCaptainDisplayNameByKey(blueCaptainId) ?? "Pending",
                         CurrentTurnName = draftActive ? (GetCaptainDisplayNameByKey(currentCaptainTurnId) ?? "Pending") : string.Empty,
+                        CurrentTurnClientId = currentTurnClientId,
+                        CurrentTurnSteamId = currentTurnSteamId,
                         AvailablePlayers = availablePlayers,
                         RedPlayers = redPlayers,
                         BluePlayers = bluePlayers,
                         PendingLateJoinerCount = pendingLateJoiners.Count,
                         DummyModeActive = rankedParticipants.Any(IsDummyParticipant),
-                        FooterText = "Use /draftui to toggle. Use /pick or scoreboard click where supported."
+                        FooterText = "Select a player to add them to your team."
                     };
                 }
             }
@@ -5158,10 +5495,8 @@ namespace schrader.Server
             try
             {
                 if (player == null) return;
-                if (TryGetClientId(player, out var cid) && cid != 0)
-                {
-                    SendSystemChatToClient("<size=13>Team switching is disabled while a match is in progress.</size>", cid);
-                }
+                TryGetClientId(player, out var cid);
+                Debug.Log($"[{Constants.MOD_NAME}] Suppressed blocked team-switch warning for client {cid}.");
             }
             catch { }
         }
@@ -5749,6 +6084,12 @@ namespace schrader.Server
                     return false;
                 }
 
+                if (TryStartRankedMatchWithoutWarmup())
+                {
+                    SendSystemChatToAll("<size=14><color=#00ff00>Ranked</color> match auto-started.</size>");
+                    return true;
+                }
+
                 // broaden candidate types/methods
                 string[] typeNames = { "GameManager", "MatchManager", "MatchController", "GameController", "PuckMatchManager", "Puck.GameManager", "Puck.MatchManager" };
                 string[] methodNames = { "Server_StartMatch", "Server_StartGame", "Server_Start", "StartMatch", "StartGame", "BeginMatch", "BeginGame", "StartRound", "BeginRound", "ForceStartMatch", "ForceStart" };
@@ -5804,6 +6145,78 @@ namespace schrader.Server
             }
             catch (Exception ex) { Debug.LogError($"[{Constants.MOD_NAME}] TryStartMatch failed: {ex.Message}"); }
             return false;
+        }
+
+        private static bool TryStartRankedMatchWithoutWarmup()
+        {
+            try
+            {
+                var gameManagerType = FindTypeByName("GameManager", "Puck.GameManager");
+                if (gameManagerType == null)
+                {
+                    return false;
+                }
+
+                var gameManager = GetManagerInstance(gameManagerType);
+                if (gameManager == null)
+                {
+                    return false;
+                }
+
+                var startMethods = gameManagerType.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+                    .Where(method => string.Equals(method.Name, "Server_StartGame", StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(method.Name, "StartGame", StringComparison.OrdinalIgnoreCase));
+
+                foreach (var method in startMethods)
+                {
+                    var parameters = method.GetParameters();
+                    var args = BuildDirectRankedStartArgs(parameters);
+                    if (args == null)
+                    {
+                        continue;
+                    }
+
+                    Debug.Log($"[{Constants.MOD_NAME}] [RANKED] Suppressing intermediate practice/warmup phase.");
+                    using (BeginIntentionalRankedStartPhase())
+                    {
+                        method.Invoke(gameManager, args);
+                    }
+
+                    if (TryGetCurrentGamePhaseName(gameManager, out var phaseName))
+                    {
+                        Debug.Log($"[{Constants.MOD_NAME}] [RANKED] Ranked match start phase = {phaseName}.");
+                    }
+                    else
+                    {
+                        Debug.Log($"[{Constants.MOD_NAME}] [RANKED] Ranked match start phase = unknown.");
+                    }
+
+                    return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[{Constants.MOD_NAME}] Ranked direct start without warmup failed: {ex.Message}");
+            }
+
+            return false;
+        }
+
+        private static IDisposable BeginIntentionalRankedStartPhase()
+        {
+            intentionalRankedStartPhaseDepth++;
+            return new RankedStartPhaseScope();
+        }
+
+        private sealed class RankedStartPhaseScope : IDisposable
+        {
+            public void Dispose()
+            {
+                if (intentionalRankedStartPhaseDepth > 0)
+                {
+                    intentionalRankedStartPhaseDepth--;
+                }
+            }
         }
 
         private static bool TryEndMatch()
@@ -5899,6 +6312,126 @@ namespace schrader.Server
                 else return null; // unsupported parameter type
             }
             return args;
+        }
+
+        private static object[] BuildDirectRankedStartArgs(System.Reflection.ParameterInfo[] parameters)
+        {
+            if (parameters == null || parameters.Length == 0)
+            {
+                return null;
+            }
+
+            var args = BuildDefaultArgs(parameters);
+            if (args == null || parameters[0].ParameterType != typeof(bool))
+            {
+                return null;
+            }
+
+            args[0] = false;
+            return args;
+        }
+
+        private static bool TryGetCurrentGamePhaseName(object gameManager, out string phaseName)
+        {
+            phaseName = null;
+
+            try
+            {
+                if (TryExtractCurrentGamePhaseName(gameManager, out phaseName))
+                {
+                    return true;
+                }
+            }
+            catch { }
+
+            lock (phaseLock)
+            {
+                if (!string.IsNullOrWhiteSpace(lastGamePhaseName))
+                {
+                    phaseName = lastGamePhaseName;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool TryExtractCurrentGamePhaseName(object gameManager, out string phaseName)
+        {
+            phaseName = null;
+            if (gameManager == null)
+            {
+                return false;
+            }
+
+            var managerType = gameManager.GetType();
+            foreach (var memberName in new[] { "GameState", "MatchState", "State" })
+            {
+                object stateHolder = null;
+                var property = managerType.GetProperty(memberName, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                if (property != null)
+                {
+                    stateHolder = property.GetValue(gameManager);
+                }
+
+                if (stateHolder == null)
+                {
+                    var field = managerType.GetField(memberName, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                    if (field != null)
+                    {
+                        stateHolder = field.GetValue(gameManager);
+                    }
+                }
+
+                if (stateHolder == null)
+                {
+                    continue;
+                }
+
+                var resolvedState = stateHolder;
+                var holderType = stateHolder.GetType();
+                var valueProperty = holderType.GetProperty("Value", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                if (valueProperty != null)
+                {
+                    resolvedState = valueProperty.GetValue(stateHolder) ?? stateHolder;
+                }
+                else
+                {
+                    var valueField = holderType.GetField("Value", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                    if (valueField != null)
+                    {
+                        resolvedState = valueField.GetValue(stateHolder) ?? stateHolder;
+                    }
+                }
+
+                if (resolvedState == null)
+                {
+                    continue;
+                }
+
+                var resolvedType = resolvedState.GetType();
+                object phaseValue = null;
+                var phaseProperty = resolvedType.GetProperty("Phase", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                if (phaseProperty != null)
+                {
+                    phaseValue = phaseProperty.GetValue(resolvedState);
+                }
+                else
+                {
+                    var phaseField = resolvedType.GetField("Phase", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                    if (phaseField != null)
+                    {
+                        phaseValue = phaseField.GetValue(resolvedState);
+                    }
+                }
+
+                if (TryGetGamePhaseValue(phaseValue, out phaseName))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         // Force-start a ranked match with an explicit participant list (admin)

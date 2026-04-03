@@ -64,11 +64,22 @@ namespace schrader.Server
 
         public static void SaveMmr()
         {
-            lock (mmrLock)
+            try
             {
-                var path = GetMmrPath();
-                var json = JsonConvert.SerializeObject(mmrFile, Formatting.Indented);
-                File.WriteAllText(path, json);
+                lock (mmrLock)
+                {
+                    var path = GetMmrPath();
+                    var json = JsonConvert.SerializeObject(mmrFile, Formatting.Indented);
+                    File.WriteAllText(path, json);
+                }
+            }
+            catch (Exception ex)
+            {
+                try
+                {
+                    Debug.LogError($"[{Constants.MOD_NAME}] [MMR] Save failed: {ex.Message}");
+                }
+                catch { }
             }
         }
 
@@ -76,15 +87,22 @@ namespace schrader.Server
         {
             try
             {
+                Debug.Log($"[{Constants.MOD_NAME}] [POSTMATCH] Match ended. Winner={winner}.");
+                Debug.Log($"[{Constants.MOD_NAME}] [POSTMATCH] Building result payload.");
                 var postMatchLockStarted = false;
                 var matchResult = BuildMatchResultMessage(winner);
                 if (matchResult != null && matchResult.IsVisible)
                 {
-                    Debug.Log($"[{Constants.MOD_NAME}] Match complete -> publishing results for {matchResult.Players?.Length ?? 0} players. Winner={winner}");
+                    Debug.Log($"[{Constants.MOD_NAME}] [POSTMATCH] Result payload built for {matchResult.Players?.Length ?? 0} players.");
+                    Debug.Log($"[{Constants.MOD_NAME}] [POSTMATCH] Publishing result payload.");
                     postMatchLockStarted = BeginPostMatchLock(matchResult);
                     RankedOverlayNetwork.PublishMatchResult(matchResult);
-                    Debug.Log($"[{Constants.MOD_NAME}] MatchResultMessage sent. Players={matchResult.Players?.Length ?? 0} Winner={winner}");
+                    Debug.Log($"[{Constants.MOD_NAME}] [POSTMATCH] Result payload sent.");
                     SendSystemChatToAll("<size=14><color=#66ccff>Match complete</color> post-match results are now available.</size>");
+                }
+                else
+                {
+                    Debug.LogWarning($"[{Constants.MOD_NAME}] [POSTMATCH] Result payload built for 0 players.");
                 }
 
                 ResetRankedState(true, true, preservePostMatchLock: postMatchLockStarted);
@@ -177,6 +195,20 @@ namespace schrader.Server
             }
 
             return Constants.DEFAULT_MMR;
+        }
+
+        private static bool HasStoredMmrEntry(string canonicalKey)
+        {
+            if (string.IsNullOrWhiteSpace(canonicalKey))
+            {
+                return false;
+            }
+
+            EnsureMmrLoaded();
+            lock (mmrLock)
+            {
+                return mmrFile.players != null && mmrFile.players.ContainsKey(canonicalKey);
+            }
         }
 
         private static string ResolveCanonicalMmrKey(RankedParticipant participant, string preferredKey, out bool promotedLegacyKey)

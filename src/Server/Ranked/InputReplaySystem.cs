@@ -218,6 +218,8 @@ namespace schrader.Server
         private static float replayAccumulator;
         private static Vector3 replayLastBotPosition = Vector3.zero;
         private static float replayStuckDuration;
+        private static DateTime lastReplaySaveLogUtc = DateTime.MinValue;
+        private static int replaySavesSinceLastLog;
         private static float replayFallbackUntilTime;
         private static readonly Dictionary<int, AutonomousReplayState> autonomousReplayStates = new Dictionary<int, AutonomousReplayState>();
 
@@ -1491,7 +1493,6 @@ namespace schrader.Server
                 var filePath = GetReplayFrameDataPath(directory, session.RecordingName);
                 var metadataPath = GetReplayMetadataPath(directory, session.RecordingName);
                 EnsureReplayMetadata(session);
-                Debug.Log($"[{Constants.MOD_NAME}] Saving BotMemory replay {session.RecordingName} with {session.Frames.Count} frames to {filePath}.");
                 WriteReplayFrameDataJson(filePath, session);
                 session.FrameDataFilePath = filePath;
                 session.MetadataFilePath = metadataPath;
@@ -1525,7 +1526,7 @@ namespace schrader.Server
                     }
                 }
 
-                Debug.Log($"[{Constants.MOD_NAME}] BotMemory replay saved successfully: {filePath}");
+                LogReplaySaveSummary(session, filePath);
                 return true;
             }
             catch (Exception ex)
@@ -1534,6 +1535,21 @@ namespace schrader.Server
                 Debug.LogError($"[{Constants.MOD_NAME}] Input replay save failed: {ex.Message}");
                 return false;
             }
+        }
+
+        private static void LogReplaySaveSummary(RecordedInputSession session, string filePath)
+        {
+            replaySavesSinceLastLog++;
+
+            var now = DateTime.UtcNow;
+            if ((now - lastReplaySaveLogUtc).TotalMinutes < 1)
+            {
+                return;
+            }
+
+            lastReplaySaveLogUtc = now;
+            Debug.Log($"[{Constants.MOD_NAME}] BotMemory replays saved in the last minute: {replaySavesSinceLastLog}. Latest={session?.RecordingName ?? "unknown"} Frames={session?.Frames?.Count ?? 0} Path={filePath}");
+            replaySavesSinceLastLog = 0;
         }
 
         private static void EnsureReplayMetadata(RecordedInputSession session)

@@ -217,13 +217,41 @@ namespace schrader.Server
 
         private static HashSet<ulong> ResolvePostMatchClientIds()
         {
+            var clientIds = new HashSet<ulong>();
+
             lock (rankedLock)
             {
-                return rankedParticipants
-                    .Where(participant => participant != null && !participant.isDummy && participant.clientId != 0)
-                    .Select(participant => participant.clientId)
-                    .ToHashSet();
+                foreach (var participant in rankedParticipants.Where(participant => participant != null && !participant.isDummy && participant.clientId != 0))
+                {
+                    clientIds.Add(participant.clientId);
+                }
             }
+
+            foreach (var player in GetAllPlayers())
+            {
+                try
+                {
+                    if (!TryBuildConnectedPlayerSnapshot(player, out var participant) || participant == null)
+                    {
+                        continue;
+                    }
+
+                    if (participant.isDummy || participant.clientId == 0)
+                    {
+                        continue;
+                    }
+
+                    if (participant.team != TeamResult.Red && participant.team != TeamResult.Blue)
+                    {
+                        continue;
+                    }
+
+                    clientIds.Add(participant.clientId);
+                }
+                catch { }
+            }
+
+            return clientIds;
         }
 
         private static Dictionary<string, string> CaptureLockedPostMatchPositions()

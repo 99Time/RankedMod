@@ -2,6 +2,8 @@ namespace schrader
 {
     public sealed class DraftOverlayPlayerEntryMessage
     {
+        public ulong ClientId;
+        public string SteamId;
         public string CommandTarget;
         public string DisplayName;
         public int PlayerNumber;

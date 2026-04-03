@@ -9,6 +9,86 @@ namespace schrader.Server
 {
     public static partial class RankedSystem
     {
+        private static bool IsReplayPlayerObject(object player, ulong fallbackClientId = 0)
+        {
+            try
+            {
+                if (player == null)
+                {
+                    return false;
+                }
+
+                var typeName = player.GetType().FullName ?? player.GetType().Name ?? string.Empty;
+                if (typeName.IndexOf("replay", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return true;
+                }
+
+                if (!TryGetPlayerManager(out var manager) || manager == null)
+                {
+                    return false;
+                }
+
+                var managerType = manager.GetType();
+                var getReplayPlayers = managerType.GetMethod("GetReplayPlayers", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                if (getReplayPlayers != null)
+                {
+                    var replayPlayers = getReplayPlayers.Invoke(manager, null) as System.Collections.IEnumerable;
+                    if (replayPlayers != null)
+                    {
+                        foreach (var replayPlayer in replayPlayers)
+                        {
+                            if (ReferenceEquals(replayPlayer, player))
+                            {
+                                return true;
+                            }
+                        }
+                    }
+                }
+
+                var clientId = fallbackClientId;
+                if (clientId == 0)
+                {
+                    TryGetClientId(player, out clientId);
+                }
+
+                if (clientId != 0)
+                {
+                    var getReplayPlayerByClientId = managerType.GetMethod("GetReplayPlayerByClientId", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                    if (getReplayPlayerByClientId != null)
+                    {
+                        var replayPlayer = getReplayPlayerByClientId.Invoke(manager, new object[] { clientId });
+                        if (replayPlayer != null && ReferenceEquals(replayPlayer, player))
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static bool ShouldIgnoreTransientTeamHookPlayer(object player, ulong clientId, string steamId)
+        {
+            try
+            {
+                if (IsReplayPlayerObject(player, clientId))
+                {
+                    return true;
+                }
+
+                if (clientId == 0 && string.IsNullOrWhiteSpace(steamId))
+                {
+                    return true;
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
         private static void TryPatchDraftUiHooks()
         {
             if (draftUiHooksPatched) return;
@@ -69,8 +149,25 @@ namespace schrader.Server
                 object actorPlayer = null;
                 if (actorClientId != 0) TryGetPlayerByClientId(actorClientId, out actorPlayer);
 
+                if ((actorPlayer == null || actorClientId == 0) && TryGetLocalPlayer(out var localPlayer, out var localClientId))
+                {
+                    actorPlayer = localPlayer;
+                    actorClientId = localClientId;
+                }
+
+                var clickedPlayer = TryGetPlayerFromDict(dict);
+                var clickedPlayerName = TryGetPlayerName(clickedPlayer) ?? "unknown";
+                Debug.Log($"[{Constants.MOD_NAME}] [DRAFT] Scoreboard click received. actorClientId={actorClientId} clickedPlayer={clickedPlayerName}");
+
+                if (actorPlayer == null || actorClientId == 0)
+                {
+                    Debug.LogWarning($"[{Constants.MOD_NAME}] [DRAFT] Scoreboard click rejected: could not resolve clicking captain.");
+                    return false;
+                }
+
                 if (!TryResolveDraftUiTarget(dict, out var targetParticipant))
                 {
+                    Debug.LogWarning($"[{Constants.MOD_NAME}] [DRAFT] Scoreboard translation mismatch: clicked player could not resolve to a ranked participant.");
                     if (actorClientId != 0)
                     {
                         SendSystemChatToClient("<size=13><color=#ff6666>Draft UI</color> could not resolve the clicked player from the scoreboard event.</size>", actorClientId);
@@ -80,6 +177,30 @@ namespace schrader.Server
 
                 var targetKey = ResolveParticipantIdToKey(targetParticipant);
                 if (string.IsNullOrEmpty(targetKey)) return false;
+
+                if (draftActive)
+                {
+                    if (!TryResolveAvailableDraftParticipant(targetKey, out var resolvedCandidate, out var failureReason, out var availableTargets, out var staleEntries, out var duplicateEntries))
+                    {
+                        Debug.LogWarning($"[{Constants.MOD_NAME}] [DRAFT] Scoreboard translation mismatch. clicked={targetKey} reason={failureReason} available={string.Join(", ", availableTargets ?? Array.Empty<string>())}");
+
+                        if (staleEntries != null && staleEntries.Length > 0)
+                        {
+                            Debug.LogWarning($"[{Constants.MOD_NAME}] [DRAFT] Scoreboard stale pool entries: {string.Join(", ", staleEntries)}");
+                        }
+
+                        if (duplicateEntries != null && duplicateEntries.Length > 0)
+                        {
+                            Debug.LogWarning($"[{Constants.MOD_NAME}] [DRAFT] Scoreboard duplicate pool entries: {string.Join(", ", duplicateEntries)}");
+                        }
+
+                        SendSystemChatToClient("<size=13><color=#ff6666>Draft UI</color> clicked player is not in the current available draft pool.</size>", actorClientId);
+                        return false;
+                    }
+
+                    targetParticipant = resolvedCandidate.Participant;
+                    targetKey = resolvedCandidate.AuthoritativeKey;
+                }
 
                 if (draftActive && IsDraftAvailablePlayer(targetKey))
                 {
@@ -147,6 +268,7 @@ namespace schrader.Server
             try
             {
                 var postfix = typeof(RankedSystem).GetMethod(nameof(GameStateUpdatePostfix), System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+                var practiceExpiryPrefix = typeof(RankedSystem).GetMethod(nameof(PracticePhaseSetPrefix), System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
                 if (postfix == null) return;
 
                 string[] typeNames = { "GameManager" };
@@ -164,8 +286,17 @@ namespace schrader.Server
                             var method = t.GetMethod(mn, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
                             if (method == null) continue;
 
+                            var setPhaseMethod = t.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+                                .FirstOrDefault(candidate => string.Equals(candidate.Name, "Server_SetPhase", StringComparison.Ordinal) && candidate.GetParameters().Length >= 1);
+
                             var h = new Harmony(Constants.MOD_NAME + ".gamestate");
                             h.Patch(method, postfix: new HarmonyLib.HarmonyMethod(postfix));
+                            if (setPhaseMethod != null && practiceExpiryPrefix != null)
+                            {
+                                h.Patch(setPhaseMethod, prefix: new HarmonyLib.HarmonyMethod(practiceExpiryPrefix));
+                                Debug.Log($"[{Constants.MOD_NAME}] Practice expiry hook aplicado: {t.FullName}.Server_SetPhase");
+                            }
+
                             gameStateHooksPatched = true;
                             Debug.Log($"[{Constants.MOD_NAME}] GameState hook aplicado: {t.FullName}.{mn}");
                             return;
@@ -530,7 +661,7 @@ namespace schrader.Server
                 if (forcedTeamAssignmentDepth > 0) return true;
                 var active = IsTeamSwitchProtectionActive();
                 Debug.Log($"[{Constants.MOD_NAME}] TeamChangePrefix called. protectActive={active}");
-                if (active) return false;
+                return true;
             }
             catch { }
             return true;
@@ -542,7 +673,16 @@ namespace schrader.Server
             {
                 var active = IsTeamSwitchProtectionActive();
                 Debug.Log($"[{Constants.MOD_NAME}] SwitchTeamMenuPrefix called. protectActive={active}");
-                if (!active) return true;
+                if (!active)
+                {
+                    return true;
+                }
+
+                if (!rankedActive || draftActive || draftTeamLockActive)
+                {
+                    return true;
+                }
+
                 ulong clientId = 0;
                 object player = null;
                 if (__0 is Dictionary<string, object> dict && dict.ContainsKey("clientId"))
@@ -551,22 +691,25 @@ namespace schrader.Server
                     try { player = TryGetPlayerFromDict(dict); } catch { }
                 }
 
-                if (rankedActive && !draftActive && !draftTeamLockActive && TryHandleSwitchTeamMenuRequest(player, clientId))
+                if (player == null && clientId != 0 && TryGetPlayerByClientId(clientId, out var resolvedPlayer))
                 {
-                    return false;
+                    player = resolvedPlayer;
                 }
 
-                if (rankedActive && !draftActive && !draftTeamLockActive)
+                var currentTeam = GetCurrentTeamValue(player);
+                if (IsTeamNoneLike(currentTeam))
                 {
-                    if (player == null && clientId != 0 && TryGetPlayerByClientId(clientId, out var resolvedPlayer)) player = resolvedPlayer;
-                    var currentTeam = GetCurrentTeamValue(player);
-                    if (IsTeamNoneLike(currentTeam)) return true;
+                    return true;
                 }
 
-                if (clientId != 0)
+                var playerKey = TryGetPlayerIdNoFallback(player);
+                if (string.IsNullOrWhiteSpace(playerKey))
                 {
-                    SendSystemChatToClient("<size=13>Switch Team is disabled during active matches.</size>", clientId);
+                    playerKey = TryGetPlayerId(player, clientId);
                 }
+
+                Debug.Log($"[{Constants.MOD_NAME}] SwitchTeamMenuPrefix rerouting active player to TeamSelect. clientId={clientId} current={FormatTeamValue(currentTeam)}");
+                TryOpenPlayerTeamSelection(playerKey, clientId);
                 return false;
             }
             catch { }
@@ -579,10 +722,44 @@ namespace schrader.Server
             {
                 var active = IsTeamSwitchProtectionActive();
                 Debug.Log($"[{Constants.MOD_NAME}] SwitchTeamMenuPrefixNoArgs called. protectActive={active}");
-                if (active) return false;
+                return true;
             }
             catch { }
             return true;
+        }
+
+        private static bool TryHandleSameTeamPositionSelectionRequest(object player, object currentTeam, object requestedTeam)
+        {
+            try
+            {
+                if (player == null)
+                {
+                    return false;
+                }
+
+                if (draftActive || draftTeamLockActive)
+                {
+                    return false;
+                }
+
+                var currentResolvedTeam = ConvertTeamValue(currentTeam);
+                var requestedResolvedTeam = ConvertTeamValue(requestedTeam);
+                if (currentResolvedTeam != TeamResult.Red && currentResolvedTeam != TeamResult.Blue)
+                {
+                    return false;
+                }
+
+                if (currentResolvedTeam != requestedResolvedTeam)
+                {
+                    return false;
+                }
+
+                TryOpenPlayerPositionSelection(player, currentResolvedTeam);
+                return true;
+            }
+            catch { }
+
+            return false;
         }
 
         private static bool PlayerTeamChangedEventPrefix(object __0)
@@ -604,6 +781,12 @@ namespace schrader.Server
                 {
                     steamId = TryGetPlayerId(p, clientId);
                 }
+
+                    if (ShouldIgnoreTransientTeamHookPlayer(playerObj, clientId, steamId))
+                    {
+                        Debug.Log($"[{Constants.MOD_NAME}] Ignoring transient replay/anonymous team change: steamId={steamId ?? "?"} clientId={clientId}");
+                        return true;
+                    }
 
                 var newTeam = TryGetTeamFromDict(dict);
                 var oldTeam = TryGetOldTeamFromDict(dict);
@@ -722,6 +905,12 @@ namespace schrader.Server
                 if (player == null) player = TryGetPlayerFromController(__instance);
                 if (player == null) player = TryGetPlayerFromDict(dict);
 
+                    var playerKey = TryGetPlayerIdNoFallback(player);
+                    if (ShouldIgnoreTransientTeamHookPlayer(player, clientId, playerKey))
+                    {
+                        return true;
+                    }
+
                 var currentTeam = GetCurrentTeamValue(player);
 
                 Debug.Log($"[{Constants.MOD_NAME}] Event_Client_OnPlayerSelectTeam protectActive={protectActive} clientId={clientId} current={FormatTeamValue(currentTeam)} requested={FormatTeamValue(requestedTeam)}");
@@ -732,15 +921,6 @@ namespace schrader.Server
                     return true;
                 }
 
-                // Selecting same team: do nothing and avoid side effects.
-                if (AreTeamValuesEqual(currentTeam, requestedTeam))
-                {
-                    Debug.Log($"[{Constants.MOD_NAME}] PlayerSelectTeamPrefix: same team selected, skipping.");
-                    return false;
-                }
-
-                if (!protectActive) return true;
-
                 if (rankedActive && !draftActive && !draftTeamLockActive)
                 {
                     if (TryHandleTeamSelectionRequest(player, clientId, currentTeam, requestedTeam))
@@ -748,6 +928,16 @@ namespace schrader.Server
                         return false;
                     }
                 }
+
+                // Selecting same team: do nothing and avoid side effects.
+                if (AreTeamValuesEqual(currentTeam, requestedTeam))
+                {
+                    TryHandleSameTeamPositionSelectionRequest(player, currentTeam, requestedTeam);
+                    Debug.Log($"[{Constants.MOD_NAME}] PlayerSelectTeamPrefix: same team selected, skipping.");
+                    return false;
+                }
+
+                if (!protectActive) return true;
 
                 // Allow initial assignment when joining mid-match: current is None/Unknown and requested is a real team
                 if (!draftTeamLockActive && IsTeamNoneLike(currentTeam) && !IsTeamNoneLike(requestedTeam))
@@ -771,6 +961,12 @@ namespace schrader.Server
             {
                 if (forcedTeamAssignmentDepth > 0) return true;
 
+                    var playerKey = TryGetPlayerIdNoFallback(__instance);
+                    if (ShouldIgnoreTransientTeamHookPlayer(__instance, 0UL, playerKey))
+                    {
+                        return true;
+                    }
+
                 var protectActive = IsTeamSwitchProtectionActive();
                 if (!protectActive) return true;
 
@@ -784,19 +980,20 @@ namespace schrader.Server
                     return true;
                 }
 
-                if (AreTeamValuesEqual(currentTeam, requestedTeam))
-                {
-                    // Same team selected: do nothing (avoid double-switch side effects)
-                    Debug.Log($"[{Constants.MOD_NAME}] PlayerTeamSetPrefix: same team selected ({FormatTeamValue(currentTeam)}), skipping.");
-                    return false;
-                }
-
                 if (rankedActive && !draftActive && !draftTeamLockActive)
                 {
                     if (TryHandleTeamSelectionRequest(__instance, 0UL, currentTeam, requestedTeam))
                     {
                         return false;
                     }
+                }
+
+                if (AreTeamValuesEqual(currentTeam, requestedTeam))
+                {
+                    TryHandleSameTeamPositionSelectionRequest(__instance, currentTeam, requestedTeam);
+                    // Same team selected: do nothing (avoid double-switch side effects)
+                    Debug.Log($"[{Constants.MOD_NAME}] PlayerTeamSetPrefix: same team selected ({FormatTeamValue(currentTeam)}), skipping.");
+                    return false;
                 }
 
                 // Allow initial team assignment while match is active (joining mid-game): current == None/Unknown, requested is a real team
