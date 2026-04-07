@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using Steamworks;
 using UnityEngine;
+using System.Linq;
 
 namespace schrader
 {
@@ -11,6 +12,8 @@ namespace schrader
         {
             public Texture2D Texture;
             public float LastAttemptAt = -999f;
+            public bool CacheMissLogged;
+            public bool FirstHitLogged;
         }
 
         private static readonly Dictionary<string, CacheEntry> cache = new Dictionary<string, CacheEntry>(StringComparer.Ordinal);
@@ -20,20 +23,37 @@ namespace schrader
         {
             texture = null;
 
-            if (!TryParseSteamId(steamId, out var friendSteamId))
+            var normalizedSteamId = NormalizeSteamId(steamId);
+
+            if (!TryParseSteamId(normalizedSteamId, out var friendSteamId))
             {
+                if (!string.IsNullOrWhiteSpace(steamId))
+                {
+                    Debug.LogWarning($"[AVATAR] Invalid avatar lookup. requested={steamId} normalized={normalizedSteamId ?? "none"}");
+                }
                 return false;
             }
 
-            if (!cache.TryGetValue(steamId, out var entry))
+            if (!cache.TryGetValue(normalizedSteamId, out var entry))
             {
                 entry = new CacheEntry();
-                cache[steamId] = entry;
+                cache[normalizedSteamId] = entry;
+            }
+
+            if (!entry.CacheMissLogged)
+            {
+                entry.CacheMissLogged = true;
+                Debug.Log($"[AVATAR] Cache miss. requested={steamId ?? "none"} normalized={normalizedSteamId}");
             }
 
             if (entry.Texture != null)
             {
                 texture = entry.Texture;
+                if (!entry.FirstHitLogged)
+                {
+                    entry.FirstHitLogged = true;
+                    Debug.Log($"[AVATAR] Cache hit. steamId={normalizedSteamId}");
+                }
                 return true;
             }
 
@@ -43,12 +63,15 @@ namespace schrader
             }
 
             entry.LastAttemptAt = Time.unscaledTime;
-            if (!TryLoadTexture(friendSteamId, out texture))
+            Debug.Log($"[AVATAR] Async load start. steamId={normalizedSteamId}");
+            if (!TryLoadTexture(friendSteamId, out texture, out var failureReason))
             {
+                Debug.Log($"[AVATAR] Async load pending/fail. steamId={normalizedSteamId} reason={failureReason}");
                 return false;
             }
 
             entry.Texture = texture;
+            Debug.Log($"[AVATAR] Async load finish. steamId={normalizedSteamId} size={texture.width}x{texture.height}");
             return true;
         }
 
@@ -65,27 +88,31 @@ namespace schrader
             cache.Clear();
         }
 
-        private static bool TryLoadTexture(CSteamID friendSteamId, out Texture2D texture)
+        private static bool TryLoadTexture(CSteamID friendSteamId, out Texture2D texture, out string failureReason)
         {
             texture = null;
+            failureReason = null;
 
             try
             {
                 SteamFriends.RequestUserInformation(friendSteamId, false);
-                var imageHandle = SteamFriends.GetLargeFriendAvatar(friendSteamId);
+                var imageHandle = ResolveAvatarHandle(friendSteamId);
                 if (imageHandle <= 0)
                 {
+                    failureReason = imageHandle == -1 ? "pending-steam-avatar" : "missing-avatar-handle";
                     return false;
                 }
 
                 if (!SteamUtils.GetImageSize(imageHandle, out var width, out var height) || width == 0 || height == 0)
                 {
+                    failureReason = "missing-avatar-size";
                     return false;
                 }
 
                 var buffer = new byte[width * height * 4];
                 if (!SteamUtils.GetImageRGBA(imageHandle, buffer, buffer.Length))
                 {
+                    failureReason = "missing-avatar-rgba";
                     return false;
                 }
 
@@ -100,11 +127,44 @@ namespace schrader
                 texture.Apply(false, true);
                 return true;
             }
-            catch
+            catch (Exception ex)
             {
                 texture = null;
+                failureReason = $"exception:{ex.GetType().Name}";
                 return false;
             }
+        }
+
+        private static int ResolveAvatarHandle(CSteamID friendSteamId)
+        {
+            try
+            {
+                var largeHandle = SteamFriends.GetLargeFriendAvatar(friendSteamId);
+                if (largeHandle > 0)
+                {
+                    return largeHandle;
+                }
+
+                var mediumHandle = SteamFriends.GetMediumFriendAvatar(friendSteamId);
+                if (mediumHandle > 0)
+                {
+                    return mediumHandle;
+                }
+
+                var smallHandle = SteamFriends.GetSmallFriendAvatar(friendSteamId);
+                if (smallHandle > 0)
+                {
+                    return smallHandle;
+                }
+
+                if (largeHandle == -1 || mediumHandle == -1 || smallHandle == -1)
+                {
+                    return -1;
+                }
+            }
+            catch { }
+
+            return 0;
         }
 
         private static void FlipRgbaVertically(byte[] buffer, int width, int height)
@@ -138,6 +198,42 @@ namespace schrader
 
             parsedSteamId = new CSteamID(rawSteamId);
             return true;
+        }
+
+        private static string NormalizeSteamId(string candidate)
+        {
+            var clean = candidate?.Trim();
+            if (string.IsNullOrWhiteSpace(clean))
+            {
+                return null;
+            }
+
+            if (ulong.TryParse(clean, out var rawSteamId) && rawSteamId != 0)
+            {
+                return clean;
+            }
+
+            if (clean.IndexOf(':') >= 0 || clean.IndexOf('_') >= 0 || clean.IndexOf('/') >= 0 || clean.IndexOf('\\') >= 0)
+            {
+                foreach (var token in clean.Split(new[] { ':', '_', '/', '\\' }, StringSplitOptions.RemoveEmptyEntries))
+                {
+                    if (ulong.TryParse(token, out rawSteamId) && rawSteamId != 0)
+                    {
+                        return token;
+                    }
+                }
+            }
+
+            if (clean.StartsWith("steam", StringComparison.OrdinalIgnoreCase))
+            {
+                var digits = new string(clean.Where(char.IsDigit).ToArray());
+                if (ulong.TryParse(digits, out rawSteamId) && rawSteamId != 0)
+                {
+                    return digits;
+                }
+            }
+
+            return null;
         }
     }
 }

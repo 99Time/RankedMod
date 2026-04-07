@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.IO;
+using System.Reflection;
 using System.Threading;
 using HarmonyLib;
 using UnityEngine;
@@ -25,6 +26,24 @@ namespace schrader.Server
         private static string rankedVoteStartedByKey = null;
         private static ulong rankedVoteStartedByClientId = 0;
         private static Dictionary<ulong, bool> rankedVotes = new Dictionary<ulong, bool>();
+        private static bool singleGoalieVoteActive = false;
+        private static float singleGoalieVoteStartTime = -999f;
+        private static float singleGoalieVoteDuration = 25f;
+        private static float singleGoalieVoteCooldown = 60f;
+        private static float lastSingleGoalieVoteTime = -999f;
+        private static string singleGoalieVoteStartedByName = null;
+        private static string singleGoalieVoteStartedByKey = null;
+        private static ulong singleGoalieVoteStartedByClientId = 0;
+        private static bool singleGoalieVoteDisablesMode = false;
+        private static Dictionary<ulong, bool> singleGoalieVotes = new Dictionary<ulong, bool>();
+        private static List<RankedParticipant> singleGoalieVoteEligible = null;
+        private static bool singleGoalieEnabled = false;
+        private static string singleGoaliePlayerKey = null;
+        private static ulong singleGoaliePlayerClientId = 0;
+        private static string singleGoaliePlayerName = null;
+        private static TeamResult singleGoalieAssignedTeam = TeamResult.Unknown;
+        private static readonly HashSet<int> singleGoalieHintAnnouncedPeriods = new HashSet<int>();
+        private const float SingleGoaliePuckThreshold = 2f;
         private static bool rankedActive = false;
         private static float lastRankedEndTime = -999f;
         private static List<RankedParticipant> rankedParticipants = new List<RankedParticipant>();
@@ -35,12 +54,27 @@ namespace schrader.Server
         private static int manualSpawnDepth = 0;
         private static readonly string[] WinnerKeywords = { "score", "goal", "winner", "winning", "team", "result" };
         private const int MaxLoggedMembers = 12;
+        private const bool SyntheticPlayersEnabled = true;
+        private const float SyntheticPlayerPurgeIntervalSeconds = 5f;
+        private const float InvalidWarmupDummySweepIntervalSeconds = 1f;
+        private const float InvalidWarmupDummyGraceSeconds = 4f;
+        private const float PracticeFakePlayerSweepIntervalSeconds = 1f;
+        private const float ReplayLeftoverSweepIntervalSeconds = 1f;
+        private const float ReplayLeftoverGraceSeconds = 1.5f;
         private static bool gameStateHooksPatched = false;
         private static bool teamHooksPatched = false;
+        private static bool replayDebugHooksPatched = false;
         private static bool draftUiHooksPatched = false;
+        private static bool connectionApprovalHooksPatched = false;
+        private static float lastSyntheticPlayerPurgeTime = -999f;
+        private static float lastInvalidWarmupDummySweepTime = -999f;
+        private static float lastPracticeFakePlayerSweepTime = -999f;
+        private static float lastReplayLeftoverSweepTime = -999f;
         private static int? lastRedScore = null;
         private static int? lastBlueScore = null;
         private static float lastScoreUpdateTime = -999f;
+        private static Dictionary<ulong, float> invalidWarmupDummyFirstSeenTimes = new Dictionary<ulong, float>();
+        private static readonly Dictionary<string, float> replayLeftoverFirstSeenTimes = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
 
         private static readonly object mmrLock = new object();
         private static MmrFile mmrFile = new MmrFile();
@@ -146,7 +180,15 @@ namespace schrader.Server
 
         public static void Initialize()
         {
-            try { LoadMmr(); LoadReplayMemory(); TryPatchRankedMatchEndHooks(); TryPatchGameStateHooks(); TryPatchGoalHooks(); TryPatchSpawnHooks(); TryPatchTeamChangeHooks(); TryPatchDraftUiHooks(); } catch { }
+            SetControlledTestModeEnabled(false);
+            try { ClearAllDummies(); } catch { }
+            try { StopReplay(null, 0); } catch { }
+            invalidWarmupDummyFirstSeenTimes.Clear();
+            replayLeftoverFirstSeenTimes.Clear();
+            lastInvalidWarmupDummySweepTime = -999f;
+            lastReplayLeftoverSweepTime = -999f;
+            try { LoadMmr(); LoadReplayMemory(); TryPatchRankedMatchEndHooks(); TryPatchGameStateHooks(); TryPatchGoalHooks(); TryPatchSpawnHooks(); TryPatchTeamChangeHooks(); TryPatchReplayDebugHooks(); TryPatchDraftUiHooks(); TryPatchConnectionApprovalHooks(); } catch { }
+            EnforceSyntheticPlayerLockdown(force: true);
         }
 
         // Public accessor to indicate a ranked match is currently active
@@ -160,19 +202,1030 @@ namespace schrader.Server
             try { return forfeitActive; } catch { return false; }
         }
 
+        public static bool IsSingleGoalieVoteActive()
+        {
+            try { return singleGoalieVoteActive; } catch { return false; }
+        }
+
         public static bool IsControlledTestModeEnabled()
         {
             try { return controlledTestModeEnabled; } catch { return false; }
         }
 
+        internal static bool AreSyntheticPlayersAllowed()
+        {
+            return SyntheticPlayersEnabled;
+        }
+
         public static void SetControlledTestModeEnabled(bool enabled)
         {
-            controlledTestModeEnabled = enabled;
-            if (!enabled)
+            controlledTestModeEnabled = enabled && AreSyntheticPlayersAllowed();
+            if (!controlledTestModeEnabled)
             {
                 controlledTestModeInitiatorKey = null;
                 controlledTestModeInitiatorClientId = 0;
             }
+        }
+
+        private static void EnforceSyntheticPlayerLockdown(bool force)
+        {
+            if (AreSyntheticPlayersAllowed())
+            {
+                return;
+            }
+
+            var now = Time.unscaledTime;
+            if (!force && lastSyntheticPlayerPurgeTime >= 0f && now - lastSyntheticPlayerPurgeTime < SyntheticPlayerPurgeIntervalSeconds)
+            {
+                return;
+            }
+
+            lastSyntheticPlayerPurgeTime = now;
+            controlledTestModeEnabled = false;
+            controlledTestModeInitiatorKey = null;
+            controlledTestModeInitiatorClientId = 0;
+
+            try { StopReplay(null, 0); } catch { }
+            try { ClearAllDummies(); } catch { }
+            try { BotManager.RemoveAllBots(); } catch { }
+        }
+
+        private static void TryPurgeInvalidWarmupDummies(bool force)
+        {
+            var trackedPhaseName = GetTrackedPhaseName();
+            if (!ShouldRunInvalidWarmupDummyPurge(trackedPhaseName))
+            {
+                if (force)
+                {
+                    Debug.Log($"[{Constants.MOD_NAME}] [WARMUP-DUMMY] Skipping purge during phase={trackedPhaseName ?? "unknown"} rankedActive={rankedActive} draftActive={draftActive} voteActive={rankedVoteActive}");
+                }
+                return;
+            }
+
+            var now = Time.unscaledTime;
+            if (!force && lastInvalidWarmupDummySweepTime >= 0f && now - lastInvalidWarmupDummySweepTime < InvalidWarmupDummySweepIntervalSeconds)
+            {
+                return;
+            }
+
+            lastInvalidWarmupDummySweepTime = now;
+            var activeCandidateClientIds = new HashSet<ulong>();
+
+            try
+            {
+                var players = GetAllPlayers();
+                if (players == null || players.Count == 0)
+                {
+                    invalidWarmupDummyFirstSeenTimes.Clear();
+                    return;
+                }
+
+                foreach (var player in players)
+                {
+                    if (player == null) continue;
+                    if (!TryGetClientId(player, out var clientId) || clientId == 0)
+                    {
+                        continue;
+                    }
+
+                    if (BotManager.TryGetBotIdByClientId(clientId, out _)
+                        || IsReplayPlayerObject(player, clientId)
+                        || IsPracticeModeFakePlayerObject(player, clientId, TryGetPlayerIdNoFallback(player)))
+                    {
+                        invalidWarmupDummyFirstSeenTimes.Remove(clientId);
+                        continue;
+                    }
+
+                    if (!IsInvalidWarmupDummyCandidate(player, clientId, out var debugDetails))
+                    {
+                        invalidWarmupDummyFirstSeenTimes.Remove(clientId);
+                        continue;
+                    }
+
+                    activeCandidateClientIds.Add(clientId);
+                    if (!invalidWarmupDummyFirstSeenTimes.TryGetValue(clientId, out var firstSeenAt))
+                    {
+                        invalidWarmupDummyFirstSeenTimes[clientId] = now;
+                        Debug.LogWarning($"[{Constants.MOD_NAME}] [WARMUP-DUMMY] Detected invalid player candidate. phase={trackedPhaseName ?? "unknown"} {debugDetails} | {DescribePlayerLifecycle(player, clientId, "orphan-candidate")}");
+                        continue;
+                    }
+
+                    if (!force && now - firstSeenAt < InvalidWarmupDummyGraceSeconds)
+                    {
+                        continue;
+                    }
+
+                    if (TryDespawnInvalidWarmupDummyPlayer(player, "orphan-candidate", "warmup-dummy"))
+                    {
+                        Debug.LogWarning($"[{Constants.MOD_NAME}] [WARMUP-DUMMY] Removed invalid player after {(now - firstSeenAt):0.00}s. phase={trackedPhaseName ?? "unknown"} {debugDetails} | {DescribePlayerLifecycle(player, clientId, "orphan-candidate")}");
+                        invalidWarmupDummyFirstSeenTimes.Remove(clientId);
+                    }
+                    else
+                    {
+                        Debug.LogWarning($"[{Constants.MOD_NAME}] [WARMUP-DUMMY] Failed to remove invalid player candidate. phase={trackedPhaseName ?? "unknown"} {debugDetails} | {DescribePlayerLifecycle(player, clientId, "orphan-candidate")}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[{Constants.MOD_NAME}] Invalid warmup dummy purge failed: {ex.Message}");
+            }
+
+            var staleClientIds = invalidWarmupDummyFirstSeenTimes.Keys
+                .Where(clientId => !activeCandidateClientIds.Contains(clientId))
+                .ToList();
+            foreach (var staleClientId in staleClientIds)
+            {
+                invalidWarmupDummyFirstSeenTimes.Remove(staleClientId);
+            }
+        }
+
+        private static string GetTrackedPhaseName()
+        {
+            lock (phaseLock)
+            {
+                return lastGamePhaseName;
+            }
+        }
+
+        private static bool ShouldPreserveSingleGoalieDuringTrackedPhase(string trackedPhaseName)
+        {
+            var normalizedPhase = (trackedPhaseName ?? string.Empty).Trim().ToLowerInvariant();
+            if (string.IsNullOrWhiteSpace(normalizedPhase))
+            {
+                return false;
+            }
+
+            return normalizedPhase.Contains("replay")
+                || normalizedPhase.Contains("goal")
+                || normalizedPhase.Contains("score")
+                || normalizedPhase.Contains("intermission")
+                || normalizedPhase.Contains("periodover")
+                || normalizedPhase.Contains("faceoff");
+        }
+
+        private static bool ShouldUpdateSingleGoalieAssignmentForTrackedPhase(string trackedPhaseName)
+        {
+            var normalizedPhase = (trackedPhaseName ?? string.Empty).Trim().ToLowerInvariant();
+            if (string.IsNullOrWhiteSpace(normalizedPhase))
+            {
+                return true;
+            }
+
+            return normalizedPhase.Contains("playing");
+        }
+
+        private static bool ShouldRunInvalidWarmupDummyPurge(string trackedPhaseName)
+        {
+            var normalizedPhase = (trackedPhaseName ?? string.Empty).Trim().ToLowerInvariant();
+            if (string.IsNullOrWhiteSpace(normalizedPhase))
+            {
+                return false;
+            }
+
+            return normalizedPhase.Contains("warm")
+                || normalizedPhase.Contains("practice")
+                || normalizedPhase.Contains("training");
+        }
+
+        private static void TryPurgePracticeModeFakePlayers(bool force, string reason)
+        {
+            if (!force && !ShouldPurgePracticeModeFakePlayers())
+            {
+                return;
+            }
+
+            var now = Time.unscaledTime;
+            if (!force && lastPracticeFakePlayerSweepTime >= 0f && now - lastPracticeFakePlayerSweepTime < PracticeFakePlayerSweepIntervalSeconds)
+            {
+                return;
+            }
+
+            lastPracticeFakePlayerSweepTime = now;
+
+            try
+            {
+                var players = GetAllPlayers();
+                if (players == null || players.Count == 0)
+                {
+                    return;
+                }
+
+                foreach (var player in players)
+                {
+                    if (player == null)
+                    {
+                        continue;
+                    }
+
+                    ulong clientId = 0;
+                    TryGetClientId(player, out clientId);
+                    var rawIdentity = TryGetPlayerIdNoFallback(player);
+                    if (!IsPracticeModeFakePlayerObject(player, clientId, rawIdentity))
+                    {
+                        continue;
+                    }
+
+                    var lifecycle = DescribePlayerLifecycle(player, clientId, "practice-fake");
+                    Debug.LogWarning($"[{Constants.MOD_NAME}] [PRACTICE-FAKE] Cleaning transient practice player. reason={reason ?? "unknown"} {lifecycle}");
+
+                    if (!TryDespawnInvalidWarmupDummyPlayer(player, "practice-fake", $"practice-fake:{reason ?? "unknown"}"))
+                    {
+                        Debug.LogWarning($"[{Constants.MOD_NAME}] [PRACTICE-FAKE] Failed to clean transient practice player. reason={reason ?? "unknown"} {lifecycle}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[{Constants.MOD_NAME}] Practice fake player purge failed: {ex.Message}");
+            }
+        }
+
+        private static bool ShouldPurgePracticeModeFakePlayers()
+        {
+            return rankedVoteActive || rankedActive || draftActive || draftTeamLockActive;
+        }
+
+        private static void TryPurgeReplayLeftovers(bool force, string reason)
+        {
+            var trackedPhaseName = GetTrackedPhaseName();
+            if (!ShouldRunReplayLeftoverPurge(trackedPhaseName))
+            {
+                if (force)
+                {
+                    Debug.Log($"[{Constants.MOD_NAME}] [REPLAY-CLEANUP] Skipping transient replay sweep during phase={trackedPhaseName ?? "unknown"} reason={reason ?? "unknown"}");
+                }
+
+                replayLeftoverFirstSeenTimes.Clear();
+                return;
+            }
+
+            var now = Time.unscaledTime;
+            if (!force && lastReplayLeftoverSweepTime >= 0f && now - lastReplayLeftoverSweepTime < ReplayLeftoverSweepIntervalSeconds)
+            {
+                return;
+            }
+
+            lastReplayLeftoverSweepTime = now;
+            var activeTrackingKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            try
+            {
+                var players = GetAllPlayers();
+                if (players == null || players.Count == 0)
+                {
+                    replayLeftoverFirstSeenTimes.Clear();
+                    return;
+                }
+
+                foreach (var player in players)
+                {
+                    if (player == null)
+                    {
+                        continue;
+                    }
+
+                    ulong clientId = 0;
+                    TryGetClientId(player, out clientId);
+                    var rawIdentity = NormalizeResolvedPlayerKey(TryGetPlayerIdNoFallback(player));
+                    if (BotManager.TryGetBotIdByClientId(clientId, out _)
+                        || BotManager.IsBotKey(rawIdentity)
+                        || IsPracticeModeFakePlayerObject(player, clientId, rawIdentity)
+                        || IsDummyKey(rawIdentity))
+                    {
+                        continue;
+                    }
+
+                    if (!TryClassifyReplayLeftoverCandidate(player, clientId, trackedPhaseName, out var trackingKey, out var classification, out var debugDetails)
+                        || string.IsNullOrWhiteSpace(trackingKey))
+                    {
+                        continue;
+                    }
+
+                    activeTrackingKeys.Add(trackingKey);
+                    if (!replayLeftoverFirstSeenTimes.TryGetValue(trackingKey, out var firstSeenAt))
+                    {
+                        replayLeftoverFirstSeenTimes[trackingKey] = now;
+                        Debug.LogWarning($"[{Constants.MOD_NAME}] [REPLAY-CLEANUP] Detected transient candidate. phase={trackedPhaseName ?? "unknown"} reason={reason ?? "unknown"} {debugDetails} | {DescribePlayerLifecycle(player, clientId, classification)}");
+                        firstSeenAt = now;
+                        if (!force)
+                        {
+                            continue;
+                        }
+                    }
+
+                    if (!force && now - firstSeenAt < ReplayLeftoverGraceSeconds)
+                    {
+                        continue;
+                    }
+
+                    if (TryDespawnInvalidWarmupDummyPlayer(player, classification, $"replay-leftover:{reason ?? "unknown"}"))
+                    {
+                        Debug.LogWarning($"[{Constants.MOD_NAME}] [REPLAY-CLEANUP] Removed transient candidate after {(now - firstSeenAt):0.00}s. phase={trackedPhaseName ?? "unknown"} reason={reason ?? "unknown"} {debugDetails} | {DescribePlayerLifecycle(player, clientId, classification)}");
+                        replayLeftoverFirstSeenTimes.Remove(trackingKey);
+                    }
+                    else
+                    {
+                        Debug.LogWarning($"[{Constants.MOD_NAME}] [REPLAY-CLEANUP] Failed to remove transient candidate. phase={trackedPhaseName ?? "unknown"} reason={reason ?? "unknown"} {debugDetails} | {DescribePlayerLifecycle(player, clientId, classification)}");
+                    }
+                }
+
+                foreach (var component in GetDetachedReplayCleanupComponents())
+                {
+                    if (!TryClassifyDetachedReplayObjectCandidate(component, trackedPhaseName, out var trackingKey, out var classification, out var debugDetails)
+                        || string.IsNullOrWhiteSpace(trackingKey))
+                    {
+                        continue;
+                    }
+
+                    activeTrackingKeys.Add(trackingKey);
+                    if (!replayLeftoverFirstSeenTimes.TryGetValue(trackingKey, out var firstSeenAt))
+                    {
+                        replayLeftoverFirstSeenTimes[trackingKey] = now;
+                        Debug.LogWarning($"[{Constants.MOD_NAME}] [REPLAY-CLEANUP] Detected detached transient object. phase={trackedPhaseName ?? "unknown"} reason={reason ?? "unknown"} {debugDetails}");
+                        firstSeenAt = now;
+                        if (!force)
+                        {
+                            continue;
+                        }
+                    }
+
+                    if (!force && now - firstSeenAt < ReplayLeftoverGraceSeconds)
+                    {
+                        continue;
+                    }
+
+                    if (TryDespawnDetachedReplayObject(component, classification, $"replay-leftover:{reason ?? "unknown"}"))
+                    {
+                        Debug.LogWarning($"[{Constants.MOD_NAME}] [REPLAY-CLEANUP] Removed detached transient object after {(now - firstSeenAt):0.00}s. phase={trackedPhaseName ?? "unknown"} reason={reason ?? "unknown"} {debugDetails}");
+                        replayLeftoverFirstSeenTimes.Remove(trackingKey);
+                    }
+                    else
+                    {
+                        Debug.LogWarning($"[{Constants.MOD_NAME}] [REPLAY-CLEANUP] Failed to remove detached transient object. phase={trackedPhaseName ?? "unknown"} reason={reason ?? "unknown"} {debugDetails}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[{Constants.MOD_NAME}] Replay leftover purge failed: {ex.Message}");
+            }
+
+            var staleTrackingKeys = replayLeftoverFirstSeenTimes.Keys
+                .Where(key => !activeTrackingKeys.Contains(key))
+                .ToList();
+            foreach (var staleTrackingKey in staleTrackingKeys)
+            {
+                replayLeftoverFirstSeenTimes.Remove(staleTrackingKey);
+            }
+        }
+
+        private static bool ShouldRunReplayLeftoverPurge(string trackedPhaseName)
+        {
+            var normalizedPhase = (trackedPhaseName ?? string.Empty).Trim().ToLowerInvariant();
+            if (string.IsNullOrWhiteSpace(normalizedPhase))
+            {
+                return false;
+            }
+
+            if (normalizedPhase.Contains("replay")
+                || normalizedPhase.Contains("warm")
+                || normalizedPhase.Contains("practice")
+                || normalizedPhase.Contains("training"))
+            {
+                return false;
+            }
+
+            return normalizedPhase.Contains("faceoff")
+                || normalizedPhase.Contains("playing")
+                || normalizedPhase.Contains("score")
+                || normalizedPhase.Contains("periodover");
+        }
+
+        private static bool TryClassifyReplayLeftoverCandidate(object player, ulong clientId, string trackedPhaseName, out string trackingKey, out string classification, out string debugDetails)
+        {
+            trackingKey = null;
+            classification = null;
+            debugDetails = null;
+
+            if (player == null)
+            {
+                return false;
+            }
+
+            var networkObject = TryGetPlayerLifecycleNetworkObject(player);
+            trackingKey = BuildReplayCleanupTrackingKey(player, clientId, networkObject);
+            if (string.IsNullOrWhiteSpace(trackingKey))
+            {
+                return false;
+            }
+
+            if (IsReplayPlayerObject(player, clientId))
+            {
+                classification = "replay-leftover";
+                debugDetails = $"trackingKey={trackingKey}, candidate=replay-object";
+                return true;
+            }
+
+            var normalizedPhase = (trackedPhaseName ?? string.Empty).Trim().ToLowerInvariant();
+            if ((normalizedPhase.Contains("faceoff") || normalizedPhase.Contains("playing"))
+                && IsInvalidWarmupDummyCandidate(player, clientId, out var invalidDetails))
+            {
+                classification = "replay-anonymous-leftover";
+                debugDetails = $"trackingKey={trackingKey}, {invalidDetails}";
+                return true;
+            }
+
+            return false;
+        }
+
+        private static List<Component> GetDetachedReplayCleanupComponents()
+        {
+            var result = new List<Component>();
+
+            try
+            {
+                foreach (var typeName in new[] { "PlayerBodyV2", "Puck.PlayerBodyV2", "Stick", "Puck.Stick", "StickPositioner", "Puck.StickPositioner", "PlayerCamera", "Puck.PlayerCamera" })
+                {
+                    var componentType = FindTypeByName(typeName);
+                    if (componentType == null)
+                    {
+                        continue;
+                    }
+
+                    UnityEngine.Object[] objects;
+                    try
+                    {
+                        objects = Resources.FindObjectsOfTypeAll(componentType);
+                    }
+                    catch
+                    {
+                        continue;
+                    }
+
+                    if (objects == null || objects.Length == 0)
+                    {
+                        continue;
+                    }
+
+                    foreach (var candidate in objects)
+                    {
+                        if (candidate is Component component && component != null)
+                        {
+                            result.Add(component);
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            return result;
+        }
+
+        private static bool TryClassifyDetachedReplayObjectCandidate(Component component, string trackedPhaseName, out string trackingKey, out string classification, out string debugDetails)
+        {
+            trackingKey = null;
+            classification = null;
+            debugDetails = null;
+
+            try
+            {
+                if (component == null)
+                {
+                    return false;
+                }
+
+                var networkObject = component.GetComponent<NetworkObject>();
+                trackingKey = BuildDetachedReplayObjectTrackingKey(component, networkObject);
+                if (string.IsNullOrWhiteSpace(trackingKey))
+                {
+                    return false;
+                }
+
+                var ownerPlayer = TryResolveTransientOwnerPlayer(component);
+                var ownerClientId = GetTransientOwnerClientId(component, networkObject, ownerPlayer);
+                var replayFlag = HasReplayFlag(component) || HasReplayFlag(ownerPlayer);
+                var replayPlayer = ownerPlayer != null && IsReplayPlayerObject(ownerPlayer, ownerClientId);
+                var disconnectedReplayOwner = ownerClientId >= ReplayClientIdOffset && !IsConnectedClientId(ownerClientId);
+
+                if (!replayFlag && !replayPlayer && !disconnectedReplayOwner)
+                {
+                    return false;
+                }
+
+                classification = "replay-detached-object";
+                debugDetails = DescribeDetachedReplayObject(component, networkObject, ownerPlayer, ownerClientId, replayFlag, replayPlayer, trackedPhaseName, trackingKey);
+                return true;
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static string BuildDetachedReplayObjectTrackingKey(Component component, NetworkObject networkObject)
+        {
+            try
+            {
+                if (networkObject != null && networkObject.NetworkObjectId != 0)
+                {
+                    return $"net:{networkObject.NetworkObjectId}";
+                }
+
+                if (component != null)
+                {
+                    return $"instance:{component.GetInstanceID()}";
+                }
+            }
+            catch { }
+
+            return null;
+        }
+
+        private static object TryResolveTransientOwnerPlayer(Component component)
+        {
+            if (component == null)
+            {
+                return null;
+            }
+
+            try
+            {
+                foreach (var memberName in new[] { "Player", "player" })
+                {
+                    var property = component.GetType().GetProperty(memberName, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
+                    if (property != null)
+                    {
+                        var value = property.GetValue(component);
+                        if (value != null)
+                        {
+                            return value;
+                        }
+                    }
+
+                    var field = component.GetType().GetField(memberName, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
+                    if (field != null)
+                    {
+                        var value = field.GetValue(component);
+                        if (value != null)
+                        {
+                            return value;
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            return null;
+        }
+
+        private static ulong GetTransientOwnerClientId(Component component, NetworkObject networkObject, object ownerPlayer)
+        {
+            try
+            {
+                if (networkObject != null && networkObject.OwnerClientId != 0)
+                {
+                    return networkObject.OwnerClientId;
+                }
+
+                if (ownerPlayer != null && TryGetClientId(ownerPlayer, out var ownerClientId) && ownerClientId != 0)
+                {
+                    return ownerClientId;
+                }
+
+                if (component != null && TryGetClientId(component, out var componentClientId) && componentClientId != 0)
+                {
+                    return componentClientId;
+                }
+            }
+            catch { }
+
+            return 0;
+        }
+
+        private static bool IsConnectedClientId(ulong clientId)
+        {
+            try
+            {
+                if (clientId == 0)
+                {
+                    return false;
+                }
+
+                var connectedClients = NetworkManager.Singleton?.ConnectedClientsIds;
+                return connectedClients != null && connectedClients.Contains(clientId);
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static string DescribeDetachedReplayObject(Component component, NetworkObject networkObject, object ownerPlayer, ulong ownerClientId, bool replayFlag, bool replayPlayer, string trackedPhaseName, string trackingKey)
+        {
+            try
+            {
+                var networkObjectId = networkObject != null ? networkObject.NetworkObjectId : 0UL;
+                var networkSpawned = networkObject != null && networkObject.IsSpawned;
+                var ownerDescription = ownerPlayer != null
+                    ? DescribePlayerLifecycle(ownerPlayer, ownerClientId, replayPlayer ? "replay" : "linked-player")
+                    : "ownerPlayer=null";
+                return $"trackingKey={trackingKey}, phase={trackedPhaseName ?? "unknown"}, type={component.GetType().FullName}, gameObject={component.gameObject.name}, ownerClientId={ownerClientId}, networkObjectId={networkObjectId}, networkSpawned={networkSpawned}, replayFlag={replayFlag}, replayPlayer={replayPlayer}, connectedOwner={IsConnectedClientId(ownerClientId)} | {ownerDescription}";
+            }
+            catch (Exception ex)
+            {
+                return $"trackingKey={trackingKey}, ownerClientId={ownerClientId}, describeError={ex.GetType().Name}:{ex.Message}";
+            }
+        }
+
+        private static bool TryDespawnDetachedReplayObject(Component component, string classificationHint, string reason)
+        {
+            try
+            {
+                if (component == null)
+                {
+                    return false;
+                }
+
+                var networkObject = component.GetComponent<NetworkObject>();
+                var ownerPlayer = TryResolveTransientOwnerPlayer(component);
+                var ownerClientId = GetTransientOwnerClientId(component, networkObject, ownerPlayer);
+                Debug.LogWarning($"[{Constants.MOD_NAME}] [ENTITY-DESPAWN] Detached transient cleanup started. phase={GetTrackedPhaseName() ?? "unknown"} reason={reason ?? "unknown"} {DescribeDetachedReplayObject(component, networkObject, ownerPlayer, ownerClientId, HasReplayFlag(component) || HasReplayFlag(ownerPlayer), ownerPlayer != null && IsReplayPlayerObject(ownerPlayer, ownerClientId), GetTrackedPhaseName(), BuildDetachedReplayObjectTrackingKey(component, networkObject))}");
+
+                var removed = false;
+                if (ownerPlayer != null && component.GetType().Name.IndexOf("PlayerBody", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    var despawnPlayerBody = ownerPlayer.GetType().GetMethod("Server_DespawnPlayerBody", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
+                    if (despawnPlayerBody != null)
+                    {
+                        try
+                        {
+                            despawnPlayerBody.Invoke(ownerPlayer, null);
+                            removed = true;
+                        }
+                        catch { }
+                    }
+                }
+                else if (ownerPlayer != null && component.GetType().Name.IndexOf("StickPositioner", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    var despawnStickPositioner = ownerPlayer.GetType().GetMethod("Server_DespawnStickPositioner", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
+                    if (despawnStickPositioner != null)
+                    {
+                        try
+                        {
+                            despawnStickPositioner.Invoke(ownerPlayer, null);
+                            removed = true;
+                        }
+                        catch { }
+                    }
+                }
+                else if (ownerPlayer != null && component.GetType().Name.IndexOf("PlayerCamera", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    var despawnPlayerCamera = ownerPlayer.GetType().GetMethod("Server_DespawnPlayerCamera", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
+                    if (despawnPlayerCamera != null)
+                    {
+                        try
+                        {
+                            despawnPlayerCamera.Invoke(ownerPlayer, null);
+                            removed = true;
+                        }
+                        catch { }
+                    }
+                }
+                else if (ownerPlayer != null && component.GetType().Name.IndexOf("Stick", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    var despawnStick = ownerPlayer.GetType().GetMethod("Server_DespawnStick", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
+                    if (despawnStick != null)
+                    {
+                        try
+                        {
+                            despawnStick.Invoke(ownerPlayer, null);
+                            removed = true;
+                        }
+                        catch { }
+                    }
+                }
+
+                if (networkObject != null && networkObject.IsSpawned)
+                {
+                    try
+                    {
+                        networkObject.Despawn(true);
+                        removed = true;
+                    }
+                    catch { }
+                }
+
+                try
+                {
+                    UnityEngine.Object.Destroy(component.gameObject);
+                    removed = true;
+                }
+                catch { }
+
+                return removed;
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static string BuildReplayCleanupTrackingKey(object player, ulong clientId, NetworkObject networkObject)
+        {
+            try
+            {
+                if (networkObject != null)
+                {
+                    return $"net:{networkObject.NetworkObjectId}";
+                }
+
+                if (clientId != 0)
+                {
+                    return $"client:{clientId}";
+                }
+
+                var rawIdentity = NormalizeResolvedPlayerKey(TryGetPlayerIdNoFallback(player));
+                if (!string.IsNullOrWhiteSpace(rawIdentity))
+                {
+                    return $"id:{rawIdentity}";
+                }
+
+                if (player is UnityEngine.Object unityObject)
+                {
+                    return $"instance:{unityObject.GetInstanceID()}";
+                }
+            }
+            catch { }
+
+            return null;
+        }
+
+        private static bool IsInvalidWarmupDummyCandidate(object player, ulong clientId, out string debugDetails)
+        {
+            debugDetails = null;
+
+            try
+            {
+                if (player == null || clientId == 0)
+                {
+                    return false;
+                }
+
+                var rawIdentity = NormalizeResolvedPlayerKey(TryGetPlayerIdNoFallback(player));
+                if (BotManager.IsBotKey(rawIdentity)
+                    || IsDummyKey(rawIdentity)
+                    || IsPracticeModeFakePlayerObject(player, clientId, rawIdentity))
+                {
+                    return false;
+                }
+
+                var resolvedKey = NormalizeResolvedPlayerKey(ResolvePlayerObjectKey(player, clientId));
+                var hasFallbackOnlyCommandTarget = string.IsNullOrWhiteSpace(resolvedKey)
+                    || resolvedKey.StartsWith("clientId:", StringComparison.OrdinalIgnoreCase);
+                var hasValidSteamId = ulong.TryParse(rawIdentity, out var steamId) && steamId != 0;
+                var displayName = TryGetPlayerName(player);
+                var hasDefaultDisplayName = string.IsNullOrWhiteSpace(displayName)
+                    || string.Equals(displayName.Trim(), "Player", StringComparison.OrdinalIgnoreCase);
+                var hasValidNumber = TryGetPlayerNumber(player, out var playerNumber) && playerNumber > 0;
+
+                if (!hasFallbackOnlyCommandTarget || hasValidSteamId || !hasDefaultDisplayName || hasValidNumber)
+                {
+                    return false;
+                }
+
+                TeamResult team = TeamResult.Unknown;
+                TryGetPlayerTeam(player, out team);
+                debugDetails = BuildInvalidWarmupDummyDebugDetails(clientId, resolvedKey, rawIdentity, displayName, playerNumber, team);
+                return true;
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static string BuildInvalidWarmupDummyDebugDetails(ulong clientId, string resolvedKey, string rawIdentity, string displayName, int playerNumber, TeamResult team)
+        {
+            try
+            {
+                return $"clientId={clientId}, resolvedKey={resolvedKey ?? "null"}, rawIdentity={rawIdentity ?? "null"}, displayName={displayName ?? "null"}, number={playerNumber}, team={team}";
+            }
+            catch { }
+
+            return $"clientId={clientId}";
+        }
+
+        internal static string DescribePlayerLifecycle(object player, ulong fallbackClientId = 0, string classificationHint = null)
+        {
+            try
+            {
+                if (player == null)
+                {
+                    return $"classification={classificationHint ?? "null"}, player=null";
+                }
+
+                var clientId = fallbackClientId;
+                if (clientId == 0)
+                {
+                    TryGetClientId(player, out clientId);
+                }
+
+                var rawIdentity = NormalizeResolvedPlayerKey(TryGetPlayerIdNoFallback(player));
+                var resolvedKey = NormalizeResolvedPlayerKey(ResolvePlayerObjectKey(player, clientId));
+                var displayName = TryGetPlayerName(player);
+                TryGetPlayerNumber(player, out var playerNumber);
+                TeamResult team = TeamResult.Unknown;
+                TryGetPlayerTeam(player, out team);
+
+                var networkObject = TryGetPlayerLifecycleNetworkObject(player);
+                var networkOwnerId = networkObject != null ? networkObject.OwnerClientId : 0UL;
+                var networkSpawned = networkObject != null && networkObject.IsSpawned;
+                var hasBody = HasPlayerLifecycleReference(player, "PlayerBody");
+                var hasStick = HasPlayerLifecycleReference(player, "Stick");
+                var isPartialCharacter = TryGetPlayerLifecycleBool(player, "IsCharacterPartiallySpawned", out var partialCharacter) && partialCharacter;
+
+                var classification = classificationHint;
+                if (string.IsNullOrWhiteSpace(classification))
+                {
+                    if (BotManager.TryGetBotIdByClientId(clientId, out var botId) || BotManager.IsBotKey(rawIdentity))
+                    {
+                        classification = string.IsNullOrWhiteSpace(botId) ? "bot" : $"bot:{botId}";
+                    }
+                    else if (IsReplayPlayerObject(player, clientId))
+                    {
+                        classification = "replay";
+                    }
+                    else if (IsPracticeModeFakePlayerObject(player, clientId, rawIdentity))
+                    {
+                        classification = "practice-fake";
+                    }
+                    else if (IsDummyKey(rawIdentity))
+                    {
+                        classification = "dummy";
+                    }
+                    else if (string.IsNullOrWhiteSpace(resolvedKey) || resolvedKey.StartsWith("clientId:", StringComparison.OrdinalIgnoreCase))
+                    {
+                        classification = "orphan-candidate";
+                    }
+                    else
+                    {
+                        classification = "real-player";
+                    }
+                }
+
+                return $"classification={classification}, clientId={clientId}, ownerId={networkOwnerId}, rawIdentity={rawIdentity ?? "null"}, resolvedKey={resolvedKey ?? "null"}, displayName={displayName ?? "null"}, number={playerNumber}, team={team}, networkSpawned={networkSpawned}, partialCharacter={isPartialCharacter}, hasBody={hasBody}, hasStick={hasStick}, type={player.GetType().FullName}";
+            }
+            catch (Exception ex)
+            {
+                return $"classification={classificationHint ?? "unknown"}, clientId={fallbackClientId}, debugError={ex.GetType().Name}:{ex.Message}";
+            }
+        }
+
+        private static NetworkObject TryGetPlayerLifecycleNetworkObject(object player)
+        {
+            try
+            {
+                var component = player as Component;
+                if (component == null)
+                {
+                    var transformProperty = player.GetType().GetProperty("transform", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
+                    var transform = transformProperty != null ? transformProperty.GetValue(player) as Transform : null;
+                    if (transform != null)
+                    {
+                        component = transform.GetComponent("Player");
+                    }
+                }
+
+                return component != null ? component.GetComponent<NetworkObject>() : null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static bool HasPlayerLifecycleReference(object player, string memberName)
+        {
+            if (player == null || string.IsNullOrEmpty(memberName))
+            {
+                return false;
+            }
+
+            try
+            {
+                var type = player.GetType();
+                var property = type.GetProperty(memberName, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
+                if (property != null)
+                {
+                    return property.GetValue(player) != null;
+                }
+
+                var field = type.GetField(memberName, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
+                if (field != null)
+                {
+                    return field.GetValue(player) != null;
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static bool TryGetPlayerLifecycleBool(object player, string memberName, out bool result)
+        {
+            result = false;
+            if (player == null || string.IsNullOrEmpty(memberName))
+            {
+                return false;
+            }
+
+            try
+            {
+                var type = player.GetType();
+                var property = type.GetProperty(memberName, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
+                if (property != null)
+                {
+                    return TryConvertToBool(property.GetValue(player), out result);
+                }
+
+                var field = type.GetField(memberName, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
+                if (field != null)
+                {
+                    return TryConvertToBool(field.GetValue(player), out result);
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static bool TryDespawnInvalidWarmupDummyPlayer(object player, string classificationHint = "orphan-candidate", string reason = null)
+        {
+            try
+            {
+                if (player == null)
+                {
+                    return false;
+                }
+
+                Debug.LogWarning($"[{Constants.MOD_NAME}] [ENTITY-DESPAWN] Transient player cleanup started. phase={GetTrackedPhaseName() ?? "unknown"} reason={reason ?? "unknown"} {DescribePlayerLifecycle(player, 0, classificationHint)}");
+
+                var playerType = player.GetType();
+                var despawnCharacter = playerType.GetMethod("Server_DespawnCharacter", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
+                if (despawnCharacter != null)
+                {
+                    try { despawnCharacter.Invoke(player, null); } catch { }
+                }
+
+                Component playerComponent = player as Component;
+                if (playerComponent == null)
+                {
+                    var transformProp = playerType.GetProperty("transform", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
+                    var transformObj = transformProp != null ? transformProp.GetValue(player) as Transform : null;
+                    if (transformObj != null)
+                    {
+                        playerComponent = transformObj.GetComponent("Player");
+                    }
+                }
+
+                var removed = false;
+                if (playerComponent != null)
+                {
+                    var networkObject = playerComponent.GetComponent<NetworkObject>();
+                    if (networkObject != null && networkObject.IsSpawned)
+                    {
+                        try
+                        {
+                            networkObject.Despawn(true);
+                            removed = true;
+                        }
+                        catch { }
+                    }
+
+                    try
+                    {
+                        UnityEngine.Object.Destroy(playerComponent.gameObject);
+                        removed = true;
+                    }
+                    catch { }
+                }
+
+                if (TryGetPlayerManager(out var playerManager) && playerManager != null)
+                {
+                    var removePlayer = playerManager.GetType().GetMethod("RemovePlayer", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
+                    if (removePlayer != null)
+                    {
+                        try
+                        {
+                            removePlayer.Invoke(playerManager, new[] { player });
+                            removed = true;
+                        }
+                        catch { }
+                    }
+                }
+
+                return removed;
+            }
+            catch { }
+
+            return false;
         }
 
         // Returns true if any game/match appears to be active (ranked or normal)
@@ -266,6 +1319,8 @@ namespace schrader.Server
 
                 lastPracticeExpiryInterceptAt = Time.unscaledTime;
                 Debug.Log($"[{Constants.MOD_NAME}] [PRACTICE] practice timer expired.");
+                TryPurgePracticeModeFakePlayers(force: true, reason: "practice-expiry");
+                TryPurgeInvalidWarmupDummies(force: true);
 
                 if (rankedActive || draftActive)
                 {
@@ -483,6 +1538,11 @@ namespace schrader.Server
         {
             try { RankedOverlayNetwork.EnsureServerHandlers(); } catch { }
             try { TryEnsureHooks(); } catch { }
+            try { EnforceSyntheticPlayerLockdown(force: false); } catch { }
+            try { TryPurgeInvalidWarmupDummies(force: false); } catch { }
+            try { TryPurgePracticeModeFakePlayers(force: false, reason: "periodic-ranked"); } catch { }
+            try { TryPurgeReplayLeftovers(force: false, reason: "periodic-ranked"); } catch { }
+            try { UpdateSingleGoalieState(); } catch { }
             try { UpdateRankedVote(); } catch { }
             try { ProcessForfeitVotes(); } catch { }
             try { UpdateDraftState(); } catch { }
@@ -561,6 +1621,7 @@ namespace schrader.Server
 
                 if (!rankedActive)
                 {
+                    UpdateApprovalRequestState();
                     lastDraftStatePollTime = -999f;
                     lock (draftLock)
                     {
@@ -585,7 +1646,7 @@ namespace schrader.Server
 
         private static void TryEnsureHooks()
         {
-            if (rankedMatchEndPatched && gameStateHooksPatched && goalHooksPatched && spawnHooksPatched && teamHooksPatched && draftUiHooksPatched) return;
+            if (rankedMatchEndPatched && gameStateHooksPatched && goalHooksPatched && spawnHooksPatched && teamHooksPatched && replayDebugHooksPatched && draftUiHooksPatched && connectionApprovalHooksPatched) return;
             var now = Time.unscaledTime;
             if (now - lastHookAttemptTime < HookRetryInterval) return;
             lastHookAttemptTime = now;
@@ -594,7 +1655,9 @@ namespace schrader.Server
             TryPatchGoalHooks();
             TryPatchSpawnHooks();
             TryPatchTeamChangeHooks();
+            TryPatchReplayDebugHooks();
             TryPatchDraftUiHooks();
+            TryPatchConnectionApprovalHooks();
         }
 
         private static string GetGameRootPath()
@@ -950,6 +2013,879 @@ namespace schrader.Server
             }
         }
 
+        private static void UpdateSingleGoalieState()
+        {
+            if (NetworkManager.Singleton == null || !NetworkManager.Singleton.IsServer)
+            {
+                return;
+            }
+
+            ProcessSingleGoalieVote();
+
+            if (!singleGoalieEnabled)
+            {
+                return;
+            }
+
+            var trackedPhaseName = GetTrackedPhaseName();
+            var preserveDuringPhase = ShouldPreserveSingleGoalieDuringTrackedPhase(trackedPhaseName);
+
+            if (!TryGetSingleGoalieCandidate(out var goalie, out var reason))
+            {
+                if (preserveDuringPhase)
+                {
+                    return;
+                }
+
+                DisableSingleGoalie(reason ?? "shared goalie disabled because the goalie setup is no longer valid.");
+                return;
+            }
+
+            if (!IsTrackedSingleGoalie(goalie))
+            {
+                if (preserveDuringPhase)
+                {
+                    return;
+                }
+
+                DisableSingleGoalie("shared goalie disabled because another goalie is active.");
+                return;
+            }
+
+            singleGoaliePlayerKey = ResolveParticipantIdToKey(goalie) ?? goalie.playerId;
+            singleGoaliePlayerClientId = goalie.clientId;
+            singleGoaliePlayerName = goalie.displayName ?? singleGoaliePlayerName ?? "Goalie";
+
+            if (!rankedActive || draftActive)
+            {
+                return;
+            }
+
+            if (!ShouldUpdateSingleGoalieAssignmentForTrackedPhase(trackedPhaseName))
+            {
+                return;
+            }
+
+            TryUpdateSharedGoalieAssignment(goalie);
+        }
+
+        private static void ProcessSingleGoalieVote()
+        {
+            if (!singleGoalieVoteActive)
+            {
+                return;
+            }
+
+            if (!TryGetSingleGoalieCandidate(out _, out var candidateReason))
+            {
+                CancelSingleGoalieVote(candidateReason ?? "shared goalie vote cancelled because the goalie setup changed.");
+                return;
+            }
+
+            var now = Time.unscaledTime;
+            if (now - singleGoalieVoteStartTime >= singleGoalieVoteDuration)
+            {
+                FinalizeSingleGoalieVote();
+                return;
+            }
+
+            var eligible = ResolveCurrentSingleGoalieVoteEligibleParticipants();
+            CountSnapshotVotes(eligible, singleGoalieVotes, out var total, out var yes, out var no);
+            var requiredYes = total > 0 ? ((total / 2) + 1) : 1;
+            if (yes >= requiredYes || no > total - requiredYes)
+            {
+                FinalizeSingleGoalieVote();
+            }
+        }
+
+        private static List<RankedParticipant> ResolveCurrentSingleGoalieVoteEligibleParticipants()
+        {
+            try
+            {
+                if (singleGoalieVoteEligible == null) return null;
+                return OrderParticipantsForDeterminism(singleGoalieVoteEligible);
+            }
+            catch { }
+
+            return null;
+        }
+
+        public static void HandleSingleGoalieVoteStart(object player, ulong clientId)
+        {
+            try
+            {
+                if (NetworkManager.Singleton == null || !NetworkManager.Singleton.IsServer) return;
+
+                lock (rankedLock)
+                {
+                    if (!rankedActive || draftActive)
+                    {
+                        SendSystemChatToClient("<size=14><color=#ff6666>Shared Goalie</color> can only be used during an active ranked match.</size>", clientId);
+                        return;
+                    }
+
+                    if (rankedVoteActive)
+                    {
+                        SendSystemChatToClient("<size=14><color=#ff6666>Shared Goalie</color> wait for the ranked vote to finish first.</size>", clientId);
+                        return;
+                    }
+
+                    if (singleGoalieVoteActive)
+                    {
+                        SendSystemChatToClient("<size=14><color=#ffcc66>Shared Goalie</color> vote already in progress.</size>", clientId);
+                        return;
+                    }
+
+                    if (Time.unscaledTime - lastSingleGoalieVoteTime < singleGoalieVoteCooldown)
+                    {
+                        SendSystemChatToClient("<size=14><color=#ff6666>Shared Goalie</color> vote is on cooldown.</size>", clientId);
+                        return;
+                    }
+
+                    if (!TryBuildConnectedPlayerSnapshot(player, out var initiator) || initiator == null)
+                    {
+                        SendSystemChatToClient("<size=14><color=#ff6666>Shared Goalie</color> could not resolve the requesting player.</size>", clientId);
+                        return;
+                    }
+
+                    if (!TryIsGoalie(player, out var initiatorIsGoalie) || !initiatorIsGoalie)
+                    {
+                        SendSystemChatToClient("<size=14><color=#ff6666>Shared Goalie</color> only the active goalie can start this vote.</size>", clientId);
+                        return;
+                    }
+
+                    if (!TryGetSingleGoalieCandidate(out var goalieCandidate, out var candidateReason))
+                    {
+                        SendSystemChatToClient($"<size=14><color=#ff6666>Shared Goalie</color> cannot start: {candidateReason}</size>", clientId);
+                        return;
+                    }
+
+                    if (!IsSameParticipantIdentity(goalieCandidate, initiator))
+                    {
+                        SendSystemChatToClient("<size=14><color=#ff6666>Shared Goalie</color> only the lone active goalie can start this vote.</size>", clientId);
+                        return;
+                    }
+
+                    if (!TryGetSingleGoalieVoteEligiblePlayers(out var eligible, out var eligibleReason))
+                    {
+                        SendSystemChatToClient($"<size=14><color=#ff6666>Shared Goalie</color> cannot start: {eligibleReason}</size>", clientId);
+                        return;
+                    }
+
+                    var disableVote = singleGoalieEnabled;
+
+                    singleGoalieVoteStartedByName = initiator.displayName ?? TryGetPlayerName(player) ?? "Goalie";
+                    singleGoalieVoteStartedByKey = ResolveParticipantIdToKey(initiator) ?? initiator.playerId ?? $"clientId:{clientId}";
+                    singleGoalieVoteStartedByClientId = clientId;
+                    singleGoalieVoteDisablesMode = disableVote;
+                    singleGoalieVoteActive = true;
+                    singleGoalieVoteStartTime = Time.unscaledTime;
+                    lastSingleGoalieVoteTime = singleGoalieVoteStartTime;
+                    singleGoalieVotes.Clear();
+                    singleGoalieVotes[clientId] = true;
+                    singleGoalieVoteEligible = eligible
+                        .Select(CloneParticipant)
+                        .Where(participant => participant != null)
+                        .ToList();
+
+                    var voteAction = disableVote ? "disable" : "enable";
+                    SendSystemChatToAll($"<size=14><color=#00ff00>Shared Goalie {voteAction} vote started</color> by {singleGoalieVoteStartedByName}. Type <b>/y</b> to accept or <b>/n</b> to reject. ({Mathf.CeilToInt(singleGoalieVoteDuration)}s) The goalie starter vote counts automatically.</size>");
+
+                    CountSnapshotVotes(singleGoalieVoteEligible, singleGoalieVotes, out var total, out var yes, out var no);
+                    var requiredYes = total > 0 ? ((total / 2) + 1) : 1;
+                    if (yes >= requiredYes || no > total - requiredYes)
+                    {
+                        FinalizeSingleGoalieVote();
+                    }
+                }
+            }
+            catch { }
+        }
+
+        public static void HandleSingleGoalieVoteResponse(object player, ulong clientId, bool accept)
+        {
+            try
+            {
+                if (NetworkManager.Singleton == null || !NetworkManager.Singleton.IsServer) return;
+
+                lock (rankedLock)
+                {
+                    if (!singleGoalieVoteActive)
+                    {
+                        SendSystemChatToClient("<size=14><color=#ffcc66>Shared Goalie</color> no vote is currently active.</size>", clientId);
+                        return;
+                    }
+
+                    var eligible = ResolveCurrentSingleGoalieVoteEligibleParticipants();
+                    if (!IsClientInSnapshot(eligible, clientId))
+                    {
+                        SendSystemChatToClient("<size=14><color=#ff6666>Shared Goalie</color> you are not eligible to vote in this lobby.</size>", clientId);
+                        return;
+                    }
+
+                    singleGoalieVotes[clientId] = accept;
+                    CountSnapshotVotes(eligible, singleGoalieVotes, out var total, out var yes, out var no);
+                    var requiredYes = total > 0 ? ((total / 2) + 1) : 1;
+                    if (yes >= requiredYes || no > total - requiredYes)
+                    {
+                        FinalizeSingleGoalieVote();
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private static void FinalizeSingleGoalieVote()
+        {
+            try
+            {
+                var accepted = false;
+                var disableVote = false;
+
+                lock (rankedLock)
+                {
+                    if (!singleGoalieVoteActive)
+                    {
+                        return;
+                    }
+
+                    CountSnapshotVotes(ResolveCurrentSingleGoalieVoteEligibleParticipants(), singleGoalieVotes, out var total, out var yes, out var no);
+                    var requiredYes = total > 0 ? ((total / 2) + 1) : 1;
+                    accepted = total > 0 && yes >= requiredYes;
+                    disableVote = singleGoalieVoteDisablesMode;
+
+                    singleGoalieVoteActive = false;
+                    singleGoalieVoteStartTime = -999f;
+                    singleGoalieVoteStartedByName = null;
+                    singleGoalieVoteStartedByKey = null;
+                    singleGoalieVoteStartedByClientId = 0;
+                    singleGoalieVoteDisablesMode = false;
+                    singleGoalieVotes.Clear();
+                    singleGoalieVoteEligible = null;
+                }
+
+                if (!accepted)
+                {
+                    SendSystemChatToAll(disableVote
+                        ? "<size=14><color=#ff6666>Shared Goalie</color> disable vote failed.</size>"
+                        : "<size=14><color=#ff6666>Shared Goalie</color> enable vote failed.</size>");
+                    return;
+                }
+
+                if (disableVote)
+                {
+                    var goalieName = singleGoaliePlayerName ?? "Goalie";
+                    singleGoalieEnabled = false;
+                    singleGoaliePlayerKey = null;
+                    singleGoaliePlayerClientId = 0;
+                    singleGoaliePlayerName = null;
+                    singleGoalieAssignedTeam = TeamResult.Unknown;
+                    SendSystemChatToAll($"<size=14><color=#ff6666>Shared Goalie</color> disabled for <b>{goalieName}</b> by vote.</size>");
+                    return;
+                }
+
+                if (!TryGetSingleGoalieCandidate(out var goalieCandidate, out var reason))
+                {
+                    SendSystemChatToAll($"<size=14><color=#ff6666>Shared Goalie</color> vote passed, but activation failed: {reason}</size>");
+                    return;
+                }
+
+                singleGoalieEnabled = true;
+                singleGoaliePlayerKey = ResolveParticipantIdToKey(goalieCandidate) ?? goalieCandidate.playerId;
+                singleGoaliePlayerClientId = goalieCandidate.clientId;
+                singleGoaliePlayerName = goalieCandidate.displayName ?? "Goalie";
+                singleGoalieAssignedTeam = goalieCandidate.team;
+
+                SendSystemChatToAll($"<size=14><color=#00ff00>Shared Goalie</color> enabled for <b>{singleGoaliePlayerName}</b>. This player will appear as <b>SG</b> and will not gain or lose MMR.</size>");
+            }
+            catch { }
+        }
+
+        private static void CancelSingleGoalieVote(string reason)
+        {
+            var disableVote = singleGoalieVoteDisablesMode;
+            lock (rankedLock)
+            {
+                singleGoalieVoteActive = false;
+                singleGoalieVoteStartTime = -999f;
+                singleGoalieVoteStartedByName = null;
+                singleGoalieVoteStartedByKey = null;
+                singleGoalieVoteStartedByClientId = 0;
+                singleGoalieVoteDisablesMode = false;
+                singleGoalieVotes.Clear();
+                singleGoalieVoteEligible = null;
+            }
+
+            var voteAction = disableVote ? "disable vote" : "enable vote";
+            SendSystemChatToAll($"<size=14><color=#ff6666>Shared Goalie</color> {voteAction} cancelled: {reason}</size>");
+        }
+
+        private static void DisableSingleGoalie(string reason)
+        {
+            if (!singleGoalieEnabled)
+            {
+                return;
+            }
+
+            singleGoalieEnabled = false;
+            singleGoaliePlayerKey = null;
+            singleGoaliePlayerClientId = 0;
+            singleGoaliePlayerName = null;
+            singleGoalieAssignedTeam = TeamResult.Unknown;
+
+            SendSystemChatToAll($"<size=14><color=#ff6666>Shared Goalie</color> disabled: {reason}</size>");
+        }
+
+        private static bool TryGetSingleGoalieVoteEligiblePlayers(out List<RankedParticipant> eligible, out string reason)
+        {
+            eligible = new List<RankedParticipant>();
+            reason = "no active team players found";
+
+            var unique = new Dictionary<ulong, RankedParticipant>();
+            foreach (var player in GetAllPlayers())
+            {
+                if (!TryBuildConnectedPlayerSnapshot(player, out var participant) || participant == null)
+                {
+                    continue;
+                }
+
+                if (participant.team != TeamResult.Red && participant.team != TeamResult.Blue)
+                {
+                    continue;
+                }
+
+                unique[participant.clientId] = participant;
+            }
+
+            eligible = OrderParticipantsForDeterminism(unique.Values);
+            if (eligible.Count == 0)
+            {
+                return false;
+            }
+
+            reason = null;
+            return true;
+        }
+
+        private static bool TryGetSingleGoalieCandidate(out RankedParticipant goalie, out string reason)
+        {
+            goalie = null;
+            reason = "need exactly one active goalie across both teams";
+
+            var goalies = new Dictionary<ulong, RankedParticipant>();
+            foreach (var player in GetAllPlayers())
+            {
+                if (!TryBuildConnectedPlayerSnapshot(player, out var participant) || participant == null)
+                {
+                    continue;
+                }
+
+                if (participant.team != TeamResult.Red && participant.team != TeamResult.Blue)
+                {
+                    continue;
+                }
+
+                if (!TryIsGoalie(player, out var isGoalie) || !isGoalie)
+                {
+                    continue;
+                }
+
+                goalies[participant.clientId] = participant;
+            }
+
+            if (goalies.Count == 0)
+            {
+                reason = "need exactly one active goalie across both teams";
+                return false;
+            }
+
+            if (goalies.Count > 1)
+            {
+                reason = "multiple goalies are active";
+                return false;
+            }
+
+            goalie = OrderParticipantsForDeterminism(goalies.Values).FirstOrDefault();
+            reason = goalie == null ? "could not resolve the active goalie" : null;
+            return goalie != null;
+        }
+
+        private static bool IsTrackedSingleGoalie(RankedParticipant participant)
+        {
+            if (participant == null)
+            {
+                return false;
+            }
+
+            if (!string.IsNullOrWhiteSpace(singleGoaliePlayerKey))
+            {
+                var participantKey = NormalizeResolvedPlayerKey(ResolveParticipantIdToKey(participant) ?? participant.playerId);
+                var trackedKey = NormalizeResolvedPlayerKey(singleGoaliePlayerKey);
+                if (!string.IsNullOrWhiteSpace(participantKey)
+                    && !string.IsNullOrWhiteSpace(trackedKey)
+                    && string.Equals(participantKey, trackedKey, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+
+            return participant.clientId != 0 && singleGoaliePlayerClientId != 0 && participant.clientId == singleGoaliePlayerClientId;
+        }
+
+        private static bool IsSameParticipantIdentity(RankedParticipant left, RankedParticipant right)
+        {
+            if (left == null || right == null)
+            {
+                return false;
+            }
+
+            var leftKey = NormalizeResolvedPlayerKey(ResolveParticipantIdToKey(left) ?? left.playerId);
+            var rightKey = NormalizeResolvedPlayerKey(ResolveParticipantIdToKey(right) ?? right.playerId);
+            if (!string.IsNullOrWhiteSpace(leftKey)
+                && !string.IsNullOrWhiteSpace(rightKey)
+                && string.Equals(leftKey, rightKey, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            return left.clientId != 0 && right.clientId != 0 && left.clientId == right.clientId;
+        }
+
+        private static void TryUpdateSharedGoalieAssignment(RankedParticipant goalie)
+        {
+            try
+            {
+                if (goalie == null)
+                {
+                    return;
+                }
+
+                if (!TryResolveConnectedPlayer(singleGoaliePlayerKey ?? goalie.playerId, singleGoaliePlayerClientId != 0 ? singleGoaliePlayerClientId : goalie.clientId, out var player, out var resolvedClientId, out var resolvedPlayerKey))
+                {
+                    return;
+                }
+
+                if (!TryGetSinglePuckZ(out var puckZ))
+                {
+                    return;
+                }
+
+                TeamResult targetTeam;
+                if (puckZ > SingleGoaliePuckThreshold)
+                {
+                    targetTeam = TeamResult.Blue;
+                }
+                else if (puckZ < -SingleGoaliePuckThreshold)
+                {
+                    targetTeam = TeamResult.Red;
+                }
+                else
+                {
+                    return;
+                }
+                var currentTeam = TeamResult.Unknown;
+                if (!TryGetPlayerTeam(player, out currentTeam) || currentTeam == TeamResult.Unknown)
+                {
+                    TryGetPlayerTeamFromManager(resolvedClientId, out currentTeam);
+                }
+
+                if (currentTeam == targetTeam)
+                {
+                    singleGoalieAssignedTeam = targetTeam;
+                    return;
+                }
+
+                if (TryApplySharedGoalieTeamSwitch(player, resolvedPlayerKey, resolvedClientId, targetTeam, puckZ))
+                {
+                    singleGoalieAssignedTeam = targetTeam;
+                }
+            }
+            catch { }
+        }
+
+        private static bool TryApplySharedGoalieTeamSwitch(object player, string playerKey, ulong clientId, TeamResult targetTeam, float puckZ)
+        {
+            if (player == null || targetTeam == TeamResult.Unknown)
+            {
+                return false;
+            }
+
+            try
+            {
+                var runtimeTeamType = FindTypeByName("PlayerTeam", "Puck.PlayerTeam");
+                if (runtimeTeamType == null || !runtimeTeamType.IsEnum)
+                {
+                    return false;
+                }
+
+                var runtimeTeamValue = Enum.Parse(runtimeTeamType, targetTeam == TeamResult.Red ? "Red" : "Blue", true);
+                var previousJoinMidMatchDelay = 0f;
+                var hasPreviousJoinMidMatchDelay = TryGetJoinMidMatchDelay(out previousJoinMidMatchDelay);
+                object goaliePosition = null;
+
+                try
+                {
+                    if (hasPreviousJoinMidMatchDelay)
+                    {
+                        TrySetJoinMidMatchDelay(0f);
+                    }
+
+                    RegisterInternalTeamAssignment(playerKey, runtimeTeamValue);
+                    using (BeginForcedTeamAssignment())
+                    {
+                        if (!TrySetPlayerTeamOnPlayer(player, runtimeTeamValue))
+                        {
+                            return false;
+                        }
+                    }
+
+                    goaliePosition = TryFindSharedGoaliePosition(runtimeTeamValue);
+                    if (goaliePosition != null)
+                    {
+                        var claimMethod = goaliePosition.GetType().GetMethod("Server_Claim", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                        claimMethod?.Invoke(goaliePosition, new[] { player });
+                    }
+                    else
+                    {
+                        Debug.LogWarning($"[{Constants.MOD_NAME}] [SG] No goalie position found on {FormatTeamLabel(targetTeam)}; switch aborted after team change.");
+                    }
+                }
+                finally
+                {
+                    if (hasPreviousJoinMidMatchDelay)
+                    {
+                        TrySetJoinMidMatchDelay(previousJoinMidMatchDelay);
+                    }
+                }
+
+                var goalieLabel = singleGoaliePlayerName ?? playerKey ?? ("clientId:" + clientId);
+                Debug.Log($"[{Constants.MOD_NAME}] [SG] moved shared goalie {goalieLabel} to {FormatTeamLabel(targetTeam)} (puck z={puckZ:0.00}).");
+                return true;
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static bool TryGetSinglePuckZ(out float puckZ)
+        {
+            puckZ = 0f;
+
+            try
+            {
+                var puckManagerType = FindTypeByName("PuckManager", "Puck.PuckManager");
+                var puckManager = GetManagerInstance(puckManagerType);
+                if (puckManagerType == null || puckManager == null)
+                {
+                    return false;
+                }
+
+                var getPucks = puckManagerType.GetMethod("GetPucks", BindingFlags.Public | BindingFlags.Instance | BindingFlags.NonPublic);
+                if (getPucks == null)
+                {
+                    return false;
+                }
+
+                object result;
+                var parameters = getPucks.GetParameters();
+                if (parameters.Length == 0)
+                {
+                    result = getPucks.Invoke(puckManager, null);
+                }
+                else
+                {
+                    result = getPucks.Invoke(puckManager, new object[] { false });
+                }
+
+                var pucks = result as IEnumerable;
+                if (pucks == null)
+                {
+                    return false;
+                }
+
+                object singlePuck = null;
+                var count = 0;
+                foreach (var puck in pucks)
+                {
+                    if (puck == null) continue;
+                    singlePuck = puck;
+                    count++;
+                    if (count > 1)
+                    {
+                        return false;
+                    }
+                }
+
+                if (count != 1 || singlePuck == null)
+                {
+                    return false;
+                }
+
+                if (singlePuck is Component component)
+                {
+                    puckZ = component.transform.position.z;
+                    return true;
+                }
+
+                var transformProp = singlePuck.GetType().GetProperty("transform", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                var transform = transformProp?.GetValue(singlePuck) as Transform;
+                if (transform == null)
+                {
+                    return false;
+                }
+
+                puckZ = transform.position.z;
+                return true;
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static bool TryResolveGoaliePositionKeyForTeam(TeamResult team, out string positionKey)
+        {
+            positionKey = null;
+            if (team != TeamResult.Red && team != TeamResult.Blue)
+            {
+                return false;
+            }
+
+            try
+            {
+                var ppmType = FindTypeByName("PlayerPositionManager", "Puck.PlayerPositionManager");
+                var ppm = GetManagerInstance(ppmType);
+                if (ppmType == null || ppm == null)
+                {
+                    return false;
+                }
+
+                var listName = team == TeamResult.Red ? "RedPositions" : "BluePositions";
+                var listProp = ppmType.GetProperty(listName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                var positions = listProp?.GetValue(ppm) as IEnumerable;
+                if (positions == null)
+                {
+                    return false;
+                }
+
+                var index = 0;
+                foreach (var position in positions)
+                {
+                    var candidateKey = $"{listName}:{index++}";
+                    if (!IsGoaliePositionForSharedMode(position))
+                    {
+                        continue;
+                    }
+
+                    positionKey = candidateKey;
+                    return true;
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static object TryFindSharedGoaliePosition(object runtimeTeamValue)
+        {
+            if (runtimeTeamValue == null)
+            {
+                return null;
+            }
+
+            try
+            {
+                var ppmType = FindTypeByName("PlayerPositionManager", "Puck.PlayerPositionManager");
+                var ppm = GetManagerInstance(ppmType);
+                if (ppmType == null || ppm == null)
+                {
+                    return null;
+                }
+
+                var allPositionsProperty = ppmType.GetProperty("AllPositions", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                var allPositions = allPositionsProperty?.GetValue(ppm) as IEnumerable;
+                if (allPositions == null)
+                {
+                    return null;
+                }
+
+                foreach (var position in allPositions)
+                {
+                    if (position == null)
+                    {
+                        continue;
+                    }
+
+                    var positionType = position.GetType();
+                    var roleValue = positionType.GetProperty("Role", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(position)
+                        ?? positionType.GetField("Role", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(position)
+                        ?? positionType.GetProperty("role", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(position)
+                        ?? positionType.GetField("role", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(position);
+                    var teamValue = positionType.GetProperty("Team", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(position)
+                        ?? positionType.GetField("Team", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(position)
+                        ?? positionType.GetProperty("team", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(position)
+                        ?? positionType.GetField("team", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(position);
+
+                    if (roleValue == null || teamValue == null)
+                    {
+                        continue;
+                    }
+
+                    if (roleValue.ToString().IndexOf("goal", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        continue;
+                    }
+
+                    if (!AreTeamValuesEqual(teamValue, runtimeTeamValue))
+                    {
+                        continue;
+                    }
+
+                    return position;
+                }
+            }
+            catch { }
+
+            return null;
+        }
+
+        private static bool TryGetJoinMidMatchDelay(out float delay)
+        {
+            delay = 0f;
+
+            try
+            {
+                var serverManagerType = FindTypeByName("ServerManager", "Puck.ServerManager");
+                var serverManager = GetManagerInstance(serverManagerType);
+                if (serverManager == null)
+                {
+                    return false;
+                }
+
+                var serverManagerResolvedType = serverManager.GetType();
+                var configurationManager = serverManagerResolvedType.GetProperty("ServerConfigurationManager", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(serverManager)
+                    ?? serverManagerResolvedType.GetField("ServerConfigurationManager", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(serverManager);
+                if (configurationManager == null)
+                {
+                    return false;
+                }
+
+                var configurationManagerType = configurationManager.GetType();
+                var configuration = configurationManagerType.GetProperty("ServerConfiguration", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(configurationManager)
+                    ?? configurationManagerType.GetField("ServerConfiguration", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(configurationManager);
+                if (configuration == null)
+                {
+                    return false;
+                }
+
+                var configurationType = configuration.GetType();
+                var joinMidMatchDelayProperty = configurationType.GetProperty("joinMidMatchDelay", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (joinMidMatchDelayProperty != null)
+                {
+                    var value = joinMidMatchDelayProperty.GetValue(configuration);
+                    if (value != null)
+                    {
+                        delay = Convert.ToSingle(value);
+                        return true;
+                    }
+                }
+
+                var joinMidMatchDelayField = configurationType.GetField("joinMidMatchDelay", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (joinMidMatchDelayField != null)
+                {
+                    var value = joinMidMatchDelayField.GetValue(configuration);
+                    if (value != null)
+                    {
+                        delay = Convert.ToSingle(value);
+                        return true;
+                    }
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static bool TrySetJoinMidMatchDelay(float delay)
+        {
+            try
+            {
+                var serverManagerType = FindTypeByName("ServerManager", "Puck.ServerManager");
+                var serverManager = GetManagerInstance(serverManagerType);
+                if (serverManager == null)
+                {
+                    return false;
+                }
+
+                var serverManagerResolvedType = serverManager.GetType();
+                var configurationManager = serverManagerResolvedType.GetProperty("ServerConfigurationManager", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(serverManager)
+                    ?? serverManagerResolvedType.GetField("ServerConfigurationManager", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(serverManager);
+                if (configurationManager == null)
+                {
+                    return false;
+                }
+
+                var configurationManagerType = configurationManager.GetType();
+                var configuration = configurationManagerType.GetProperty("ServerConfiguration", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(configurationManager)
+                    ?? configurationManagerType.GetField("ServerConfiguration", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(configurationManager);
+                if (configuration == null)
+                {
+                    return false;
+                }
+
+                var configurationType = configuration.GetType();
+                var joinMidMatchDelayProperty = configurationType.GetProperty("joinMidMatchDelay", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (joinMidMatchDelayProperty != null && joinMidMatchDelayProperty.CanWrite)
+                {
+                    joinMidMatchDelayProperty.SetValue(configuration, delay);
+                    return true;
+                }
+
+                var joinMidMatchDelayField = configurationType.GetField("joinMidMatchDelay", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (joinMidMatchDelayField != null)
+                {
+                    joinMidMatchDelayField.SetValue(configuration, delay);
+                    return true;
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static bool IsGoaliePositionForSharedMode(object position)
+        {
+            if (position == null)
+            {
+                return false;
+            }
+
+            try
+            {
+                var positionType = position.GetType();
+                foreach (var memberName in new[] { "Role", "role", "Name", "name", "PositionKey", "positionKey" })
+                {
+                    var property = positionType.GetProperty(memberName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                    var propertyValue = property?.GetValue(position)?.ToString();
+                    if (!string.IsNullOrWhiteSpace(propertyValue)
+                        && propertyValue.IndexOf("goal", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        return true;
+                    }
+
+                    var field = positionType.GetField(memberName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                    var fieldValue = field?.GetValue(position)?.ToString();
+                    if (!string.IsNullOrWhiteSpace(fieldValue)
+                        && fieldValue.IndexOf("goal", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        return true;
+                    }
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
         public static void HandleRankedVoteStart(object player, ulong clientId)
         {
             try
@@ -958,12 +2894,17 @@ namespace schrader.Server
 
                 lock (rankedLock)
                 {
+                        var connectedClientCount = NetworkManager.Singleton?.ConnectedClientsIds?.Count ?? 0;
+                        Debug.Log($"[{Constants.MOD_NAME}] [VOTE][DEBUG] Vote start command received. clientId={clientId} controlledTest={controlledTestModeEnabled} rankedActive={rankedActive} rankedVoteActive={rankedVoteActive} connectedClients={connectedClientCount}");
+
                     if (rankedActive) { SendSystemChatToClient("<size=14><color=#ffcc66>Ranked</color> already active.</size>", clientId); return; }
+                    if (singleGoalieVoteActive) { SendSystemChatToClient("<size=14><color=#ffcc66>Ranked</color> wait for the shared-goalie vote to finish first.</size>", clientId); return; }
                     if (rankedVoteActive) { SendSystemChatToClient("<size=14><color=#ffcc66>Ranked</color> vote already in progress.</size>", clientId); return; }
                     if (Time.unscaledTime - lastRankedVoteTime < rankedVoteCooldown) { SendSystemChatToClient("<size=14><color=#ff6666>Ranked</color> vote is on cooldown.</size>", clientId); return; }
 
                     if (!TryGetEligiblePlayersForStart(player, clientId, out var eligible, out var reason))
                     {
+                            Debug.Log($"[{Constants.MOD_NAME}] [VOTE][DEBUG] Vote start rejected. clientId={clientId} controlledTest={controlledTestModeEnabled} reason={reason}");
                         SendSystemChatToClient($"<size=14><color=#ff6666>Ranked</color> cannot start: {reason}</size>", clientId);
                         return;
                     }
@@ -995,6 +2936,7 @@ namespace schrader.Server
                         ? " Test mode active: bots auto-accept after your /y vote."
                         : string.Empty;
                     SendSystemChatToAll($"<size=14><color=#00ff00>Ranked vote started</color> by {pname}. Type <b>/y</b> to accept or <b>/n</b> to reject. ({Mathf.CeilToInt(rankedVoteDuration)}s){controlledTestSuffix}</size>");
+                    Debug.Log($"[{Constants.MOD_NAME}] [VOTE] Vote started. by={pname} clientId={clientId} eligible={(lastVoteEligible?.Count ?? 0)} controlledTest={controlledTestModeEnabled} connectedClients={connectedClientCount} teams={string.Join(",", (lastVoteEligible ?? new List<RankedParticipant>()).Where(participant => participant != null).Select(participant => $"{participant.displayName}:{participant.team}:{participant.clientId}"))}");
                     PublishVoteOverlayState();
                 }
             }
@@ -1006,6 +2948,9 @@ namespace schrader.Server
             try
             {
                 if (eligible == null || eligible.Count == 0) return false;
+
+                TryPurgePracticeModeFakePlayers(force: true, reason: forcedByAdmin ? "start-ranked-admin" : "start-ranked");
+                TryPurgeInvalidWarmupDummies(force: true);
 
                 eligible = OrderParticipantsForDeterminism(eligible);
 
@@ -1019,6 +2964,7 @@ namespace schrader.Server
 
                 rankedActive = true;
                 rankedParticipants = eligible.Select(CloneParticipant).Where(participant => participant != null).ToList();
+                ClearRankedLiveParticipationTracking();
                 lock (forfeitVotes)
                 {
                     forfeitVotes.Clear();
@@ -1039,6 +2985,7 @@ namespace schrader.Server
                 rankedVoteStartedByName = null;
                 rankedVoteStartedByKey = null;
                 rankedVoteStartedByClientId = 0;
+                PublishScoreboardStarState();
 
                 return true;
             }
@@ -1052,38 +2999,36 @@ namespace schrader.Server
             try
             {
                 if (NetworkManager.Singleton == null || !NetworkManager.Singleton.IsServer) return;
-                if (!rankedVoteActive) { SendSystemChatToClient("<size=14>No ranked vote in progress.</size>", clientId); return; }
-
-                var eligible = ResolveCurrentVoteEligibleParticipants();
-                if (eligible == null || eligible.Count == 0)
+                lock (rankedLock)
                 {
-                    SendSystemChatToClient("<size=14><color=#ff6666>Ranked</color> vote snapshot is unavailable.</size>", clientId);
-                    return;
-                }
-
-                if (!IsClientInSnapshot(eligible, clientId))
-                {
-                    SendSystemChatToClient("<size=14><color=#ff6666>Ranked</color> you are not part of this vote.</size>", clientId);
-                    return;
-                }
-
-                rankedVotes[clientId] = accept;
-
-                if (accept)
-                {
-                    AutoAcceptControlledTestBotVotes(eligible);
-                }
-
-                PublishVoteOverlayState();
-
-                // If everyone voted yes, start immediately. Use captured eligible as fallback.
-                if (accept)
-                {
-                    if (eligible != null)
+                    if (!rankedVoteActive)
                     {
-                        CountSnapshotVotes(eligible, rankedVotes, out var total, out var yes, out _);
-                        if (total > 0 && yes >= total) FinalizeRankedVote();
+                        SendSystemChatToClient("<size=14><color=#ffcc66>Ranked</color> no vote is currently active.</size>", clientId);
+                        return;
                     }
+
+                    var eligible = ResolveCurrentVoteEligibleParticipants();
+                    if (!IsClientInSnapshot(eligible, clientId))
+                    {
+                        SendSystemChatToClient("<size=14><color=#ff6666>Ranked</color> you are not eligible to vote in this lobby.</size>", clientId);
+                        return;
+                    }
+
+                    rankedVotes[clientId] = accept;
+                    if (accept)
+                    {
+                        AutoAcceptControlledTestBotVotes(eligible);
+                    }
+
+                    CountSnapshotVotes(eligible, rankedVotes, out var total, out var yes, out var no);
+                    var requiredYes = total > 0 ? ((total / 2) + 1) : 1;
+                    if (yes >= requiredYes || no > total - requiredYes)
+                    {
+                        FinalizeRankedVote();
+                        return;
+                    }
+
+                    PublishVoteOverlayState();
                 }
             }
             catch { }
@@ -1093,50 +3038,53 @@ namespace schrader.Server
         {
             try
             {
-                if (!rankedVoteActive) return;
-                var voteStartTime = rankedVoteStartTime;
-                rankedVoteActive = false;
-                rankedVoteStartTime = -999f;
-                lastVoteSecondsRemaining = -1;
-                rankedVoteStartedByName = null;
-                PublishVoteOverlayState();
+                List<RankedParticipant> eligible;
+                var accepted = false;
 
-                var eligible = ResolveCurrentVoteEligibleParticipants();
-                if (eligible == null)
+                lock (rankedLock)
                 {
-                    TryGetEligiblePlayers(out _, out var reason);
-                    SendSystemChatToAll($"<size=14><color=#ff6666>Ranked</color> vote failed: {reason}</size>");
+                    if (!rankedVoteActive)
+                    {
+                        return;
+                    }
+
+                    eligible = ResolveCurrentVoteEligibleParticipants();
+                    CountSnapshotVotes(eligible, rankedVotes, out var total, out var yes, out var no);
+                    var requiredYes = total > 0 ? ((total / 2) + 1) : 1;
+                    accepted = total > 0 && yes >= requiredYes;
+
+                    rankedVoteActive = false;
+                    rankedVotes.Clear();
+                    rankedVoteStartTime = -999f;
+                    lastVoteSecondsRemaining = -1;
+                    lastVoteEligible = null;
+                    rankedVoteStartedByName = null;
+                    rankedVoteStartedByKey = null;
+                    rankedVoteStartedByClientId = 0;
+                    controlledTestModeInitiatorKey = null;
+                    controlledTestModeInitiatorClientId = 0;
+
+                    PublishVoteOverlayState();
+                }
+
+                if (accepted)
+                {
+                    if (!StartRankedFromEligible(eligible, false))
+                    {
+                        SendSystemChatToAll("<size=14><color=#ff6666>Ranked</color> vote passed, but the captain draft could not be started.</size>");
+                    }
+
                     return;
                 }
 
-                CountSnapshotVotes(eligible, rankedVotes, out var total, out var yes, out var no);
-                var requiredYes = (total / 2) + 1;
-                var timedOut = voteStartTime >= 0f && Time.unscaledTime - voteStartTime >= rankedVoteDuration;
-                if (yes >= requiredYes)
-                {
-                    Debug.Log($"[{Constants.MOD_NAME}] Vote finished -> starting draft");
-                    StartRankedFromEligible(eligible, false);
-                }
-                else
-                {
-                    if (timedOut) SendSystemChatToAll("<size=14><color=#ff6666>Ranked</color> vote timed out: not enough votes.</size>");
-                    else SendSystemChatToAll("<size=14><color=#ff6666>Ranked</color> vote failed.</size>");
-                }
-                // clear captured eligible after vote finalizes
-                lastVoteEligible = null;
+                SendSystemChatToAll("<size=14><color=#ff6666>Ranked</color> vote failed.</size>");
             }
             catch { }
         }
 
-        private static VoteOverlayPlayerEntryMessage[] BuildVotePlayerEntries(IEnumerable<RankedParticipant> eligible)
+        private static VoteOverlayPlayerEntryMessage[] BuildVotePlayerEntries(IEnumerable<RankedParticipant> participants)
         {
-            return (eligible ?? Enumerable.Empty<RankedParticipant>())
-                .Where(participant => participant != null)
-                .Select(CloneParticipant)
-                .Where(participant => participant != null)
-                .OrderByDescending(participant => IsVoteInitiatorParticipant(participant))
-                .ThenBy(participant => participant.displayName ?? string.Empty, StringComparer.OrdinalIgnoreCase)
-                .ThenBy(participant => participant.clientId)
+            return (participants ?? Enumerable.Empty<RankedParticipant>())
                 .Select(BuildVotePlayerEntry)
                 .Where(entry => entry != null)
                 .ToArray();
@@ -1161,7 +3109,8 @@ namespace schrader.Server
                 TryGetPlayerByClientId(participant.clientId, out livePlayer);
             }
 
-            var steamId = NormalizeResolvedPlayerKey((livePlayer != null ? TryGetPlayerIdNoFallback(livePlayer) : null) ?? participant.playerId ?? participantKey);
+            var steamId = ResolveParticipantSteamIdForUi(participant, participantKey)
+                ?? NormalizeResolvedPlayerKey((livePlayer != null ? TryGetPlayerIdNoFallback(livePlayer) : null) ?? participant.playerId ?? participantKey);
             var displayName = ResolvePreferredParticipantDisplayName(participant, null, participantKey)
                 ?? participant.displayName
                 ?? (participant.clientId != 0 ? $"Player {participant.clientId}" : "Player");
@@ -1244,7 +3193,10 @@ namespace schrader.Server
         {
             try
             {
-                RankedOverlayNetwork.PublishVoteState(GetVoteOverlayState());
+                var state = GetVoteOverlayState();
+                var targetClientCount = NetworkManager.Singleton?.ConnectedClientsIds?.Count ?? 0;
+                Debug.Log($"[{Constants.MOD_NAME}] [VOTE] Publishing vote overlay. Visible={state.IsVisible} Eligible={state.EligibleCount} Yes={state.YesVotes} No={state.NoVotes} Required={state.RequiredYesVotes} controlledTest={controlledTestModeEnabled} targetClients={targetClientCount} playerEntries={(state.PlayerEntries?.Length ?? 0)}");
+                RankedOverlayNetwork.PublishVoteState(state);
             }
             catch (Exception ex)
             {
@@ -1441,8 +3393,10 @@ namespace schrader.Server
             if (val == null) return TeamResult.Unknown;
             try
             {
-                if (val is int i) return i == 0 ? TeamResult.Red : (i == 1 ? TeamResult.Blue : TeamResult.Unknown);
-                if (val is uint ui) return ui == 0 ? TeamResult.Red : (ui == 1 ? TeamResult.Blue : TeamResult.Unknown);
+                if (val is int i) return i == 3 ? TeamResult.Red : (i == 2 ? TeamResult.Blue : TeamResult.Unknown);
+                if (val is uint ui) return ui == 3 ? TeamResult.Red : (ui == 2 ? TeamResult.Blue : TeamResult.Unknown);
+                if (val is long l) return l == 3L ? TeamResult.Red : (l == 2L ? TeamResult.Blue : TeamResult.Unknown);
+                if (val is ulong ul) return ul == 3UL ? TeamResult.Red : (ul == 2UL ? TeamResult.Blue : TeamResult.Unknown);
                 if (val is Enum) { var name = val.ToString().ToLowerInvariant(); if (name.Contains("red")) return TeamResult.Red; if (name.Contains("blue")) return TeamResult.Blue; }
                 var s = val.ToString().ToLowerInvariant(); if (s.Contains("red")) return TeamResult.Red; if (s.Contains("blue")) return TeamResult.Blue;
             }
@@ -1645,6 +3599,7 @@ namespace schrader.Server
                 }
 
                 if (val is bool b) { isGoalie = b; return true; }
+                if (TryConvertToBool(val, out b)) { isGoalie = b; return true; }
             }
 
             string[] roleNames = { "Role", "role", "Position", "position" };
@@ -1658,8 +3613,119 @@ namespace schrader.Server
                     var field = t.GetField(n, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
                     if (field != null) val = field.GetValue(player);
                 }
-                if (val is string s && s.IndexOf("goal", StringComparison.OrdinalIgnoreCase) >= 0) { isGoalie = true; return true; }
+
+                if (TryValueRepresentsGoalieRole(val))
+                {
+                    isGoalie = true;
+                    return true;
+                }
             }
+
+            if (TryGetClientId(player, out var clientId) && clientId != 0 && TryIsGoalieByClaimedPosition(clientId, out isGoalie))
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool TryValueRepresentsGoalieRole(object value)
+        {
+            if (value == null)
+            {
+                return false;
+            }
+
+            try
+            {
+                if (TryConvertToInt(value, out var numericRole))
+                {
+                    return numericRole == 2;
+                }
+
+                var text = ExtractSimpleValueToString(value) ?? value.ToString();
+                if (string.IsNullOrWhiteSpace(text))
+                {
+                    return false;
+                }
+
+                if (text.IndexOf("goal", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return true;
+                }
+
+                if (string.Equals(text.Trim(), "G", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static bool TryIsGoalieByClaimedPosition(ulong clientId, out bool isGoalie)
+        {
+            isGoalie = false;
+            if (clientId == 0)
+            {
+                return false;
+            }
+
+            try
+            {
+                var ppmType = FindTypeByName("PlayerPositionManager", "Puck.PlayerPositionManager");
+                var ppm = GetManagerInstance(ppmType);
+                if (ppmType == null || ppm == null)
+                {
+                    return false;
+                }
+
+                var allPositionsProperty = ppmType.GetProperty("AllPositions", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                var allPositions = allPositionsProperty?.GetValue(ppm) as IEnumerable;
+                if (allPositions == null)
+                {
+                    return false;
+                }
+
+                foreach (var position in allPositions)
+                {
+                    if (position == null)
+                    {
+                        continue;
+                    }
+
+                    var positionType = position.GetType();
+                    var roleValue = positionType.GetProperty("Role", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(position)
+                        ?? positionType.GetField("Role", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(position)
+                        ?? positionType.GetProperty("role", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(position)
+                        ?? positionType.GetField("role", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(position);
+                    if (!TryValueRepresentsGoalieRole(roleValue))
+                    {
+                        continue;
+                    }
+
+                    var claimedByValue = positionType.GetProperty("ClaimedBy", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(position)
+                        ?? positionType.GetField("ClaimedBy", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(position)
+                        ?? positionType.GetProperty("claimedBy", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(position)
+                        ?? positionType.GetField("claimedBy", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(position)
+                        ?? positionType.GetProperty("Player", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(position)
+                        ?? positionType.GetField("Player", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(position)
+                        ?? positionType.GetProperty("player", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(position)
+                        ?? positionType.GetField("player", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(position);
+                    if (claimedByValue == null)
+                    {
+                        continue;
+                    }
+
+                    if (TryGetClientId(claimedByValue, out var claimedClientId) && claimedClientId == clientId)
+                    {
+                        isGoalie = true;
+                        return true;
+                    }
+                }
+            }
+            catch { }
 
             return false;
         }
@@ -2784,12 +4850,22 @@ namespace schrader.Server
         {
             try
             {
+                string previousPhaseName = null;
+                string currentPhaseName = null;
+
                 if (TryGetGamePhaseValue(__0, out var phaseStrTracked))
                 {
+                    currentPhaseName = phaseStrTracked;
                     lock (phaseLock)
                     {
+                        previousPhaseName = lastGamePhaseName;
                         lastGamePhaseName = phaseStrTracked;
                         lastGamePhaseUpdateTime = Time.unscaledTime;
+                    }
+
+                    if (!string.Equals(previousPhaseName, phaseStrTracked, StringComparison.OrdinalIgnoreCase))
+                    {
+                        Debug.Log($"[{Constants.MOD_NAME}] [PHASE] {previousPhaseName ?? "unknown"} -> {phaseStrTracked}. rankedActive={rankedActive} draftActive={draftActive} voteActive={rankedVoteActive} manualSpawnDepth={manualSpawnDepth}");
                     }
 
                     var p = (phaseStrTracked ?? string.Empty).ToLowerInvariant();
@@ -2802,6 +4878,8 @@ namespace schrader.Server
                         }
                     }
                 }
+
+                TryAnnounceSingleGoalieCommandHint(__instance, previousPhaseName, currentPhaseName);
 
                 // Check if this is GameOver phase to capture final scores
                 if (TryGetGamePhaseValue(__0, out var phaseStr) && phaseStr.Contains("gameover"))
@@ -2820,6 +4898,41 @@ namespace schrader.Server
             {
                 try { Debug.LogError($"[{Constants.MOD_NAME}] GameState update postfix error: {ex.Message}"); } catch { }
             }
+        }
+
+        private static void TryAnnounceSingleGoalieCommandHint(object gameManagerInstance, string previousPhaseName, string currentPhaseName)
+        {
+            try
+            {
+                if (!rankedActive || draftActive || singleGoalieEnabled)
+                {
+                    return;
+                }
+
+                if (!TryGetPeriodFromGameState(gameManagerInstance, out var period) || period <= 0)
+                {
+                    return;
+                }
+
+                var phase = (currentPhaseName ?? string.Empty).Trim().ToLowerInvariant();
+                if (string.IsNullOrWhiteSpace(phase))
+                {
+                    return;
+                }
+
+                if (!IsTrackedLiveMatchPhase(phase))
+                {
+                    return;
+                }
+
+                if (!singleGoalieHintAnnouncedPeriods.Add(period))
+                {
+                    return;
+                }
+
+                SendSystemChatToAll($"<size=14><color=#66ccff>Shared Goalie</color> if your lobby has one active goalie, use <b>/votesinglegoalie</b> to start the shared-goalie vote. (Period {period})</size>");
+            }
+            catch { }
         }
 
         private static void GoalScoredPostfix(object __instance, object[] __args)
@@ -3728,6 +5841,8 @@ namespace schrader.Server
                     lastGamePhaseUpdateTime = -999f;
                 }
             }
+
+            singleGoalieHintAnnouncedPeriods.Clear();
         }
 
         private static void ResetRankedState(bool keepPhaseState, bool keepRankedVoteCooldown, bool preservePostMatchLock = false)
@@ -3736,6 +5851,8 @@ namespace schrader.Server
             {
                 ClearPostMatchLockState();
             }
+
+            ClearRankedLiveParticipationTracking();
 
             lock (rankedLock)
             {
@@ -3750,6 +5867,15 @@ namespace schrader.Server
                 lastVoteEligible = null;
                 lastVoteSecondsRemaining = -1;
                 if (!keepRankedVoteCooldown) lastRankedVoteTime = -999f;
+
+                singleGoalieVoteActive = false;
+                singleGoalieVoteStartTime = -999f;
+                singleGoalieVoteStartedByName = null;
+                singleGoalieVoteStartedByKey = null;
+                singleGoalieVoteStartedByClientId = 0;
+                singleGoalieVoteDisablesMode = false;
+                singleGoalieVotes.Clear();
+                singleGoalieVoteEligible = null;
             }
 
             lock (matchEndLock)
@@ -3806,9 +5932,12 @@ namespace schrader.Server
                 announcedLateJoinerIds.Clear();
             }
 
+            singleGoalieHintAnnouncedPeriods.Clear();
+
             lock (approvalRequestLock)
             {
                 pendingTeamApprovalRequests.Clear();
+                rejectedRequestCooldownEndsAtByPlayerKey.Clear();
                 rejectedLateJoinTeams.Clear();
             }
 
@@ -4270,97 +6399,6 @@ namespace schrader.Server
             }
         }
 
-        private static void HandleDraftPick(object player, ulong clientId, string rawTarget)
-        {
-            try
-            {
-                if (!draftActive)
-                {
-                    SendSystemChatToClient("<size=14><color=#ffcc66>Draft</color> is not active.</size>", clientId);
-                    return;
-                }
-
-                var actorKey = ResolvePlayerObjectKey(player, clientId) ?? $"clientId:{clientId}";
-                if (string.IsNullOrEmpty(actorKey))
-                {
-                    SendSystemChatToClient("<size=14><color=#ff6666>Draft</color> could not identify your player.</size>", clientId);
-                    return;
-                }
-
-                TeamResult captainTeam;
-                var usingSoloDummyProxy = false;
-                if (!TryGetCaptainTeam(actorKey, out captainTeam))
-                {
-                    if (!CanUseSoloDummyCaptainProxy(player, clientId) || !TryGetCurrentCaptainTeam(out captainTeam))
-                    {
-                        SendSystemChatToClient("<size=14><color=#ff6666>Draft</color> only captains can use /pick.</size>", clientId);
-                        return;
-                    }
-                    usingSoloDummyProxy = true;
-                }
-
-                if (!usingSoloDummyProxy && !string.Equals(currentCaptainTurnId, actorKey, StringComparison.OrdinalIgnoreCase))
-                {
-                    var currentCaptainName = GetCaptainDisplayNameByKey(currentCaptainTurnId) ?? "the other captain";
-                    SendSystemChatToClient($"<size=14><color=#ff6666>Draft</color> it is not your turn. Current turn: {currentCaptainName}.</size>", clientId);
-                    return;
-                }
-
-                if (string.IsNullOrWhiteSpace(rawTarget))
-                {
-                    SendSystemChatToClient("<size=14>Usage: /pick <player></size>", clientId);
-                    return;
-                }
-
-                List<RankedParticipant> availablePlayers;
-                lock (draftLock)
-                {
-                    availablePlayers = rankedParticipants
-                        .Where(p => p != null)
-                        .Where(p =>
-                        {
-                            var participantKey = ResolveParticipantIdToKey(p);
-                            return !string.IsNullOrEmpty(participantKey) && draftAvailablePlayerIds.Contains(participantKey, StringComparer.OrdinalIgnoreCase);
-                        })
-                        .Select(CloneParticipant)
-                        .ToList();
-                }
-
-                if (!TryResolveParticipantFromCommand(rawTarget, availablePlayers, out var pickedParticipant))
-                {
-                    SendSystemChatToClient("<size=14><color=#ff6666>Draft</color> player not found in the available draft pool.</size>", clientId);
-                    return;
-                }
-
-                var pickedKey = ResolveParticipantIdToKey(pickedParticipant);
-                if (string.IsNullOrEmpty(pickedKey))
-                {
-                    SendSystemChatToClient("<size=14><color=#ff6666>Draft</color> could not identify that player.</size>", clientId);
-                    return;
-                }
-
-                lock (draftLock)
-                {
-                    if (!draftAvailablePlayerIds.RemoveAll(id => string.Equals(id, pickedKey, StringComparison.OrdinalIgnoreCase)).Equals(0))
-                    {
-                        draftAssignedTeams[pickedKey] = captainTeam;
-                    }
-                    else
-                    {
-                        SendSystemChatToClient("<size=14><color=#ff6666>Draft</color> that player was already picked.</size>", clientId);
-                        return;
-                    }
-
-                    var turnOwnerKey = usingSoloDummyProxy ? currentCaptainTurnId : actorKey;
-                    currentCaptainTurnId = string.Equals(turnOwnerKey, redCaptainId, StringComparison.OrdinalIgnoreCase) ? blueCaptainId : redCaptainId;
-                }
-
-                ApplyDraftTeamsToParticipants();
-                ForceApplyDraftTeam(pickedKey, captainTeam);
-                PublishDraftOverlayState();
-                var actingCaptainName = usingSoloDummyProxy ? GetCaptainDisplayNameByKey(string.Equals(captainTeam, TeamResult.Red) ? redCaptainId : blueCaptainId) : GetCaptainDisplayNameByKey(actorKey);
-                SendSystemChatToAll($"<size=14><color=#ffcc66>Draft</color> {actingCaptainName ?? "Captain"} picked <b>{pickedParticipant.displayName}</b> for {FormatTeamLabel(captainTeam)}.</size>");
-                CompleteDraftIfReadyOrAnnounceTurn();
             }
             catch (Exception ex)
             {
@@ -4705,6 +6743,7 @@ namespace schrader.Server
             {
                 if (player == null) return false;
                 if (!TryGetClientId(player, out var clientId) || clientId == 0) return false;
+                if (IsInvalidWarmupDummyCandidate(player, clientId, out _)) return false;
 
                 var playerId = ResolvePlayerObjectKey(player, clientId) ?? TryGetPlayerId(player, clientId);
                 if (string.IsNullOrEmpty(playerId)) return false;
@@ -5848,6 +7887,15 @@ namespace schrader.Server
         {
             eligible = new List<RankedParticipant>(); reason = "not enough players";
 
+            RankedParticipant sharedGoalieCandidate = null;
+            if (singleGoalieEnabled && !TryGetSingleGoalieCandidate(out sharedGoalieCandidate, out var sharedGoalieReason))
+            {
+                if (!ShouldPreserveSingleGoalieDuringTrackedPhase(GetTrackedPhaseName()))
+                {
+                    DisableSingleGoalie(sharedGoalieReason ?? "shared goalie disabled because the goalie setup changed.");
+                }
+            }
+
             var unique = new Dictionary<ulong, RankedParticipant>();
             var players = GetAllPlayers();
             if (players.Count == 0)
@@ -5862,6 +7910,13 @@ namespace schrader.Server
                 {
                     if (string.Equals(buildReason, "goalies cannot play ranked", StringComparison.OrdinalIgnoreCase))
                     {
+                        if (sharedGoalieCandidate != null
+                            && TryBuildConnectedPlayerSnapshot(p, out var goalieSnapshot)
+                            && IsSameParticipantIdentity(sharedGoalieCandidate, goalieSnapshot))
+                        {
+                            continue;
+                        }
+
                         reason = buildReason;
                         return false;
                     }
@@ -5872,9 +7927,9 @@ namespace schrader.Server
             }
 
             // Fill gaps using PlayerManager team queries when player objects do not expose team reliably.
-            TryAddEligiblePlayersFromManager(unique, TeamResult.Red, ref reason);
+            TryAddEligiblePlayersFromManager(unique, TeamResult.Red, sharedGoalieCandidate, ref reason);
             if (string.Equals(reason, "goalies cannot play ranked", StringComparison.OrdinalIgnoreCase)) return false;
-            TryAddEligiblePlayersFromManager(unique, TeamResult.Blue, ref reason);
+            TryAddEligiblePlayersFromManager(unique, TeamResult.Blue, sharedGoalieCandidate, ref reason);
             if (string.Equals(reason, "goalies cannot play ranked", StringComparison.OrdinalIgnoreCase)) return false;
 
             eligible = unique.Values.ToList();
@@ -5909,6 +7964,12 @@ namespace schrader.Server
                 if (isBotPlayer)
                 {
                     reason = "bots cannot play ranked";
+                    return false;
+                }
+
+                if (IsInvalidWarmupDummyCandidate(player, clientId, out _))
+                {
+                    reason = "invalid warmup dummy without identity";
                     return false;
                 }
 
@@ -5957,7 +8018,7 @@ namespace schrader.Server
             return false;
         }
 
-        private static void TryAddEligiblePlayersFromManager(Dictionary<ulong, RankedParticipant> unique, TeamResult team, ref string reason)
+        private static void TryAddEligiblePlayersFromManager(Dictionary<ulong, RankedParticipant> unique, TeamResult team, RankedParticipant sharedGoalieCandidate, ref string reason)
         {
             try
             {
@@ -5987,6 +8048,13 @@ namespace schrader.Server
                     {
                         if (string.Equals(buildReason, "goalies cannot play ranked", StringComparison.OrdinalIgnoreCase))
                         {
+                            if (sharedGoalieCandidate != null
+                                && TryBuildConnectedPlayerSnapshot(player, out var goalieSnapshot)
+                                && IsSameParticipantIdentity(sharedGoalieCandidate, goalieSnapshot))
+                            {
+                                continue;
+                            }
+
                             reason = buildReason;
                             return;
                         }
@@ -6025,16 +8093,16 @@ namespace schrader.Server
                 foreach (var pn in propNames)
                 {
                     var prop = t.GetProperty(pn, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-                    if (prop == null || prop.PropertyType != typeof(string)) continue;
-                    var clean = NormalizeVisiblePlayerName(prop.GetValue(player) as string);
+                    if (prop == null) continue;
+                    var clean = NormalizeVisiblePlayerName(ExtractSimpleValueToString(prop.GetValue(player)));
                     if (!string.IsNullOrWhiteSpace(clean)) return clean;
                 }
 
                 foreach (var fn in propNames)
                 {
                     var field = t.GetField(fn, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-                    if (field == null || field.FieldType != typeof(string)) continue;
-                    var clean = NormalizeVisiblePlayerName(field.GetValue(player) as string);
+                    if (field == null) continue;
+                    var clean = NormalizeVisiblePlayerName(ExtractSimpleValueToString(field.GetValue(player)));
                     if (!string.IsNullOrWhiteSpace(clean)) return clean;
                 }
 
@@ -6045,6 +8113,39 @@ namespace schrader.Server
                 }
             }
             catch { }
+            return null;
+        }
+
+        private static string TryGetPlainPlayerName(object player)
+        {
+            if (player == null)
+            {
+                return null;
+            }
+
+            try
+            {
+                var t = player.GetType();
+                string[] memberNames = { "Username", "username", "UserName", "DisplayName", "displayName", "Name", "PlayerName", "playerName", "Nickname", "NickName", "steamName" };
+                foreach (var memberName in memberNames)
+                {
+                    var property = t.GetProperty(memberName, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                    if (property != null)
+                    {
+                        var clean = NormalizeVisiblePlayerName(ExtractSimpleValueToString(property.GetValue(player)));
+                        if (!string.IsNullOrWhiteSpace(clean)) return clean;
+                    }
+
+                    var field = t.GetField(memberName, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                    if (field != null)
+                    {
+                        var clean = NormalizeVisiblePlayerName(ExtractSimpleValueToString(field.GetValue(player)));
+                        if (!string.IsNullOrWhiteSpace(clean)) return clean;
+                    }
+                }
+            }
+            catch { }
+
             return null;
         }
 
@@ -6071,6 +8172,515 @@ namespace schrader.Server
             }
 
             return LooksLikeIdentityKey(clean) ? null : clean;
+        }
+
+        public static bool TryForcePlayerTeamByNumber(int playerNumber, string requestedTeam, out string resultMessage)
+        {
+            return TryForcePlayerTeamByTarget(playerNumber.ToString(), requestedTeam, out resultMessage);
+        }
+
+        public static bool TryForcePlayerTeamByTarget(string playerTarget, string requestedTeam, out string resultMessage)
+        {
+            resultMessage = null;
+
+            var cleanTarget = StripRichTextTags(playerTarget)?.Trim();
+            if (string.IsNullOrWhiteSpace(cleanTarget))
+            {
+                resultMessage = "Usage: /fc <player|steamId|#number> <red|blue|spectator>.";
+                return false;
+            }
+
+            var normalizedTeam = requestedTeam?.Trim().ToLowerInvariant();
+            if (string.IsNullOrEmpty(normalizedTeam))
+            {
+                resultMessage = "Usage: /fc <player|steamId|#number> <red|blue|spectator>.";
+                return false;
+            }
+
+            if (!TryResolveConnectedPlayerByTarget(cleanTarget, out var player, out var clientId, out var playerKey, out var playerName, out var resolveError))
+            {
+                resultMessage = resolveError ?? "Could not resolve that player. Use an exact name, SteamID, or #playerNumber.";
+                return false;
+            }
+
+            var displayName = playerName ?? cleanTarget;
+            if (normalizedTeam == "red" || normalizedTeam == "r")
+            {
+                if (!TryApplyOfficialTeamJoin(playerKey, clientId, TeamResult.Red, openPositionSelection: false))
+                {
+                    resultMessage = $"Failed to move {displayName} to Red.";
+                    return false;
+                }
+
+                UpdateTrackedPlayerTeam(playerKey, TeamResult.Red);
+                resultMessage = $"moved <b>{displayName}</b> to <b>Red</b>.";
+                return true;
+            }
+
+            if (normalizedTeam == "blue" || normalizedTeam == "b")
+            {
+                if (!TryApplyOfficialTeamJoin(playerKey, clientId, TeamResult.Blue, openPositionSelection: false))
+                {
+                    resultMessage = $"Failed to move {displayName} to Blue.";
+                    return false;
+                }
+
+                UpdateTrackedPlayerTeam(playerKey, TeamResult.Blue);
+                resultMessage = $"moved <b>{displayName}</b> to <b>Blue</b>.";
+                return true;
+            }
+
+            if (normalizedTeam == "spectator" || normalizedTeam == "spec" || normalizedTeam == "s")
+            {
+                if (!TryForcePlayerToNeutralState(player, clientId, playerKey))
+                {
+                    resultMessage = $"Failed to move {displayName} to spectator.";
+                    return false;
+                }
+
+                UpdateTrackedPlayerTeam(playerKey, TeamResult.Unknown);
+                resultMessage = $"moved <b>{displayName}</b> to <b>Spectator</b>.";
+                return true;
+            }
+
+            resultMessage = "Usage: /fc <player|steamId|#number> <red|blue|spectator>.";
+            return false;
+        }
+
+        private static bool TryResolveConnectedPlayerByTarget(string rawTarget, out object player, out ulong clientId, out string playerKey, out string playerName, out string error)
+        {
+            player = null;
+            clientId = 0;
+            playerKey = null;
+            playerName = null;
+            error = null;
+
+            var cleanTarget = StripRichTextTags(rawTarget)?.Trim();
+            if (string.IsNullOrWhiteSpace(cleanTarget))
+            {
+                error = "Usage: /fc <player|steamId|#number> <red|blue|spectator>.";
+                return false;
+            }
+
+            var isExplicitNumberTarget = cleanTarget.StartsWith("#", StringComparison.Ordinal);
+            var numericTarget = isExplicitNumberTarget ? cleanTarget.Substring(1).Trim() : cleanTarget;
+            if (int.TryParse(numericTarget, out var playerNumber) && playerNumber >= 0)
+            {
+                if (TryResolveConnectedPlayerByNumber(playerNumber, out player, out clientId, out playerKey, out playerName))
+                {
+                    return true;
+                }
+
+                if (isExplicitNumberTarget)
+                {
+                    error = $"Could not find a live player with number {playerNumber}.";
+                    return false;
+                }
+            }
+
+            if (ulong.TryParse(cleanTarget, out var explicitSteamId) && explicitSteamId != 0)
+            {
+                var steamId = explicitSteamId.ToString();
+                if (!TryFindConnectedPlayerBySteamId(steamId, out player, out playerName))
+                {
+                    error = $"Could not find a live player with SteamID {steamId}.";
+                    return false;
+                }
+
+                TryGetClientId(player, out clientId);
+                playerKey = GetPlayerKey(player, clientId) ?? NormalizeResolvedPlayerKey(steamId);
+                playerName = playerName ?? TryGetPlainPlayerName(player) ?? steamId;
+                return true;
+            }
+
+            var exactMatches = new List<(object Player, ulong ClientId, string PlayerKey, string PlayerName)>();
+            var prefixMatches = new List<(object Player, ulong ClientId, string PlayerKey, string PlayerName)>();
+            try
+            {
+                foreach (var candidate in GetAllPlayers())
+                {
+                    if (candidate == null)
+                    {
+                        continue;
+                    }
+
+                    ulong candidateClientId = 0;
+                    TryGetClientId(candidate, out candidateClientId);
+                    var candidateKey = NormalizeResolvedPlayerKey(TryGetPlayerIdNoFallback(candidate));
+                    if (IsReplayPlayerObject(candidate, candidateClientId)
+                        || IsPracticeModeFakePlayerObject(candidate, candidateClientId, candidateKey))
+                    {
+                        continue;
+                    }
+
+                    var candidateName = TryGetPlainPlayerName(candidate) ?? TryGetPlayerName(candidate);
+                    if (string.IsNullOrWhiteSpace(candidateName))
+                    {
+                        continue;
+                    }
+
+                    var resolvedPlayerKey = GetPlayerKey(candidate, candidateClientId) ?? candidateKey ?? TryGetPlayerId(candidate, candidateClientId);
+                    var match = (candidate, candidateClientId, resolvedPlayerKey, candidateName);
+                    if (string.Equals(candidateName, cleanTarget, StringComparison.OrdinalIgnoreCase))
+                    {
+                        exactMatches.Add(match);
+                        continue;
+                    }
+
+                    if (candidateName.StartsWith(cleanTarget, StringComparison.OrdinalIgnoreCase))
+                    {
+                        prefixMatches.Add(match);
+                    }
+                }
+            }
+            catch { }
+
+            if (exactMatches.Count == 1)
+            {
+                player = exactMatches[0].Player;
+                clientId = exactMatches[0].ClientId;
+                playerKey = exactMatches[0].PlayerKey;
+                playerName = exactMatches[0].PlayerName;
+                return true;
+            }
+
+            if (exactMatches.Count > 1)
+            {
+                error = "That player name is ambiguous. Use the SteamID or #playerNumber instead.";
+                return false;
+            }
+
+            if (prefixMatches.Count == 1)
+            {
+                player = prefixMatches[0].Player;
+                clientId = prefixMatches[0].ClientId;
+                playerKey = prefixMatches[0].PlayerKey;
+                playerName = prefixMatches[0].PlayerName;
+                return true;
+            }
+
+            if (prefixMatches.Count > 1)
+            {
+                error = "That player prefix matches multiple live players. Use the SteamID or #playerNumber instead.";
+                return false;
+            }
+
+            error = "Could not resolve that player. Use an exact name, SteamID, or #playerNumber.";
+            return false;
+        }
+
+        public static bool TryAddScore(string requestedTeam, int amount, out int redScore, out int blueScore, out string error)
+        {
+            redScore = 0;
+            blueScore = 0;
+            error = null;
+
+            if (amount == 0)
+            {
+                error = "Score adjustment amount must not be 0.";
+                return false;
+            }
+
+            var normalizedTeam = requestedTeam?.Trim().ToLowerInvariant();
+            TeamResult team;
+            if (normalizedTeam == "red" || normalizedTeam == "r")
+            {
+                team = TeamResult.Red;
+            }
+            else if (normalizedTeam == "blue" || normalizedTeam == "b")
+            {
+                team = TeamResult.Blue;
+            }
+            else
+            {
+                error = "Usage: /addscore <amount> <red|blue>.";
+                return false;
+            }
+
+            if (!TryGetRuntimeGameManager(out var gameManager, out var gameManagerType))
+            {
+                error = "Could not find the live GameManager.";
+                return false;
+            }
+
+            if (!TryGetScoresFromGameState(gameManager, out redScore, out blueScore))
+            {
+                error = "Could not read the current in-game score.";
+                return false;
+            }
+
+            var nextRedScore = redScore + (team == TeamResult.Red ? amount : 0);
+            var nextBlueScore = blueScore + (team == TeamResult.Blue ? amount : 0);
+            if (nextRedScore < 0 || nextBlueScore < 0)
+            {
+                error = "Score adjustment cannot make a team score negative.";
+                return false;
+            }
+
+            if (!TryPreserveRemainingPlayTime(gameManager))
+            {
+                Debug.LogWarning($"[{Constants.MOD_NAME}] Failed to preserve remaining play time before manual score adjustment.");
+            }
+
+            if (!TryInvokeServerUpdateGameState(gameManagerType, gameManager, nextBlueScore, nextRedScore))
+            {
+                error = "Failed to update the live game state score.";
+                return false;
+            }
+
+            if (!TryInvokeServerSetPhase(gameManagerType, gameManager, team == TeamResult.Red ? "RedScore" : "BlueScore"))
+            {
+                error = "Updated the score, but failed to enter the native score phase.";
+                return false;
+            }
+
+            lock (goalLock)
+            {
+                currentRedGoals = nextRedScore;
+                currentBlueGoals = nextBlueScore;
+            }
+
+            lastRedScore = nextRedScore;
+            lastBlueScore = nextBlueScore;
+            lastScoreUpdateTime = Time.realtimeSinceStartup;
+
+            redScore = nextRedScore;
+            blueScore = nextBlueScore;
+            return true;
+        }
+
+        private static bool TryResolveConnectedPlayerByNumber(int playerNumber, out object player, out ulong clientId, out string playerKey, out string playerName)
+        {
+            player = null;
+            clientId = 0;
+            playerKey = null;
+            playerName = null;
+
+            try
+            {
+                foreach (var candidate in GetAllPlayers())
+                {
+                    if (candidate == null) continue;
+
+                    ulong candidateClientId = 0;
+                    TryGetClientId(candidate, out candidateClientId);
+
+                    if (IsReplayPlayerObject(candidate, candidateClientId))
+                    {
+                        continue;
+                    }
+
+                    if (!TryGetPlayerNumber(candidate, out var candidateNumber) || candidateNumber != playerNumber)
+                    {
+                        continue;
+                    }
+
+                    player = candidate;
+                    clientId = candidateClientId;
+                    playerKey = GetPlayerKey(candidate, candidateClientId) ?? TryGetPlayerId(candidate, candidateClientId);
+                    playerName = TryGetPlayerName(candidate) ?? $"#{playerNumber}";
+                    return true;
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static bool TryForcePlayerToNeutralState(object player, ulong clientId, string playerKey)
+        {
+            if (player == null)
+            {
+                return false;
+            }
+
+            var assignmentKey = playerKey ?? $"clientId:{clientId}";
+            var neutralCandidates = new[] { "Spectator", "None", "Unknown", "Unassigned" };
+            foreach (var neutralCandidate in neutralCandidates)
+            {
+                try
+                {
+                    RegisterInternalTeamAssignment(assignmentKey, neutralCandidate);
+                    using (BeginForcedTeamAssignment())
+                    {
+                        if (!TrySetPlayerTeamOnPlayer(player, neutralCandidate))
+                        {
+                            continue;
+                        }
+                    }
+
+                    lock (teamStateLock)
+                    {
+                        lastKnownPlayerTeam[assignmentKey] = neutralCandidate;
+                    }
+
+                    return true;
+                }
+                catch { }
+            }
+
+            return false;
+        }
+
+        private static void UpdateTrackedPlayerTeam(string playerKey, TeamResult team)
+        {
+            if (string.IsNullOrEmpty(playerKey))
+            {
+                return;
+            }
+
+            lock (draftLock)
+            {
+                if (team == TeamResult.Red || team == TeamResult.Blue)
+                {
+                    draftAssignedTeams[playerKey] = team;
+                }
+                else
+                {
+                    draftAssignedTeams.Remove(playerKey);
+                }
+            }
+
+            for (var index = 0; index < rankedParticipants.Count; index++)
+            {
+                var participant = rankedParticipants[index];
+                if (participant == null) continue;
+                var participantKey = ResolveParticipantIdToKey(participant);
+                if (!string.Equals(participantKey, playerKey, StringComparison.OrdinalIgnoreCase)) continue;
+                participant.team = team;
+                break;
+            }
+        }
+
+        private static bool TryGetRuntimeGameManager(out object gameManager, out Type gameManagerType)
+        {
+            gameManager = null;
+            gameManagerType = FindTypeByName("GameManager", "Puck.GameManager");
+            if (gameManagerType == null)
+            {
+                return false;
+            }
+
+            gameManager = GetManagerInstance(gameManagerType);
+            return gameManager != null;
+        }
+
+        private static bool TryPreserveRemainingPlayTime(object gameManager)
+        {
+            try
+            {
+                if (gameManager == null) return false;
+                if (!TryGetGameStateTime(gameManager, out var remainingTime)) return false;
+
+                var gameManagerType = gameManager.GetType();
+                var remainingField = gameManagerType.GetField("remainingPlayTime", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                if (remainingField != null)
+                {
+                    remainingField.SetValue(gameManager, remainingTime);
+                    return true;
+                }
+
+                var remainingProperty = gameManagerType.GetProperty("remainingPlayTime", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                if (remainingProperty != null && remainingProperty.CanWrite)
+                {
+                    remainingProperty.SetValue(gameManager, remainingTime);
+                    return true;
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static bool TryGetGameStateTime(object gameManager, out int time)
+        {
+            time = 0;
+            try
+            {
+                if (gameManager == null) return false;
+                var gameManagerType = gameManager.GetType();
+                var gameStateProp = gameManagerType.GetProperty("GameState", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                var gameStateField = gameManagerType.GetField("GameState", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                var gameStateObj = gameStateProp != null ? gameStateProp.GetValue(gameManager) : gameStateField?.GetValue(gameManager);
+                if (gameStateObj == null) return false;
+
+                var valueProp = gameStateObj.GetType().GetProperty("Value", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                var target = valueProp != null ? valueProp.GetValue(gameStateObj) : gameStateObj;
+                if (target == null) return false;
+
+                var timeProp = target.GetType().GetProperty("Time", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                if (timeProp != null)
+                {
+                    var rawTime = timeProp.GetValue(target);
+                    return TryConvertToInt(rawTime, out time);
+                }
+
+                var timeField = target.GetType().GetField("Time", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                if (timeField != null)
+                {
+                    var rawTime = timeField.GetValue(target);
+                    return TryConvertToInt(rawTime, out time);
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static bool TryInvokeServerUpdateGameState(Type gameManagerType, object gameManager, int blueScore, int redScore)
+        {
+            try
+            {
+                var method = gameManagerType?.GetMethod("Server_UpdateGameState", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                if (method == null) return false;
+
+                var parameters = method.GetParameters();
+                if (parameters.Length != 5) return false;
+
+                var args = new object[5];
+                args[0] = null;
+                args[1] = null;
+                args[2] = null;
+                args[3] = BoxIntForParameter(blueScore, parameters[3].ParameterType);
+                args[4] = BoxIntForParameter(redScore, parameters[4].ParameterType);
+                method.Invoke(gameManager, args);
+                return true;
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static bool TryInvokeServerSetPhase(Type gameManagerType, object gameManager, string phaseName)
+        {
+            try
+            {
+                var method = gameManagerType?.GetMethod("Server_SetPhase", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                if (method == null) return false;
+
+                var parameters = method.GetParameters();
+                if (parameters.Length != 1 || !parameters[0].ParameterType.IsEnum) return false;
+
+                var phaseValue = Enum.Parse(parameters[0].ParameterType, phaseName, true);
+                method.Invoke(gameManager, new[] { phaseValue });
+                return true;
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static object BoxIntForParameter(int value, Type targetType)
+        {
+            try
+            {
+                if (targetType == typeof(int)) return value;
+                var underlyingType = Nullable.GetUnderlyingType(targetType);
+                if (underlyingType == typeof(int)) return value;
+            }
+            catch { }
+
+            return value;
         }
 
         
@@ -6467,17 +9077,10 @@ namespace schrader.Server
         {
             try
             {
-                if (clientId == 0) return true;
-
                 var resolvedPlayer = player;
                 if (resolvedPlayer == null && clientId != 0 && TryGetPlayerByClientId(clientId, out var playerByClientId))
                 {
                     resolvedPlayer = playerByClientId;
-                }
-
-                if (resolvedPlayer != null && TryHasPlayerAdminFlag(resolvedPlayer))
-                {
-                    return true;
                 }
 
                 if (!TryResolveAdminSteamId(resolvedPlayer, clientId, out var steamId))
@@ -6485,33 +9088,9 @@ namespace schrader.Server
                     return false;
                 }
 
-                if (explicitAdminSteamIds.Contains(steamId))
+                if (TryGetNativeAdminSteamIds(out var nativeAdminSteamIds) && nativeAdminSteamIds.Contains(steamId))
                 {
                     return true;
-                }
-
-                if (TryGetConfiguredAdminSteamIds(out var configuredAdminSteamIds) && configuredAdminSteamIds.Contains(steamId))
-                {
-                    return true;
-                }
-            }
-            catch { }
-            return false;
-        }
-
-        private static bool TryHasPlayerAdminFlag(object player)
-        {
-            try
-            {
-                if (player == null) return false;
-                var t = player.GetType();
-                string[] names = { "IsAdmin", "isAdmin", "IsModerator", "isModerator", "IsOwner", "isOwner" };
-                foreach (var n in names)
-                {
-                    var prop = t.GetProperty(n, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-                    if (prop != null && prop.PropertyType == typeof(bool)) return (bool)prop.GetValue(player);
-                    var field = t.GetField(n, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-                    if (field != null && field.FieldType == typeof(bool)) return (bool)field.GetValue(player);
                 }
             }
             catch { }
@@ -6548,34 +9127,23 @@ namespace schrader.Server
             return false;
         }
 
-        private static bool TryGetConfiguredAdminSteamIds(out HashSet<string> adminSteamIds)
+        private static bool TryGetNativeAdminSteamIds(out HashSet<string> adminSteamIds)
         {
             adminSteamIds = null;
             try
             {
-                var managerType = FindTypeByName("ServerConfigurationManager", "Puck.ServerConfigurationManager");
+                var managerType = FindTypeByName("ServerManager", "Puck.ServerManager");
                 var manager = GetManagerInstance(managerType);
                 if (manager == null) return false;
 
                 var managerTypeResolved = manager.GetType();
-                var configProp = managerTypeResolved.GetProperty("ServerConfiguration", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
-                    ?? managerTypeResolved.GetProperty("get_ServerConfiguration", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-                var configuration = configProp != null ? configProp.GetValue(manager) : null;
-                if (configuration == null)
-                {
-                    var configMethod = managerTypeResolved.GetMethod("get_ServerConfiguration", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic, null, Type.EmptyTypes, null);
-                    if (configMethod != null) configuration = configMethod.Invoke(manager, null);
-                }
-                if (configuration == null) return false;
-
-                var configurationType = configuration.GetType();
-                var adminProp = configurationType.GetProperty("adminSteamIds", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
-                    ?? configurationType.GetProperty("AdminSteamIds", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-                object configuredValue = adminProp != null ? adminProp.GetValue(configuration) : null;
+                var adminProp = managerTypeResolved.GetProperty("AdminSteamIds", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+                    ?? managerTypeResolved.GetProperty("adminSteamIds", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                object configuredValue = adminProp != null ? adminProp.GetValue(manager) : null;
                 if (configuredValue == null)
                 {
-                    var adminMethod = configurationType.GetMethod("get_adminSteamIds", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic, null, Type.EmptyTypes, null);
-                    if (adminMethod != null) configuredValue = adminMethod.Invoke(configuration, null);
+                    configuredValue = managerTypeResolved.GetField("AdminSteamIds", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)?.GetValue(manager)
+                        ?? managerTypeResolved.GetField("adminSteamIds", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)?.GetValue(manager);
                 }
 
                 if (!(configuredValue is IEnumerable enumerable)) return false;
@@ -6658,6 +9226,91 @@ namespace schrader.Server
                 }
             }
             catch { }
+            return false;
+        }
+
+        private static bool TryGetPeriodFromGameState(object gameManagerInstance, out int period)
+        {
+            period = 0;
+            try
+            {
+                if (gameManagerInstance == null) return false;
+                var t = gameManagerInstance.GetType();
+                var gameStateProp = t.GetProperty("GameState", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                if (gameStateProp == null)
+                {
+                    var gameStateField = t.GetField("GameState", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                    if (gameStateField != null)
+                    {
+                        var gameStateObj = gameStateField.GetValue(gameManagerInstance);
+                        return ExtractPeriodFromGameState(gameStateObj, out period);
+                    }
+
+                    return false;
+                }
+
+                return ExtractPeriodFromGameState(gameStateProp.GetValue(gameManagerInstance), out period);
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static bool ExtractPeriodFromGameState(object gameStateObj, out int period)
+        {
+            period = 0;
+            try
+            {
+                if (gameStateObj == null) return false;
+                var t = gameStateObj.GetType();
+
+                var valueProp = t.GetProperty("Value", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                object targetObj = gameStateObj;
+                if (valueProp != null)
+                {
+                    var valueObj = valueProp.GetValue(gameStateObj);
+                    if (valueObj != null) targetObj = valueObj;
+                }
+
+                var targetType = targetObj.GetType();
+                var periodProp = targetType.GetProperty("Period", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+                    ?? targetType.GetProperty("period", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                if (periodProp != null)
+                {
+                    var rawValue = periodProp.GetValue(targetObj);
+                    if (rawValue is int intValue)
+                    {
+                        period = intValue;
+                        return true;
+                    }
+
+                    if (rawValue != null && int.TryParse(rawValue.ToString(), out var parsedValue))
+                    {
+                        period = parsedValue;
+                        return true;
+                    }
+                }
+
+                var periodField = targetType.GetField("Period", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+                    ?? targetType.GetField("period", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                if (periodField != null)
+                {
+                    var rawValue = periodField.GetValue(targetObj);
+                    if (rawValue is int intValue)
+                    {
+                        period = intValue;
+                        return true;
+                    }
+
+                    if (rawValue != null && int.TryParse(rawValue.ToString(), out var parsedValue))
+                    {
+                        period = parsedValue;
+                        return true;
+                    }
+                }
+            }
+            catch { }
+
             return false;
         }
 

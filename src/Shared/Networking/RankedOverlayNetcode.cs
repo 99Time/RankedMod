@@ -1,6 +1,7 @@
 using System;
 using System.Text;
 using Newtonsoft.Json;
+using Unity.Collections;
 using Unity.Netcode;
 
 namespace schrader
@@ -24,6 +25,30 @@ namespace schrader
         {
             var json = SerializeJson(message);
             writer.WriteValueSafe(json, false);
+        }
+
+        public static string SerializeJsonForDiagnostics<T>(T message)
+        {
+            return SerializeJson(message);
+        }
+
+        public static int GetUtf8ByteCount<T>(T message)
+        {
+            return Encoding.UTF8.GetByteCount(SerializeJson(message));
+        }
+
+        public static int MeasureWrittenSize<T>(T message)
+        {
+            var writer = new FastBufferWriter(EstimateCapacity(message), Allocator.Temp);
+            try
+            {
+                WriteJson(ref writer, message);
+                return writer.Position;
+            }
+            finally
+            {
+                writer.Dispose();
+            }
         }
 
         public static T ReadJson<T>(ref FastBufferReader reader) where T : class

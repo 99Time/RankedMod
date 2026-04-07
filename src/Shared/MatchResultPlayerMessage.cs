@@ -3,7 +3,10 @@ namespace schrader
     public sealed class MatchResultPlayerMessage
     {
         public string Id;
+        public string SteamId;
         public string Username;
+        public bool IsSharedGoalie;
+        public bool ExcludedFromMmr;
         public TeamResult Team;
         public int Goals;
         public int Assists;

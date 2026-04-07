@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using HarmonyLib;
 using Newtonsoft.Json;
 using Unity.Netcode;
 using UnityEngine;
@@ -353,6 +354,8 @@ namespace schrader.Server
         private PlayerBodyV2 playerBody;
         private Stick stick;
         private StickPositioner stickPositioner;
+        private BotPlayStyle playStyle = BotPlayStyle.Skater;
+        private BotGoalieSettings goalieSettings = BotGoalieSettings.Create(BotGoalieDifficulty.Hard);
         private BotState currentState;
         private Vector3 smoothedMoveDirection = Vector3.forward;
         private Vector3 lastPuckDirection = Vector3.forward;
@@ -415,6 +418,14 @@ namespace schrader.Server
         private Vector3 lockedBladeWallPullOffset = Vector3.zero;
         private int lockedBladeSideSign = 1;
         private float bladeOrientationLockedUntil = -1f;
+        private bool hasGoalieTrackedPuck;
+        private Vector3 goalieTrackedPuckPosition = Vector3.zero;
+        private float goalieNextReactionTime;
+        private bool goaliePreparingDash;
+        private int goaliePendingDashDirection;
+        private float goalieDashPreparedAt = float.NegativeInfinity;
+        private float goalieLastDashTime = float.NegativeInfinity;
+        private bool goalieHasDashed;
 
         internal void Initialize(Player player)
         {
@@ -431,6 +442,24 @@ namespace schrader.Server
             hasSmoothedLiveStickAngles = false;
             hasStableControlVector = false;
             hasBladeOrientationLock = false;
+            ResetGoalkeeperState();
+        }
+
+        internal void ConfigureSkater()
+        {
+            playStyle = BotPlayStyle.Skater;
+            ResetGoalkeeperState();
+        }
+
+        internal void ConfigureGoalkeeper(BotGoalieDifficulty difficulty)
+        {
+            playStyle = BotPlayStyle.Goalie;
+            goalieSettings = BotGoalieSettings.Create(difficulty);
+            ResetGoalkeeperState();
+            currentState = BotState.Idle;
+            currentStateEnteredAt = Time.time;
+            ClearApproachTarget();
+            ClearContactPreparation();
         }
 
         private void OnDisable()
@@ -503,6 +532,12 @@ namespace schrader.Server
                 var hasPuck = HasBotPuckControl(puckManager, puck);
                 var hasPuckContext = TryBuildReplayPuckContext(out var puckContext);
                 var localPuckPosition = GetLocalPuckPosition(actualPuckPosition);
+                if (playStyle == BotPlayStyle.Goalie)
+                {
+                    ExecuteGoalkeeper(actualPuckPosition, predictedPuckPosition, hasPuckContext ? puckContext : default, hasPuckContext);
+                    return;
+                }
+
                 var nextState = DecideState(
                     puckDistance,
                     hasPuck,
@@ -979,6 +1014,54 @@ namespace schrader.Server
         {
             ApplyInput(0f, 0f, sprint: false, stop: true, slide: false);
             ApplyLowStickFallback(0);
+        }
+
+        private void ExecuteGoalkeeper(Vector3 actualPuckPosition, Vector3 predictedPuckPosition, ReplayPuckContext puckContext, bool hasPuckContext)
+        {
+            currentState = BotState.Idle;
+            ClearApproachTarget();
+            ClearContactPreparation();
+
+            var botPosition = GetBotPosition();
+            var trackedPuckPosition = GetGoalkeeperTrackedPuckPosition(actualPuckPosition, predictedPuckPosition, botPosition.y);
+            var ownGoalCenter = GetOwnGoalPosition();
+            var neutralForward = GetReplayGoalieNeutralForward();
+            var goalRight = GetReplayGoalieGoalRight();
+            var goalToPuck = trackedPuckPosition - GetFlatPosition(ownGoalCenter, trackedPuckPosition.y);
+            var goalAlignment = goalToPuck.sqrMagnitude > 0.0001f ? Vector3.Dot(neutralForward, goalToPuck.normalized) : 1f;
+            var isBehindNet = goalAlignment < ReplayGoalieBehindNetDotThreshold;
+            var maxAngle = Mathf.Min(goalieSettings.MaxRotationAngle, GetReplayGoalieMaxRotationAngle(goalAlignment, goalToPuck.magnitude));
+            var desiredDirection = GetReplayGoalieDesiredDirection(botPosition, trackedPuckPosition, ownGoalCenter, neutralForward, goalRight, isBehindNet, maxAngle);
+            var moveTarget = BuildGoalkeeperMoveTarget(botPosition, trackedPuckPosition, ownGoalCenter, neutralForward, goalRight, goalAlignment, out var signedLateralOffset, out var lateralDistance);
+
+            Vector3 stickTarget;
+            if (hasPuckContext)
+            {
+                stickTarget = BuildReplayGoalieStickTarget(puckContext);
+            }
+            else
+            {
+                stickTarget = ForceStickTargetLow(BuildLowBehindPuckTarget(trackedPuckPosition, desiredDirection, 0.35f), trackedPuckPosition.y);
+            }
+
+            if (HandleGoalkeeperDash(neutralForward, signedLateralOffset, lateralDistance, stickTarget))
+            {
+                return;
+            }
+
+            DriveTowards(moveTarget, sprint: false, stickTarget: stickTarget, bladeAngle: 0);
+
+            if (playerInput != null)
+            {
+                var shouldHoldSlide = goalToPuck.magnitude <= ReplayGoalieFarNetDistance || lateralDistance >= goalieSettings.DashThreshold;
+                playerInput.Client_SlideInputRpc(shouldHoldSlide);
+            }
+
+            if (goalieHasDashed && Mathf.Abs(signedLateralOffset) <= goalieSettings.CancelThreshold)
+            {
+                goalieHasDashed = false;
+                TryInvokePlayerBodyMethod("CancelDash");
+            }
         }
 
         private void DriveApproach(Vector3 moveTarget, Vector3 puckPosition, Vector3 stickTarget, bool sprint, sbyte bladeAngle)
@@ -2224,6 +2307,7 @@ namespace schrader.Server
                 hasSmoothedLiveStickAngles = false;
                 controlStableSince = -1f;
                 dribbleStableSince = -1f;
+                ResetGoalkeeperState();
                 ResetReplayLearningState();
                 ResetReplayReinforcementState();
                 ClearApproachTarget();
@@ -2245,6 +2329,7 @@ namespace schrader.Server
             hasSmoothedLiveStickAngles = false;
             controlStableSince = -1f;
             dribbleStableSince = -1f;
+            ResetGoalkeeperState();
             ResetReplayLearningState();
             ResetReplayReinforcementState();
             smoothedTurnInput = 0f;
@@ -2704,6 +2789,155 @@ namespace schrader.Server
             }
 
             return true;
+        }
+
+        private void ResetGoalkeeperState()
+        {
+            hasGoalieTrackedPuck = false;
+            goalieTrackedPuckPosition = Vector3.zero;
+            goalieNextReactionTime = 0f;
+            goaliePreparingDash = false;
+            goaliePendingDashDirection = 0;
+            goalieDashPreparedAt = float.NegativeInfinity;
+            goalieLastDashTime = float.NegativeInfinity;
+            goalieHasDashed = false;
+        }
+
+        private Vector3 GetGoalkeeperTrackedPuckPosition(Vector3 actualPuckPosition, Vector3 predictedPuckPosition, float y)
+        {
+            var sample = Vector3.Lerp(GetFlatPosition(actualPuckPosition, y), GetFlatPosition(predictedPuckPosition, y), 0.55f);
+            if (!hasGoalieTrackedPuck || Time.time >= goalieNextReactionTime)
+            {
+                goalieTrackedPuckPosition = sample;
+                hasGoalieTrackedPuck = true;
+                goalieNextReactionTime = Time.time + Mathf.Max(0.01f, goalieSettings.ReactionTime);
+            }
+
+            goalieTrackedPuckPosition.y = y;
+            return goalieTrackedPuckPosition;
+        }
+
+        private Vector3 BuildGoalkeeperMoveTarget(Vector3 botPosition, Vector3 puckPosition, Vector3 ownGoalCenter, Vector3 neutralForward, Vector3 goalRight, float goalAlignment, out float signedLateralOffset, out float lateralDistance)
+        {
+            var defensiveLineCenter = GetFlatPosition(ownGoalCenter + neutralForward * goalieSettings.DistanceFromNet, botPosition.y);
+            if (goalAlignment < ReplayGoalieBehindNetDotThreshold)
+            {
+                var goalToPuck = puckPosition - GetFlatPosition(ownGoalCenter, puckPosition.y);
+                var side = Mathf.Sign(Vector3.Dot(goalToPuck, goalRight));
+                if (Mathf.Approximately(side, 0f)) side = 1f;
+                var behindNetTarget = defensiveLineCenter + goalRight * (1.5f * side);
+                signedLateralOffset = Vector3.Dot(behindNetTarget - botPosition, goalRight);
+                lateralDistance = Mathf.Abs(signedLateralOffset);
+                return behindNetTarget;
+            }
+
+            var puckToGoal = GetFlatPosition(ownGoalCenter, puckPosition.y) - puckPosition;
+            if (Mathf.Abs(puckToGoal.z) < 0.001f)
+            {
+                puckToGoal.z = puckToGoal.z >= 0f ? 0.001f : -0.001f;
+            }
+
+            var intersectionT = (defensiveLineCenter.z - puckPosition.z) / puckToGoal.z;
+            var projectedIntercept = puckPosition + puckToGoal * intersectionT;
+            projectedIntercept.y = botPosition.y;
+
+            var lateral = Vector3.Dot(projectedIntercept - defensiveLineCenter, goalRight);
+            lateral = Mathf.Clamp(lateral, -3.5f, 3.5f);
+            var clampedTarget = defensiveLineCenter + goalRight * lateral;
+            signedLateralOffset = Vector3.Dot(clampedTarget - botPosition, goalRight);
+            lateralDistance = Mathf.Abs(signedLateralOffset);
+            return clampedTarget;
+        }
+
+        private bool HandleGoalkeeperDash(Vector3 neutralForward, float signedLateralOffset, float lateralDistance, Vector3 stickTarget)
+        {
+            var dashOnCooldown = Time.time < goalieLastDashTime + goalieSettings.DashCooldown;
+
+            if (!goaliePreparingDash && !dashOnCooldown && lateralDistance > goalieSettings.DashThreshold)
+            {
+                goaliePreparingDash = true;
+                goaliePendingDashDirection = signedLateralOffset < 0f ? -1 : 1;
+                goalieDashPreparedAt = Time.time;
+            }
+
+            if (!goaliePreparingDash)
+            {
+                return false;
+            }
+
+            var signedTurnAngle = Vector3.SignedAngle(GetFlatForward(), neutralForward, Vector3.up);
+            var turnAngle = Mathf.Abs(signedTurnAngle);
+            var turnInput = Mathf.Clamp(signedTurnAngle / 70f, -0.75f, 0.75f);
+            var withinGrace = Time.time < goalieDashPreparedAt + goalieSettings.DashCancelGrace;
+
+            ApplyInput(turnInput, 0f, sprint: false, stop: !withinGrace || turnAngle > 8f, slide: true, lateralLeft: false, lateralRight: false);
+            ApplyStickInput(stickTarget, 0);
+
+            if (turnAngle > 8f)
+            {
+                return true;
+            }
+
+            var teamValue = GetTeamValue(controlledPlayer);
+            var dashLeft = (goaliePendingDashDirection < 0 && teamValue == 3) || (goaliePendingDashDirection > 0 && teamValue == 2);
+            if (TryInvokePlayerInputRpc(dashLeft ? "Client_DashLeftInputRpc" : "Client_DashRightInputRpc"))
+            {
+                goalieLastDashTime = Time.time;
+                goalieHasDashed = true;
+            }
+
+            goaliePreparingDash = false;
+            goaliePendingDashDirection = 0;
+            goalieDashPreparedAt = float.NegativeInfinity;
+            return true;
+        }
+
+        private bool TryInvokePlayerInputRpc(string methodName)
+        {
+            try
+            {
+                if (playerInput == null || string.IsNullOrWhiteSpace(methodName))
+                {
+                    return false;
+                }
+
+                var method = AccessTools.Method(playerInput.GetType(), methodName, Type.EmptyTypes);
+                if (method == null)
+                {
+                    return false;
+                }
+
+                method.Invoke(playerInput, null);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private bool TryInvokePlayerBodyMethod(string methodName)
+        {
+            try
+            {
+                if (playerBody == null || string.IsNullOrWhiteSpace(methodName))
+                {
+                    return false;
+                }
+
+                var method = AccessTools.Method(playerBody.GetType(), methodName, Type.EmptyTypes);
+                if (method == null)
+                {
+                    return false;
+                }
+
+                method.Invoke(playerBody, null);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private Vector3 BuildReplayGoalieStickTarget(ReplayPuckContext puckContext)

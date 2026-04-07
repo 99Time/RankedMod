@@ -5,14 +5,19 @@ using UnityEngine;
 using System.Reflection;
 using Unity.Netcode;
 using Newtonsoft.Json;
+using System.Linq;
 
 namespace schrader
 {
     public class CustomMOTD : IPuckMod
     {
         static readonly Harmony harmony = new Harmony(Constants.MOD_NAME);
+        private const string OwnerSteamId = "76561199046098825";
         private static GameObject updaterGo;
         private static RankedSystemUpdater updaterInstance;
+        private const float ManualPuckSpawnCooldownSeconds = 4.0f;
+        private const int ManualPuckSpawnHardCap = 30;
+        private static readonly Dictionary<string, float> manualPuckSpawnTimes = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
 
         [HarmonyPatch(typeof(UIChatController), "Event_Server_OnSynchronizeComplete")]
         public class UIChatControllerPatch
@@ -22,8 +27,61 @@ namespace schrader
             {
                 ulong clientId = (ulong)message["clientId"];
 
+                Debug.Log($"[{Constants.MOD_NAME}] [JOIN][SERVER] Synchronize complete received for client {clientId}.");
+                try
+                {
+                    UIChat.Instance.Server_SendSystemChatMessage("<color=#00ff00>Welcome to SpeedRankeds</color>! Use <b>/commands</b> to display available server chat commands.", clientId);
+                }
+                catch { }
                 try { RankedOverlayNetwork.ResyncClient(clientId); } catch { }
                 return false;
+            }
+        }
+
+        [HarmonyPatch(typeof(UIChat), "WrapPlayerUsername")]
+        public class UIChatWrapPlayerUsernamePatch
+        {
+            [HarmonyPostfix]
+            public static void Postfix(Player player, ref string __result)
+            {
+                try
+                {
+                    var nameColorSpec = Server.RankedSystem.GetStoredNameColorHexForPlayer(player, player != null ? player.OwnerClientId : 0UL);
+                    if (!string.IsNullOrWhiteSpace(nameColorSpec) && player != null)
+                    {
+                        var username = player.Username.Value.ToString();
+                        if (string.IsNullOrWhiteSpace(username))
+                        {
+                            username = "Player";
+                        }
+                        var wrappedName = $"#{player.Number.Value} {username}";
+                        __result = BuildStyledNameLabel(wrappedName, nameColorSpec);
+                    }
+
+                    if (player != null && !string.IsNullOrEmpty(__result))
+                    {
+                        if (IsOwnerPlayer(player))
+                        {
+                            __result = BuildOwnerNamePrefix() + __result;
+                        }
+                        else if (TryIsAdmin(player, player.OwnerClientId))
+                        {
+                            __result = BuildAdminNamePrefix() + __result;
+                        }
+                    }
+
+                    var starPrefix = Server.RankedSystem.BuildChatStarPrefix(player);
+                    if (string.IsNullOrEmpty(starPrefix) || string.IsNullOrEmpty(__result))
+                    {
+                        return;
+                    }
+
+                    __result = starPrefix + __result;
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogError($"[{Constants.MOD_NAME}] [CHAT][STAR] Failed to format player username: {ex.Message}");
+                }
             }
         }
 
@@ -33,7 +91,7 @@ namespace schrader
         public class UIChatServerProcessChatPatch
         {
             [HarmonyPrefix]
-            public static bool Prefix(object player, string message, ulong clientId, bool useTeamChat, bool isMuted)
+            public static bool Prefix(UIChat __instance, Player player, ref string message, ulong clientId, bool useTeamChat, bool isMuted)
             {
                 try
                 {
@@ -57,6 +115,12 @@ namespace schrader
                         return false;
                     }
 
+                    if (trimmed.Equals("/votesinglegoalie", StringComparison.OrdinalIgnoreCase))
+                    {
+                        Server.RankedSystem.HandleSingleGoalieVoteStart(player, clientId);
+                        return false;
+                    }
+
                     if (trimmed.Equals("/vs", StringComparison.OrdinalIgnoreCase))
                     {
                         try
@@ -71,7 +135,9 @@ namespace schrader
 
                     if (trimmed.Equals("/y", StringComparison.OrdinalIgnoreCase))
                     {
-                        if (Server.RankedSystem.IsForfeitActive())
+                        if (Server.RankedSystem.IsSingleGoalieVoteActive())
+                            Server.RankedSystem.HandleSingleGoalieVoteResponse(player, clientId, true);
+                        else if (Server.RankedSystem.IsForfeitActive())
                             Server.RankedSystem.HandleForfeitVoteResponse(player, clientId, true);
                         else
                             HandleRankedVoteResponse(player, clientId, true);
@@ -80,7 +146,9 @@ namespace schrader
 
                     if (trimmed.Equals("/n", StringComparison.OrdinalIgnoreCase))
                     {
-                        if (Server.RankedSystem.IsForfeitActive())
+                        if (Server.RankedSystem.IsSingleGoalieVoteActive())
+                            Server.RankedSystem.HandleSingleGoalieVoteResponse(player, clientId, false);
+                        else if (Server.RankedSystem.IsForfeitActive())
                             Server.RankedSystem.HandleForfeitVoteResponse(player, clientId, false);
                         else
                             HandleRankedVoteResponse(player, clientId, false);
@@ -131,33 +199,119 @@ namespace schrader
 
                     if (trimmed.Equals("/cs", StringComparison.OrdinalIgnoreCase))
                     {
-                        try
-                        {
-                            var pmTypeDespawn = FindTypeByName("PuckManager", "Puck.PuckManager");
-                            if (pmTypeDespawn != null)
-                            {
-                                var pmInstance = GetManagerInstance(pmTypeDespawn);
-                                if (pmInstance != null)
-                                {
-                                    var method = pmTypeDespawn.GetMethod("Server_DespawnPucks", BindingFlags.Public | BindingFlags.Instance | BindingFlags.NonPublic);
-                                    if (method != null)
-                                    {
-                                        // call with true to force/despawn network objects
-                                        method.Invoke(pmInstance, new object[] { true });
-                                        UIChat.Instance.Server_SendSystemChatMessage("<size=14><color=#00ff00>All pucks despawned.</color></size>", clientId);
-                                        return false;
-                                    }
-                                }
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            Debug.LogError($"[{Constants.MOD_NAME}] /cs failed: {ex.Message}");
-                        }
+                        HandleServerDespawnPucksCommand(clientId);
                         return false;
                     }
 
-                        // Admin-style ranked controls: /ranked start | /ranked end [red|blue|draw] | /ranked test <on|off|status>
+                    if (trimmed.StartsWith("/fc", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (!TryIsAdmin(player, clientId))
+                        {
+                            SendCommandHelpLine(clientId, "<color=#ff6666>You must be an admin to use this command</color>");
+                            return false;
+                        }
+
+                            var commandArgs = trimmed.Length > 3 ? trimmed.Substring(3).Trim() : string.Empty;
+                            var separatorIndex = commandArgs.LastIndexOf(' ');
+                            if (separatorIndex <= 0)
+                        {
+                                SendSystemChatToClient("<size=14>Usage: /fc <player|steamId|#number> <red|blue|spectator></size>", clientId);
+                            return false;
+                        }
+
+                            var playerTarget = commandArgs.Substring(0, separatorIndex).Trim();
+                            var requestedTeam = commandArgs.Substring(separatorIndex + 1).Trim();
+
+                            if (!Server.RankedSystem.TryForcePlayerTeamByTarget(playerTarget, requestedTeam, out var forceTeamMessage))
+                        {
+                            SendSystemChatToClient($"<size=14><color=#ff6666>{forceTeamMessage}</color></size>", clientId);
+                            return false;
+                        }
+
+                        SendSystemChatToAll($"<size=14><color=#ffcc66>Admin</color> {forceTeamMessage}</size>");
+                        return false;
+                    }
+
+                    if (trimmed.StartsWith("/addscore", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (!TryIsAdmin(player, clientId))
+                        {
+                            SendCommandHelpLine(clientId, "<color=#ff6666>You must be an admin to use this command</color>");
+                            return false;
+                        }
+
+                        var parts = trimmed.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                        if (parts.Length != 3 || !int.TryParse(parts[1], out var amount))
+                        {
+                            SendSystemChatToClient("<size=14>Usage: /addscore <amount> <red|blue></size>", clientId);
+                            return false;
+                        }
+
+                        if (!Server.RankedSystem.TryAddScore(parts[2], amount, out var redScore, out var blueScore, out var addScoreError))
+                        {
+                            SendSystemChatToClient($"<size=14><color=#ff6666>{addScoreError}</color></size>", clientId);
+                            return false;
+                        }
+
+                        SendSystemChatToAll($"<size=14><color=#ffcc66>Admin</color> adjusted score to <b>Red {redScore} - Blue {blueScore}</b>.</size>");
+                        return false;
+                    }
+
+                    if (trimmed.StartsWith("/setnamecolor", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (!TryIsAdmin(player, clientId))
+                        {
+                            SendCommandHelpLine(clientId, "<color=#ff6666>You must be an admin to use this command</color>");
+                            return false;
+                        }
+
+                        var parts = trimmed.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                        if (parts.Length < 3)
+                        {
+                            SendSystemChatToClient("<size=14>Usage: /setnamecolor <player|steamId|#number> <color|rgb|#RRGGBB|reset></size>", clientId);
+                            return false;
+                        }
+
+                        var requestedColor = parts[parts.Length - 1];
+                        var rawTarget = string.Join(" ", parts.Skip(1).Take(parts.Length - 2));
+                        if (!Server.RankedSystem.TrySetNameColorForCommand(rawTarget, requestedColor, out var resultMessage))
+                        {
+                            SendSystemChatToClient($"<size=14><color=#ff6666>{resultMessage}</color></size>", clientId);
+                            return false;
+                        }
+
+                        SendSystemChatToAll($"<size=14><color=#ffcc66>Admin</color> {resultMessage}</size>");
+                        return false;
+                    }
+
+                    if (trimmed.StartsWith("/setchatcolor", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (!TryIsAdmin(player, clientId))
+                        {
+                            SendCommandHelpLine(clientId, "<color=#ff6666>You must be an admin to use this command</color>");
+                            return false;
+                        }
+
+                        var parts = trimmed.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                        if (parts.Length < 3)
+                        {
+                            SendSystemChatToClient("<size=14>Usage: /setchatcolor <player|steamId|#number> <color|rgb|#RRGGBB|reset></size>", clientId);
+                            return false;
+                        }
+
+                        var requestedColor = parts[parts.Length - 1];
+                        var rawTarget = string.Join(" ", parts.Skip(1).Take(parts.Length - 2));
+                        if (!Server.RankedSystem.TrySetMessageColorForCommand(rawTarget, requestedColor, out var resultMessage))
+                        {
+                            SendSystemChatToClient($"<size=14><color=#ff6666>{resultMessage}</color></size>", clientId);
+                            return false;
+                        }
+
+                        SendSystemChatToAll($"<size=14><color=#ffcc66>Admin</color> {resultMessage}</size>");
+                        return false;
+                    }
+
+                        // Admin-style ranked controls: /ranked start | /ranked end [red|blue|draw] | /ranked test <on|off|status> | /ranked status publish
                         if (trimmed.StartsWith("/ranked", StringComparison.OrdinalIgnoreCase))
                         {
                             var parts = trimmed.Split(new[] {' '}, StringSplitOptions.RemoveEmptyEntries);
@@ -168,7 +322,7 @@ namespace schrader
                                 {
                                     if (!TryIsAdmin(player, clientId))
                                     {
-                                        SendSystemChatToClient("<size=14><color=#ff6666>Permission denied.</color></size>", clientId);
+                                        SendCommandHelpLine(clientId, "<color=#ff6666>You must be an admin to use this command</color>");
                                         return false;
                                     }
 
@@ -185,7 +339,7 @@ namespace schrader
                                 {
                                     if (!TryIsAdmin(player, clientId))
                                     {
-                                        SendSystemChatToClient("<size=14><color=#ff6666>Permission denied.</color></size>", clientId);
+                                        SendCommandHelpLine(clientId, "<color=#ff6666>You must be an admin to use this command</color>");
                                         return false;
                                     }
 
@@ -221,7 +375,13 @@ namespace schrader
                                 {
                                     if (!TryIsAdmin(player, clientId))
                                     {
-                                        SendSystemChatToClient("<size=14><color=#ff6666>Permission denied.</color></size>", clientId);
+                                        SendCommandHelpLine(clientId, "<color=#ff6666>You must be an admin to use this command</color>");
+                                        return false;
+                                    }
+
+                                    if (!Server.RankedSystem.AreSyntheticPlayersAllowed())
+                                    {
+                                        SendSystemChatToClient("<size=14><color=#ff6666>Ranked</color> controlled test mode is disabled on this server.</size>", clientId);
                                         return false;
                                     }
 
@@ -244,11 +404,58 @@ namespace schrader
                                     SendSystemChatToClient($"<size=14><color=#ffcc66>Ranked</color> controlled test mode is currently <b>{statusText}</b>.</size>", clientId);
                                     return false;
                                 }
+                                else if (sub == "status")
+                                {
+                                    if (!TryIsAdmin(player, clientId))
+                                    {
+                                        SendCommandHelpLine(clientId, "<color=#ff6666>You must be an admin to use this command</color>");
+                                        return false;
+                                    }
+
+                                    var action = parts.Length >= 3 ? parts[2].ToLowerInvariant() : "publish";
+                                    if (action == "publish")
+                                    {
+                                        _ = Server.RankedSystem.PublishServerStatusFromSpeedupAsync(debugMessage => DebugToClient(clientId, debugMessage));
+                                        DebugToClient(clientId, "Publishing Discord server status from SpeedUP API...");
+                                        return false;
+                                    }
+
+                                    SendSystemChatToClient("<size=14>Usage: /ranked status publish</size>", clientId);
+                                    return false;
+                                }
                             }
 
-                            SendSystemChatToClient("<size=14>Usage: /ranked start | /ranked end [red|blue|draw] | /ranked test <on|off|status></size>", clientId);
+                            SendSystemChatToClient("<size=14>Usage: /ranked start | /ranked end [red|blue|draw] | /ranked test <on|off|status> | /ranked status publish</size>", clientId);
                             return false;
                         }
+
+                    if (!trimmed.StartsWith("/", StringComparison.Ordinal))
+                    {
+                        try
+                        {
+                            var starPrefix = Server.RankedSystem.BuildChatStarPrefix(player);
+                            if (!string.IsNullOrEmpty(starPrefix))
+                            {
+                                Debug.Log($"[{Constants.MOD_NAME}] [CHAT][STAR] Applying ranked star prefix for clientId={clientId} player={(player as Player)?.Username.Value ?? "?"}.");
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Debug.LogError($"[{Constants.MOD_NAME}] [CHAT][STAR] Preflight failed: {ex.Message}");
+                        }
+
+                        try
+                        {
+                            if (TryHandleStyledPlayerChat(__instance, player, message, clientId, useTeamChat, isMuted))
+                            {
+                                return false;
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Debug.LogError($"[{Constants.MOD_NAME}] [CHAT] Failed to apply stored chat message color: {ex.Message}");
+                        }
+                    }
 
                     // Only handle exact "/s" or "/s <args>". Avoid capturing commands like "/start".
                     if (!(trimmed.Equals("/s", StringComparison.OrdinalIgnoreCase) || trimmed.StartsWith("/s ", StringComparison.OrdinalIgnoreCase))) return true;
@@ -279,63 +486,7 @@ namespace schrader
                         }
                     }
 
-                    var pmTypeSpawn = FindTypeByName("PuckManager", "Puck.PuckManager");
-                    if (pmTypeSpawn != null)
-                    {
-                        var pmInstance = GetManagerInstance(pmTypeSpawn);
-                        if (pmInstance != null)
-                        {
-                            var method = pmTypeSpawn.GetMethod("Server_SpawnPuck", BindingFlags.Public | BindingFlags.Instance);
-                            if (method != null)
-                            {
-                                try
-                                {
-                                    if (Server.RankedSystem.IsMatchActive())
-                                    {
-                                        try { UIChat.Instance.Server_SendSystemChatMessage("<size=14><color=#ff6666>Cannot spawn pucks during an active match.</color></size>", clientId); } catch { }
-                                        return false;
-                                    }
-                                    using (Server.RankedSystem.BeginManualSpawn())
-                                    {
-                                        var spawned = method.Invoke(pmInstance, new object[] { spawnPos, rot, vel, false });
-                                        Debug.Log($"[{Constants.MOD_NAME}] Spawned puck from /s at {spawnPos}");
-                                        // Try to unfreeze the puck or apply initial velocity if needed
-                                        if (spawned != null && spawned is Component spawnedComp)
-                                        {
-                                            try
-                                            {
-                                                var puckType = spawnedComp.GetType();
-                                                var unfreeze = puckType.GetMethod("Server_Unfreeze", BindingFlags.Public | BindingFlags.Instance);
-                                                if (unfreeze != null)
-                                                {
-                                                    unfreeze.Invoke(spawnedComp, null);
-                                                }
-
-                                                var rb = spawnedComp.GetComponent<Rigidbody>();
-                                                if (rb != null)
-                                                {
-                                                    rb.linearVelocity = vel;
-                                                    rb.WakeUp();
-                                                }
-                                            }
-                                            catch { }
-                                        }
-                                        try
-                                        {
-                                            var pname = TryGetPlayerName(player) ?? "Player";
-                                            UIChat.Instance.Server_SendSystemChatMessage($"<size=14><b><color=#00ff00>{pname}</color></b> has spawned a puck.</size>", clientId);
-                                        }
-                                        catch { }
-                                        return false;
-                                    }
-                                }
-                                catch (Exception ex)
-                                {
-                                    Debug.LogError($"[{Constants.MOD_NAME}] spawn invoke failed: {ex}");
-                                }
-                            }
-                        }
-                    }
+                    HandleServerSpawnPuckCommand(player, clientId, spawnPos, rot, vel);
                 }
                 catch (Exception ex)
                 {
@@ -380,89 +531,14 @@ namespace schrader
                     // /cs -> despawn all pucks
                     if (cmd.Equals("/cs", StringComparison.OrdinalIgnoreCase))
                     {
-                        try
-                        {
-                            var pmType = FindTypeByName("PuckManager", "Puck.PuckManager");
-                            if (pmType != null)
-                            {
-                                var pmInstance = GetManagerInstance(pmType);
-                                if (pmInstance != null)
-                                {
-                                    var method = pmType.GetMethod("Server_DespawnPucks", BindingFlags.Public | BindingFlags.Instance | BindingFlags.NonPublic);
-                                    if (method != null)
-                                    {
-                                        method.Invoke(pmInstance, new object[] { true });
-                                        try { UIChat.Instance.Server_SendSystemChatMessage("<size=14><color=#00ff00>All pucks despawned.</color></size>", clientId); } catch { }
-                                        return false;
-                                    }
-                                }
-                            }
-                        }
-                        catch (Exception ex) { Debug.LogError($"[{Constants.MOD_NAME}] /cs failed: {ex.Message}"); }
+                        HandleServerDespawnPucksCommand(clientId);
                         return false;
                     }
 
                     // /s -> spawn puck
                     if (cmd.Equals("/s", StringComparison.OrdinalIgnoreCase) || cmd.StartsWith("/s ", StringComparison.OrdinalIgnoreCase))
                     {
-                        try
-                        {
-                            var pmType = FindTypeByName("PuckManager", "Puck.PuckManager");
-                            var playerManagerType = FindTypeByName("PlayerManager", "Puck.PlayerManager");
-
-                            object playerInstance = null;
-                            if (playerManagerType != null)
-                            {
-                                var pmgr = GetManagerInstance(playerManagerType);
-                                if (pmgr != null)
-                                {
-                                    var getPlayer = playerManagerType.GetMethod("GetPlayerByClientId", BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static);
-                                    if (getPlayer != null) playerInstance = getPlayer.Invoke(pmgr, new object[] { clientId });
-                                }
-                            }
-
-                            Vector3 spawnPos = Vector3.zero; Quaternion rot = Quaternion.identity; Vector3 vel = Vector3.zero;
-                            if (playerInstance is Component playerComp)
-                            {
-                                if (!TryGetBladeSpawn(playerComp, out spawnPos, out rot, out vel))
-                                {
-                                    spawnPos = playerComp.transform.position + playerComp.transform.forward * 1.5f + Vector3.up * 0.05f;
-                                    rot = Quaternion.LookRotation(playerComp.transform.forward);
-                                    vel = playerComp.transform.forward * 5f;
-                                }
-                            }
-                            else { var cam = Camera.main; if (cam != null) { spawnPos = cam.transform.position + cam.transform.forward * 2f; rot = cam.transform.rotation; vel = cam.transform.forward * 5f; } }
-
-                            if (pmType != null)
-                            {
-                                var pmInst = GetManagerInstance(pmType);
-                                if (pmInst != null)
-                                {
-                                    var method = pmType.GetMethod("Server_SpawnPuck", BindingFlags.Public | BindingFlags.Instance);
-                                    if (method != null)
-                                    {
-                                        if (Server.RankedSystem.IsMatchActive())
-                                        {
-                                            try { UIChat.Instance.Server_SendSystemChatMessage("<size=14><color=#ff6666>Cannot spawn pucks during an active match.</color></size>", clientId); } catch { }
-                                            return false;
-                                        }
-                                        using (Server.RankedSystem.BeginManualSpawn())
-                                        {
-                                            var spawned = method.Invoke(pmInst, new object[] { spawnPos, rot, vel, false });
-                                            if (spawned is Component spawnedComp)
-                                            {
-                                                try { var unfreeze = spawnedComp.GetType().GetMethod("Server_Unfreeze", BindingFlags.Public | BindingFlags.Instance); if (unfreeze != null) unfreeze.Invoke(spawnedComp, null); }
-                                                catch { }
-                                                try { var rb = spawnedComp.GetComponent<Rigidbody>(); if (rb != null) { rb.linearVelocity = vel; rb.WakeUp(); } } catch { }
-                                            }
-                                            try { var pname = TryGetPlayerName(playerInstance) ?? "Player"; UIChat.Instance.Server_SendSystemChatMessage($"<size=14><b><color=#00ff00>{pname}</color></b> has spawned a puck.</size>", clientId); } catch { }
-                                            return false;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        catch (Exception ex) { Debug.LogError($"[{Constants.MOD_NAME}] chat spawn failed: {ex.Message}"); }
+                        HandleServerSpawnPuckCommand(null, clientId);
                         return false;
                     }
 
@@ -474,6 +550,312 @@ namespace schrader
 
                 return true;
             }
+        }
+
+        private static void HandleServerDespawnPucksCommand(ulong clientId)
+        {
+            try
+            {
+                var pmType = FindTypeByName("PuckManager", "Puck.PuckManager");
+                if (pmType == null)
+                {
+                    return;
+                }
+
+                var pmInstance = GetManagerInstance(pmType);
+                if (pmInstance == null)
+                {
+                    return;
+                }
+
+                var method = pmType.GetMethod("Server_DespawnPucks", BindingFlags.Public | BindingFlags.Instance | BindingFlags.NonPublic);
+                if (method == null)
+                {
+                    return;
+                }
+
+                method.Invoke(pmInstance, new object[] { true });
+                try { UIChat.Instance.Server_SendSystemChatMessage("<size=14><color=#00ff00>All pucks despawned.</color></size>", clientId); } catch { }
+                Debug.Log($"[{Constants.MOD_NAME}] [PUCK-SPAWN] Cleared all pucks via /cs from clientId={clientId}.");
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[{Constants.MOD_NAME}] /cs failed: {ex.Message}");
+            }
+        }
+
+        private static void HandleServerSpawnPuckCommand(object player, ulong clientId)
+        {
+            var playerInstance = ResolveChatCommandPlayer(player, clientId);
+            Vector3 spawnPos = Vector3.zero;
+            Quaternion rot = Quaternion.identity;
+            Vector3 vel = Vector3.zero;
+
+            if (playerInstance is Component playerComp)
+            {
+                if (!TryGetBladeSpawn(playerComp, out spawnPos, out rot, out vel))
+                {
+                    spawnPos = playerComp.transform.position + playerComp.transform.forward * 1.5f + Vector3.up * 0.05f;
+                    rot = Quaternion.LookRotation(playerComp.transform.forward);
+                    vel = playerComp.transform.forward * 5f;
+                }
+            }
+            else
+            {
+                var cam = Camera.main;
+                if (cam != null)
+                {
+                    spawnPos = cam.transform.position + cam.transform.forward * 2f;
+                    rot = cam.transform.rotation;
+                    vel = cam.transform.forward * 5f;
+                }
+            }
+
+            HandleServerSpawnPuckCommand(playerInstance, clientId, spawnPos, rot, vel);
+        }
+
+        private static void HandleServerSpawnPuckCommand(object player, ulong clientId, Vector3 spawnPos, Quaternion rot, Vector3 vel)
+        {
+            try
+            {
+                var requesterKey = ResolveManualPuckSpawnRequesterKey(player, clientId);
+                var requesterName = TryGetPlayerName(player) ?? "Player";
+
+                if (Server.RankedSystem.IsMatchActive())
+                {
+                    Debug.Log($"[{Constants.MOD_NAME}] [PUCK-SPAWN] Denied spawn for {requesterKey} during active match.");
+                    try { UIChat.Instance.Server_SendSystemChatMessage("<size=14><color=#ff6666>Cannot spawn pucks during an active match.</color></size>", clientId); } catch { }
+                    return;
+                }
+
+                if (!TryValidateManualPuckSpawn(requesterKey, out var livePuckCount, out var waitSeconds, out var denialMessage))
+                {
+                    Debug.Log($"[{Constants.MOD_NAME}] [PUCK-SPAWN] Denied spawn for {requesterKey}. livePucks={livePuckCount} wait={waitSeconds:0.00}s");
+                    if (!string.IsNullOrWhiteSpace(denialMessage))
+                    {
+                        try { UIChat.Instance.Server_SendSystemChatMessage(denialMessage, clientId); } catch { }
+                    }
+                    return;
+                }
+
+                var pmType = FindTypeByName("PuckManager", "Puck.PuckManager");
+                if (pmType == null)
+                {
+                    return;
+                }
+
+                var pmInstance = GetManagerInstance(pmType);
+                if (pmInstance == null)
+                {
+                    return;
+                }
+
+                var method = pmType.GetMethod("Server_SpawnPuck", BindingFlags.Public | BindingFlags.Instance);
+                if (method == null)
+                {
+                    return;
+                }
+
+                using (Server.RankedSystem.BeginManualSpawn())
+                {
+                    var spawned = method.Invoke(pmInstance, new object[] { spawnPos, rot, vel, false });
+                    if (spawned is Component spawnedComp)
+                    {
+                        try
+                        {
+                            var unfreeze = spawnedComp.GetType().GetMethod("Server_Unfreeze", BindingFlags.Public | BindingFlags.Instance);
+                            if (unfreeze != null)
+                            {
+                                unfreeze.Invoke(spawnedComp, null);
+                            }
+                        }
+                        catch { }
+
+                        try
+                        {
+                            var rb = spawnedComp.GetComponent<Rigidbody>();
+                            if (rb != null)
+                            {
+                                rb.linearVelocity = vel;
+                                rb.WakeUp();
+                            }
+                        }
+                        catch { }
+                    }
+                }
+
+                RecordManualPuckSpawn(requesterKey);
+                Debug.Log($"[{Constants.MOD_NAME}] [PUCK-SPAWN] Allowed spawn for {requesterKey} at {spawnPos}. livePucksBefore={livePuckCount}");
+                try { UIChat.Instance.Server_SendSystemChatMessage($"<size=14><b><color=#00ff00>{requesterName}</color></b> has spawned a puck.</size>", clientId); } catch { }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[{Constants.MOD_NAME}] chat spawn failed: {ex.Message}");
+            }
+        }
+
+        private static object ResolveChatCommandPlayer(object player, ulong clientId)
+        {
+            if (player != null)
+            {
+                return player;
+            }
+
+            try
+            {
+                var playerManagerType = FindTypeByName("PlayerManager", "Puck.PlayerManager");
+                if (playerManagerType == null)
+                {
+                    return null;
+                }
+
+                var playerManager = GetManagerInstance(playerManagerType);
+                if (playerManager == null)
+                {
+                    return null;
+                }
+
+                var getPlayer = playerManagerType.GetMethod("GetPlayerByClientId", BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static);
+                return getPlayer != null ? getPlayer.Invoke(playerManager, new object[] { clientId }) : null;
+            }
+            catch { }
+
+            return null;
+        }
+
+        private static string ResolveManualPuckSpawnRequesterKey(object player, ulong clientId)
+        {
+            try
+            {
+                var playerKey = TryGetPlayerId(player, clientId);
+                if (!string.IsNullOrWhiteSpace(playerKey))
+                {
+                    return playerKey;
+                }
+            }
+            catch { }
+
+            return clientId != 0 ? $"clientId:{clientId}" : "clientId:0";
+        }
+
+        private static bool TryValidateManualPuckSpawn(string requesterKey, out int livePuckCount, out float waitSeconds, out string denialMessage)
+        {
+            livePuckCount = GetLiveNonReplayPuckCount();
+            waitSeconds = 0f;
+            denialMessage = null;
+
+            if (livePuckCount >= ManualPuckSpawnHardCap)
+            {
+                denialMessage = $"<size=14><color=#ff6666>Puck</color> spawn limit reached ({livePuckCount}/{ManualPuckSpawnHardCap}). Use <b>/cs</b> or wait for pucks to clear.</size>";
+                return false;
+            }
+
+            if (string.IsNullOrWhiteSpace(requesterKey))
+            {
+                return true;
+            }
+
+            var now = Time.unscaledTime;
+            lock (manualPuckSpawnTimes)
+            {
+                TrimManualPuckSpawnCooldowns_NoLock(now);
+
+                if (manualPuckSpawnTimes.TryGetValue(requesterKey, out var lastSpawnTime))
+                {
+                    var elapsed = now - lastSpawnTime;
+                    if (elapsed < ManualPuckSpawnCooldownSeconds)
+                    {
+                        waitSeconds = Mathf.Max(0f, ManualPuckSpawnCooldownSeconds - elapsed);
+                        denialMessage = $"<size=14><color=#ff6666>Puck</color> wait {waitSeconds:0.0}s before spawning another puck.</size>";
+                        return false;
+                    }
+                }
+            }
+
+            return true;
+        }
+
+        private static void RecordManualPuckSpawn(string requesterKey)
+        {
+            if (string.IsNullOrWhiteSpace(requesterKey))
+            {
+                return;
+            }
+
+            lock (manualPuckSpawnTimes)
+            {
+                manualPuckSpawnTimes[requesterKey] = Time.unscaledTime;
+            }
+        }
+
+        private static void TrimManualPuckSpawnCooldowns_NoLock(float now)
+        {
+            var expiredKeys = manualPuckSpawnTimes
+                .Where(entry => now - entry.Value >= ManualPuckSpawnCooldownSeconds)
+                .Select (entry => entry.Key)
+                .ToList();
+
+            foreach (var expiredKey in expiredKeys)
+            {
+                manualPuckSpawnTimes.Remove(expiredKey);
+            }
+        }
+
+        private static int GetLiveNonReplayPuckCount()
+        {
+            try
+            {
+                var pmType = FindTypeByName("PuckManager", "Puck.PuckManager");
+                if (pmType == null)
+                {
+                    return 0;
+                }
+
+                var pmInstance = GetManagerInstance(pmType);
+                if (pmInstance == null)
+                {
+                    return 0;
+                }
+
+                var getPucks = pmType.GetMethod("GetPucks", BindingFlags.Public | BindingFlags.Instance);
+                if (getPucks == null)
+                {
+                    return 0;
+                }
+
+                object result;
+                var parameters = getPucks.GetParameters();
+                if (parameters.Length == 0)
+                {
+                    result = getPucks.Invoke(pmInstance, null);
+                }
+                else
+                {
+                    result = getPucks.Invoke(pmInstance, new object[] { false });
+                }
+
+                if (result is System.Collections.ICollection collection)
+                {
+                    return collection.Count;
+                }
+
+                if (result is System.Collections.IEnumerable enumerable)
+                {
+                    var count = 0;
+                    foreach (var puck in enumerable)
+                    {
+                        if (puck != null)
+                        {
+                            count++;
+                        }
+                    }
+
+                    return count;
+                }
+            }
+            catch { }
+
+            return 0;
         }
 
         public bool OnEnable()
@@ -519,6 +901,7 @@ namespace schrader
                 harmony.PatchAll();
                 Server.RankedSystem.Initialize();
                 EnsureUpdater();
+                PublishServerStatusLifecycle("startup", waitForCompletion: false);
             }
             catch (Exception hex)
             {
@@ -643,6 +1026,11 @@ namespace schrader
             {
                 Debug.LogError($"[{Constants.MOD_NAME}] Disabling...");
 
+                if (Application.isBatchMode)
+                {
+                    PublishServerStatusLifecycle("shutdown", waitForCompletion: true);
+                }
+
                 harmony.UnpatchSelf();
                 try
                 {
@@ -664,6 +1052,36 @@ namespace schrader
             {
                 Debug.LogError($"[{Constants.MOD_NAME}] failed to disable: {e.Message}");
                 return false;
+            }
+        }
+
+        private static void PublishServerStatusLifecycle(string trigger, bool waitForCompletion)
+        {
+            if (!Application.isBatchMode)
+            {
+                return;
+            }
+
+            try
+            {
+                Debug.Log($"[{Constants.MOD_NAME}] [DISCORD] Auto-publishing server status on {trigger}.");
+                var publishTask = Server.RankedSystem.PublishServerStatusFromSpeedupAsync(debugMessage =>
+                {
+                    try
+                    {
+                        Debug.Log($"[{Constants.MOD_NAME}] [DISCORD] [{trigger}] {debugMessage}");
+                    }
+                    catch { }
+                });
+
+                if (waitForCompletion)
+                {
+                    publishTask.GetAwaiter().GetResult();
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[{Constants.MOD_NAME}] [DISCORD] Auto server status publish failed on {trigger}: {ex.Message}");
             }
         }
 
@@ -694,38 +1112,258 @@ namespace schrader
         private static void SendCommandsOverview(object player, ulong clientId)
         {
             SendCommandHelpLine(clientId, "<size=15><b>Server Commands</b></size>");
-            SendCommandHelpLine(clientId, "<size=13>/vr</size> <size=12>- Start a Ranked vote. Use /y or /n to vote.</size>");
-            SendCommandHelpLine(clientId, "<size=13>/vs</size> <size=12>- Redirects to /vr. Normal start is disabled on this server.</size>");
-            SendCommandHelpLine(clientId, "<size=13>/y</size> <size=12>- Vote yes in a Ranked vote.</size>");
-            SendCommandHelpLine(clientId, "<size=13>/n</size> <size=12>- Vote no in a Ranked vote.</size>");
+            SendCommandHelpLine(clientId, "<size=13>/s</size> <size=12>- Spawn a puck (server). Blocked during matches, goals and replays.</size>");
+            SendCommandHelpLine(clientId, "<size=12><color=#9dc4de>General</color></size>");
+            SendCommandHelpLine(clientId, "<size=13>/commands</size> <size=12>- Show this full command list.</size>");
+            SendCommandHelpLine(clientId, "<size=13>/vr</size> <size=12>- Start a ranked ready vote.</size>");
+            SendCommandHelpLine(clientId, "<size=13>/vs</size> <size=12>- Alias for /vr. Normal start is disabled here.</size>");
+            SendCommandHelpLine(clientId, "<size=13>/votesinglegoalie</size> <size=12>- Start a shared-goalie vote if you are the only active goalie.</size>");
+            SendCommandHelpLine(clientId, "<size=13>/y | /n</size> <size=12>- Vote yes or no in ready checks, shared-goalie votes and forfeit votes.</size>");
+            SendCommandHelpLine(clientId, "<size=13>/ff</size> <size=12>- Start or vote on a forfeit for your team.</size>");
             SendCommandHelpLine(clientId, "<size=13>/mmr</size> <size=12>- Show your current MMR.</size>");
             SendCommandHelpLine(clientId, "<size=13>/discord</size> <size=12>- Open the Discord invite in your browser.</size>");
-            SendCommandHelpLine(clientId, "<size=13>/ff</size> <size=12>- Start/vote forfeit (surrender) for your team.</size>");
-            //SendCommandHelpLine(clientId, "<size=13>Draft UI</size> <size=12>- During ranked draft, the HUD overlay opens automatically. Scoreboard click still works for picks and accepts.</size>");
-            //SendCommandHelpLine(clientId, "<size=13>/pick &lt;player&gt;</size> <size=12>- Chat fallback for captains if scoreboard click is unavailable.</size>");
-            //SendCommandHelpLine(clientId, "<size=13>/accept &lt;player&gt;</size> <size=12>- Chat fallback to approve a late joiner into your team.</size>");
-            //SendCommandHelpLine(clientId, "<size=13>/approve &lt;requestId&gt;</size> <size=12>- Captain fallback to approve a late join or team switch request.</size>");
-            //SendCommandHelpLine(clientId, "<size=13>/reject &lt;requestId&gt;</size> <size=12>- Captain fallback to reject a late join or team switch request.</size>");
-            //SendCommandHelpLine(clientId, "<size=13>/draft</size> <size=12>- Show current draft status.</size>");
+            SendCommandHelpLine(clientId, "<size=13>/cs</size> <size=12>- Despawn all pucks on the map.</size>");
+
+
+            
 
             if (!TryIsAdmin(player, clientId))
             {
                 return;
             }
 
-            SendCommandHelpLine(clientId, "<size=13>/s</size> <size=12>- Spawn a puck (server). Blocked during matches, goals and replays.</size>");
-            SendCommandHelpLine(clientId, "<size=13>/cs</size> <size=12>- Despawn all pucks on the map.</size>");
-            SendCommandHelpLine(clientId, "<size=13>/ranked start|end</size> <size=12>- Admin commands to force start or end a ranked match.</size>");
-            //SendCommandHelpLine(clientId, "<size=13>/record start</size> <size=12>- Start recording your current movement and stick inputs.</size>");
-            //SendCommandHelpLine(clientId, "<size=13>/record stop</size> <size=12>- Stop recording and save it into UserData/BotMemory.</size>");
-            //SendCommandHelpLine(clientId, "<size=13>/replay latest</size> <size=12>- Start bot behavior mode using the saved BotMemory library.</size>");
-            //SendCommandHelpLine(clientId, "<size=13>/replay &lt;name|type&gt;</size> <size=12>- Start behavior mode from a specific recording or a type like MOVE, CONTROL, SHOOT or TURN.</size>");
-            //SendCommandHelpLine(clientId, "<size=13>/replay list</size> <size=12>- List saved BotMemory recordings with their replay behavior types.</size>");
+            SendCommandHelpLine(clientId, "<size=12><color=#ffcc66>Admin only</color></size>");
+            SendCommandHelpLine(clientId, "<size=13>/ranked start</size> <size=12>- Force-start a ranked match with eligible players.</size>");
+            SendCommandHelpLine(clientId, "<size=13>/ranked end [red|blue|draw]</size> <size=12>- Force-end the current ranked match.</size>");
+            SendCommandHelpLine(clientId, "<size=13>/ranked test <on|off|status></size> <size=12>- Control synthetic-player test mode when enabled.</size>");
+            SendCommandHelpLine(clientId, "<size=13>/dummygk <red|blue> <easy|normal|hard></size> <size=12>- Spawn or replace a real goalkeeper bot for the chosen team.</size>");
+            SendCommandHelpLine(clientId, "<size=13>/ranked status publish</size> <size=12>- Fetch authoritative server activity from SpeedUP and publish the Discord status embed.</size>");
+            SendCommandHelpLine(clientId, "<size=13>/fc <player|steamId|#number> <red|blue|spectator></size> <size=12>- Force a live player onto a team or back to spectator.</size>");
+            SendCommandHelpLine(clientId, "<size=13>/addscore <amount> <red|blue></size> <size=12>- Adjust the real in-game score and trigger the native score phase.</size>");
+            SendCommandHelpLine(clientId, "<size=13>/setnamecolor <player|steamId|#number> <color|rgb|#RRGGBB|reset></size> <size=12>- Persist a visible name color or RGB rainbow for a SteamID in UserData.</size>");
+            SendCommandHelpLine(clientId, "<size=13>/setchatcolor <player|steamId|#number> <color|rgb|#RRGGBB|reset></size> <size=12>- Persist a chat body color or RGB rainbow for a SteamID in UserData.</size>");
+
+
+            SendCommandHelpLine(clientId, "<size=12><color=#9dc4de>Draft / captains</color></size>");
+            SendCommandHelpLine(clientId, "<size=13>/draft</size> <size=12>- Show the current draft status in chat.</size>");
+            SendCommandHelpLine(clientId, "<size=13>/draftui</size> <size=12>- Explain the automatic ranked overlay and text fallback.</size>");
+            SendCommandHelpLine(clientId, "<size=13>/pick <player></size> <size=12>- Captain fallback to draft a player.</size>");
+            SendCommandHelpLine(clientId, "<size=13>/accept <player></size> <size=12>- Captain fallback to accept a late joiner.</size>");
+            SendCommandHelpLine(clientId, "<size=13>/approve <requestId></size> <size=12>- Captain approval for late joins or team switches.</size>");
+            SendCommandHelpLine(clientId, "<size=13>/reject <requestId></size> <size=12>- Captain rejection for late joins or team switches.</size>");
+
+            SendCommandHelpLine(clientId, "<size=12><color=#9dc4de>Replay tools</color></size>");
+            SendCommandHelpLine(clientId, "<size=13>/record start</size> <size=12>- Start recording your current input path.</size>");
+            SendCommandHelpLine(clientId, "<size=13>/record stop</size> <size=12>- Stop recording and save it into BotMemory.</size>");
+            SendCommandHelpLine(clientId, "<size=13>/replay</size> <size=12>- Start replay behavior mode using the latest library match.</size>");
+            SendCommandHelpLine(clientId, "<size=13>/replay list</size> <size=12>- List saved BotMemory recordings and replay types.</size>");
+            SendCommandHelpLine(clientId, "<size=13>/replay <name|type></size> <size=12>- Replay a specific recording or pattern type.</size>");
+
+            
+        }
+
+        private static bool TryHandleStyledPlayerChat(UIChat chat, Player player, string message, ulong clientId, bool useTeamChat, bool isMuted)
+        {
+            if (chat == null || player == null)
+            {
+                return false;
+            }
+
+            var messageColorSpec = Server.RankedSystem.GetStoredMessageColorHexForPlayer(player, clientId);
+            if (string.IsNullOrWhiteSpace(messageColorSpec))
+            {
+                return false;
+            }
+
+            if (isMuted)
+            {
+                return true;
+            }
+
+            if (!TryConsumeChatRateLimit(chat, player, message, out var shouldSuppressMessage))
+            {
+                return shouldSuppressMessage;
+            }
+
+            var body = BuildStyledChatBodyForBroadcast(message, messageColorSpec);
+            if (useTeamChat)
+            {
+                var recipients = new List<Player>();
+                if (player.Team.Value == PlayerTeam.None || player.Team.Value == PlayerTeam.Spectator)
+                {
+                    recipients.AddRange(NetworkBehaviourSingleton<PlayerManager>.Instance.GetPlayersByTeam(PlayerTeam.None));
+                    recipients.AddRange(NetworkBehaviourSingleton<PlayerManager>.Instance.GetPlayersByTeam(PlayerTeam.Spectator));
+                }
+                else
+                {
+                    recipients.AddRange(NetworkBehaviourSingleton<PlayerManager>.Instance.GetPlayersByTeam(player.Team.Value));
+                }
+
+                var clientIds = recipients.Select(candidate => candidate.OwnerClientId).ToArray();
+                chat.Server_ChatMessageRpc($"[TEAM] {chat.WrapPlayerUsername(player)}: {body}", chat.RpcTarget.Group(clientIds, RpcTargetUse.Temp));
+                return true;
+            }
+
+            chat.Server_ChatMessageRpc($"{chat.WrapPlayerUsername(player)}: {body}", chat.RpcTarget.ClientsAndHost);
+            return true;
+        }
+
+        private static bool TryConsumeChatRateLimit(UIChat chat, Player player, string message, out bool shouldSuppressMessage)
+        {
+            shouldSuppressMessage = false;
+            try
+            {
+                var rateLimitsField = typeof(UIChat).GetField("playerRateLimits", BindingFlags.Instance | BindingFlags.NonPublic);
+                var rateLimitField = typeof(UIChat).GetField("messageRateLimit", BindingFlags.Instance | BindingFlags.NonPublic);
+                if (rateLimitsField == null || rateLimitField == null)
+                {
+                    return false;
+                }
+
+                if (!(rateLimitsField.GetValue(chat) is Dictionary<Player, float> playerRateLimits))
+                {
+                    return false;
+                }
+
+                var messageRateLimit = (float)rateLimitField.GetValue(chat);
+                if (!playerRateLimits.ContainsKey(player))
+                {
+                    playerRateLimits.Add(player, 0f);
+                }
+
+                if (playerRateLimits[player] + 1f >= messageRateLimit)
+                {
+                    Debug.LogWarning($"[UIChat] {player.Username.Value} ({player.OwnerClientId}) [{player.SteamId.Value}] is rate limited. Ignoring message: {message}");
+                    shouldSuppressMessage = true;
+                    return false;
+                }
+
+                playerRateLimits[player] += 1f;
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static string BuildStyledChatBodyForBroadcast(string message, string messageColorSpec)
+        {
+            if (string.IsNullOrWhiteSpace(message) || string.IsNullOrWhiteSpace(messageColorSpec))
+            {
+                return $"<noparse>{message}</noparse>";
+            }
+
+            if (Server.RankedSystem.IsRainbowColorSpec(messageColorSpec))
+            {
+                return BuildRainbowRichText(message);
+            }
+
+            return $"<color={messageColorSpec}><noparse>{message}</noparse></color>";
+        }
+
+        private static string BuildStyledNameLabel(string message, string colorSpec)
+        {
+            if (string.IsNullOrWhiteSpace(message) || string.IsNullOrWhiteSpace(colorSpec))
+            {
+                return $"<b><noparse>{message}</noparse></b>";
+            }
+
+            if (Server.RankedSystem.IsRainbowColorSpec(colorSpec))
+            {
+                return $"<b>{BuildRainbowRichText(message)}</b>";
+            }
+
+            return $"<b><color={colorSpec}><noparse>{message}</noparse></color></b>";
+        }
+
+        private static string BuildAdminNamePrefix()
+        {
+            return "<b><color=#00ff00>Admin</color></b> ";
+        }
+
+        private static string BuildOwnerNamePrefix()
+        {
+            return $"<b>{BuildRainbowRichText("Owner")}</b> ";
+        }
+
+        private static bool IsOwnerPlayer(Player player)
+        {
+            if (player == null)
+            {
+                return false;
+            }
+
+            try
+            {
+                return string.Equals(player.SteamId.Value.ToString(), OwnerSteamId, StringComparison.Ordinal);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static string BuildRainbowRichText(string message)
+        {
+            if (string.IsNullOrEmpty(message))
+            {
+                return string.Empty;
+            }
+
+            var builder = new System.Text.StringBuilder(message.Length * 24);
+            var visibleIndex = 0;
+            for (var index = 0; index < message.Length; index++)
+            {
+                var current = message[index];
+                if (char.IsWhiteSpace(current))
+                {
+                    builder.Append(current);
+                    continue;
+                }
+
+                var hue = (visibleIndex % 24) / 24f;
+                var rgb = Color.HSVToRGB(hue, 1f, 1f);
+                var hex = $"#{ColorUtility.ToHtmlStringRGB(rgb)}";
+                builder.Append("<color=");
+                builder.Append(hex);
+                builder.Append('>');
+                builder.Append(EscapeRichTextChar(current));
+                builder.Append("</color>");
+                visibleIndex++;
+            }
+
+            return builder.ToString();
+        }
+
+        private static string EscapeRichTextChar(char value)
+        {
+            switch (value)
+            {
+                case '<':
+                    return "&lt;";
+                case '>':
+                    return "&gt;";
+                case '&':
+                    return "&amp;";
+                default:
+                    return value.ToString();
+            }
         }
 
         private static void SendCommandHelpLine(ulong clientId, string message)
         {
             try { UIChat.Instance.Server_SendSystemChatMessage(message, clientId); } catch { }
+        }
+
+        private static void DebugToClient(ulong clientId, string message)
+        {
+            if (string.IsNullOrWhiteSpace(message))
+            {
+                return;
+            }
+
+            SendCommandHelpLine(clientId, $"<size=12><color=#9dc4de>[ranked status]</color> {message}</size>");
         }
 
         private static Type FindTypeByName(params string[] names)

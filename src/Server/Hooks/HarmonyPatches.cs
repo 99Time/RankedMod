@@ -1,14 +1,33 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using HarmonyLib;
+using Newtonsoft.Json;
 using UnityEngine;
 
 namespace schrader.Server
 {
     public static partial class RankedSystem
     {
+        private const ulong PracticeModeFakePlayerClientIdMin = 7777777UL;
+        private const ulong PracticeModeFakePlayerClientIdMax = 7777778UL;
+
+        private sealed class ConnectionApprovalPayload
+        {
+            public string Password { get; set; }
+            public string SteamId { get; set; }
+            public string SocketId { get; set; }
+            public ulong[] EnabledModIds { get; set; }
+        }
+
+        private sealed class ConnectionApprovalResponsePayload
+        {
+            public string steamId { get; set; }
+        }
+
         private static bool IsReplayPlayerObject(object player, ulong fallbackClientId = 0)
         {
             try
@@ -16,6 +35,11 @@ namespace schrader.Server
                 if (player == null)
                 {
                     return false;
+                }
+
+                if (HasReplayFlag(player))
+                {
+                    return true;
                 }
 
                 var typeName = player.GetType().FullName ?? player.GetType().Name ?? string.Empty;
@@ -54,13 +78,28 @@ namespace schrader.Server
 
                 if (clientId != 0)
                 {
+                    if (IsReplayClientId(clientId))
+                    {
+                        return true;
+                    }
+
                     var getReplayPlayerByClientId = managerType.GetMethod("GetReplayPlayerByClientId", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
                     if (getReplayPlayerByClientId != null)
                     {
                         var replayPlayer = getReplayPlayerByClientId.Invoke(manager, new object[] { clientId });
-                        if (replayPlayer != null && ReferenceEquals(replayPlayer, player))
+                        if (replayPlayer != null && AreEquivalentPlayerObjects(replayPlayer, player))
                         {
                             return true;
+                        }
+
+                        if (clientId >= ReplayClientIdOffset)
+                        {
+                            var sourceClientId = clientId - ReplayClientIdOffset;
+                            replayPlayer = getReplayPlayerByClientId.Invoke(manager, new object[] { sourceClientId });
+                            if (replayPlayer != null && AreEquivalentPlayerObjects(replayPlayer, player))
+                            {
+                                return true;
+                            }
                         }
                     }
                 }
@@ -68,6 +107,79 @@ namespace schrader.Server
             catch { }
 
             return false;
+        }
+
+        private static bool IsPracticeModeFakePlayerObject(object player, ulong fallbackClientId = 0, string fallbackIdentity = null)
+        {
+            try
+            {
+                var clientId = fallbackClientId;
+                if (clientId == 0)
+                {
+                    TryGetClientId(player, out clientId);
+                }
+
+                if (IsPracticeModeFakePlayerClientId(clientId))
+                {
+                    return true;
+                }
+
+                if (IsPracticeModeFakePlayerIdentity(fallbackIdentity))
+                {
+                    return true;
+                }
+
+                if (IsPracticeModeFakePlayerIdentity(TryGetPlayerIdNoFallback(player)))
+                {
+                    return true;
+                }
+
+                var playerName = TryGetPlayerName(player);
+                if (!string.IsNullOrWhiteSpace(playerName)
+                    && playerName.StartsWith("demBot", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+
+                var typeName = player?.GetType().FullName ?? player?.GetType().Name ?? string.Empty;
+                if (typeName.IndexOf("FakePlayer", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return true;
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static bool IsPracticeModeFakePlayerIdentity(string candidate)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(candidate))
+                {
+                    return false;
+                }
+
+                var clean = candidate.Trim();
+                const string clientIdPrefix = "clientId:";
+                if (clean.StartsWith(clientIdPrefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    clean = clean.Substring(clientIdPrefix.Length).Trim();
+                }
+
+                return ulong.TryParse(clean, out var rawClientId)
+                    && IsPracticeModeFakePlayerClientId(rawClientId);
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static bool IsPracticeModeFakePlayerClientId(ulong clientId)
+        {
+            return clientId >= PracticeModeFakePlayerClientIdMin
+                && clientId <= PracticeModeFakePlayerClientIdMax;
         }
 
         private static bool ShouldIgnoreTransientTeamHookPlayer(object player, ulong clientId, string steamId)
@@ -79,7 +191,51 @@ namespace schrader.Server
                     return true;
                 }
 
+                if (IsPracticeModeFakePlayerObject(player, clientId, steamId))
+                {
+                    return true;
+                }
+
                 if (clientId == 0 && string.IsNullOrWhiteSpace(steamId))
+                {
+                    return true;
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static bool IsReplayPlaybackPhaseActive()
+        {
+            try
+            {
+                lock (phaseLock)
+                {
+                    var phase = lastGamePhaseName ?? string.Empty;
+                    return phase.IndexOf("replay", StringComparison.OrdinalIgnoreCase) >= 0;
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static bool ShouldBypassReplayTeamHooks(object player, ulong clientId, string playerKey = null)
+        {
+            if (!IsReplayPlaybackPhaseActive())
+            {
+                return false;
+            }
+
+            try
+            {
+                if (IsReplayPlayerObject(player, clientId))
+                {
+                    return true;
+                }
+
+                if (IsPracticeModeFakePlayerObject(player, clientId, playerKey))
                 {
                     return true;
                 }
@@ -128,6 +284,48 @@ namespace schrader.Server
             {
                 Debug.LogError($"[{Constants.MOD_NAME}] Draft UI hook failed: {ex.Message}");
                 draftUiHooksPatched = true;
+            }
+        }
+
+        private static void TryPatchConnectionApprovalHooks()
+        {
+            if (connectionApprovalHooksPatched) return;
+            try
+            {
+                var connectionApprovalPrefix = typeof(RankedSystem).GetMethod(nameof(ConnectionApprovalPrefix), System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+                var approvalResponsePrefix = typeof(RankedSystem).GetMethod(nameof(ConnectionApprovalResponsePrefix), System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+
+                var serverManagerType = FindTypeByName("ServerManager", "Puck.ServerManager");
+                var serverManagerControllerType = FindTypeByName("ServerManagerController", "Puck.ServerManagerController");
+                var harmony = new Harmony(Constants.MOD_NAME + ".connectionapproval");
+
+                if (serverManagerType != null && connectionApprovalPrefix != null)
+                {
+                    var method = serverManagerType.GetMethod("Server_ConnectionApproval", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
+                    if (method != null)
+                    {
+                        harmony.Patch(method, prefix: new HarmonyMethod(connectionApprovalPrefix));
+                        Debug.Log($"[{Constants.MOD_NAME}] Connection approval hook applied: {serverManagerType.FullName}.Server_ConnectionApproval");
+                    }
+                }
+
+                if (serverManagerControllerType != null && approvalResponsePrefix != null)
+                {
+                    var method = serverManagerControllerType.GetMethod("WebSocket_Event_OnServerConnectionApprovalResponse", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
+                    if (method != null)
+                    {
+                        harmony.Patch(method, prefix: new HarmonyMethod(approvalResponsePrefix));
+                        Debug.Log($"[{Constants.MOD_NAME}] Connection approval hook applied: {serverManagerControllerType.FullName}.WebSocket_Event_OnServerConnectionApprovalResponse");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[{Constants.MOD_NAME}] Connection approval hook failed: {ex.Message}");
+            }
+            finally
+            {
+                connectionApprovalHooksPatched = true;
             }
         }
 
@@ -352,6 +550,176 @@ namespace schrader.Server
                 }
             }
             catch (Exception ex) { Debug.LogError($"[{Constants.MOD_NAME}] Goal hook failed: {ex.Message}"); goalHooksPatched = true; }
+        }
+
+        private static void TryPatchReplayDebugHooks()
+        {
+            if (replayDebugHooksPatched) return;
+            try
+            {
+                var replayPlayerType = FindTypeByName("ReplayPlayer", "Puck.ReplayPlayer");
+                if (replayPlayerType == null)
+                {
+                    replayDebugHooksPatched = true;
+                    return;
+                }
+
+                var startPostfix = typeof(RankedSystem).GetMethod(nameof(ReplayStartPostfix), System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+                var replayEventPrefix = typeof(RankedSystem).GetMethod(nameof(ReplayEventPrefix), System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+                var harmony = new Harmony(Constants.MOD_NAME + ".replaydebug");
+
+                var startMethod = replayPlayerType.GetMethod("Server_StartReplay", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                if (startMethod != null && startPostfix != null)
+                {
+                    harmony.Patch(startMethod, postfix: new HarmonyMethod(startPostfix));
+                    Debug.Log($"[{Constants.MOD_NAME}] Replay debug hook applied: {replayPlayerType.FullName}.Server_StartReplay");
+                }
+
+                var replayEventMethod = replayPlayerType.GetMethod("Server_ReplayEvent", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                if (replayEventMethod != null && replayEventPrefix != null)
+                {
+                    harmony.Patch(replayEventMethod, prefix: new HarmonyMethod(replayEventPrefix));
+                    Debug.Log($"[{Constants.MOD_NAME}] Replay debug hook applied: {replayPlayerType.FullName}.Server_ReplayEvent");
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[{Constants.MOD_NAME}] Replay debug hook failed: {ex.Message}");
+            }
+            finally
+            {
+                replayDebugHooksPatched = true;
+            }
+        }
+
+        private static void ReplayStartPostfix(object __0, int __1, int __2)
+        {
+            try
+            {
+                var tickCount = 0;
+                if (__0 != null)
+                {
+                    var countProperty = __0.GetType().GetProperty("Count", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                    if (countProperty != null)
+                    {
+                        TryConvertToInt(countProperty.GetValue(__0), out tickCount);
+                    }
+                }
+
+                Debug.Log($"[{Constants.MOD_NAME}] [REPLAY-DEBUG] StartReplay phase={GetTrackedPhaseName()} tickRate={__1} fromTick={__2} tickCount={tickCount}");
+            }
+            catch { }
+        }
+
+        private static bool ReplayEventPrefix(string __0, object __1)
+        {
+            try
+            {
+                if (string.Equals(__0, "PlayerSpawned", StringComparison.Ordinal))
+                {
+                    var ownerClientId = TryReadReplayEventOwnerClientId(__1);
+                    Debug.Log($"[{Constants.MOD_NAME}] [REPLAY-DEBUG] PlayerSpawned sourceClientId={ownerClientId} replayClientId={(ownerClientId != 0 ? ownerClientId + ReplayClientIdOffset : 0UL)} phase={GetTrackedPhaseName()}");
+                    return true;
+                }
+
+                if (!string.Equals(__0, "PlayerBodySpawned", StringComparison.Ordinal))
+                {
+                    return true;
+                }
+
+                var ownerId = TryReadReplayEventOwnerClientId(__1);
+                var replayUsername = TryReadReplayEventString(__1, "Username");
+                TryReadReplayEventInt(__1, "Number", out var replayNumber);
+                var replayTeam = TryReadReplayEventValue(__1, "Team");
+
+                object replayPlayer = null;
+                if (ownerId != 0 && TryGetPlayerManager(out var manager) && manager != null)
+                {
+                    var method = manager.GetType().GetMethod("GetReplayPlayerByClientId", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                    if (method != null)
+                    {
+                        replayPlayer = method.Invoke(manager, new object[] { ownerId });
+                    }
+                }
+
+                var resolvedReplayClientId = 0UL;
+                TryGetClientId(replayPlayer, out resolvedReplayClientId);
+                TryGetPlayerNumber(replayPlayer, out var currentNumber);
+                var currentTeam = GetCurrentTeamValue(replayPlayer);
+                var currentSteamId = TryGetPlayerIdNoFallback(replayPlayer);
+                var replayFlag = replayPlayer != null && HasReplayFlag(replayPlayer);
+
+                Debug.Log(
+                    $"[{Constants.MOD_NAME}] [REPLAY-DEBUG] PlayerBodySpawned phase={GetTrackedPhaseName()} sourceClientId={ownerId} replayClientId={resolvedReplayClientId} resolvedReplay={replayPlayer != null} replayFlag={replayFlag} username={replayUsername ?? "?"} number={replayNumber} team={FormatTeamValue(replayTeam)} currentNumber={currentNumber} currentTeam={FormatTeamValue(currentTeam)} steamId={currentSteamId ?? "?"}");
+            }
+            catch { }
+
+            return true;
+        }
+
+        private static ulong TryReadReplayEventOwnerClientId(object eventData)
+        {
+            try
+            {
+                var value = TryReadReplayEventValue(eventData, "OwnerClientId");
+                if (TryConvertToUlong(value, out var clientId))
+                {
+                    return clientId;
+                }
+            }
+            catch { }
+
+            return 0;
+        }
+
+        private static string TryReadReplayEventString(object eventData, string memberName)
+        {
+            try
+            {
+                return ExtractSimpleValueToString(TryReadReplayEventValue(eventData, memberName));
+            }
+            catch { }
+
+            return null;
+        }
+
+        private static bool TryReadReplayEventInt(object eventData, string memberName, out int value)
+        {
+            value = 0;
+            try
+            {
+                return TryConvertToInt(TryReadReplayEventValue(eventData, memberName), out value);
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static object TryReadReplayEventValue(object eventData, string memberName)
+        {
+            if (eventData == null || string.IsNullOrWhiteSpace(memberName))
+            {
+                return null;
+            }
+
+            try
+            {
+                var type = eventData.GetType();
+                var property = type.GetProperty(memberName, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                if (property != null)
+                {
+                    return property.GetValue(eventData);
+                }
+
+                var field = type.GetField(memberName, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                if (field != null)
+                {
+                    return field.GetValue(eventData);
+                }
+            }
+            catch { }
+
+            return null;
         }
 
         private static bool spawnHooksPatched = false;
@@ -782,6 +1150,12 @@ namespace schrader.Server
                     steamId = TryGetPlayerId(p, clientId);
                 }
 
+                if (ShouldBypassReplayTeamHooks(playerObj, clientId, steamId))
+                {
+                    Debug.Log($"[{Constants.MOD_NAME}] Event_OnPlayerTeamChanged bypassed for replay/transient player during replay phase={GetTrackedPhaseName()} clientId={clientId} replayPlayer={IsReplayPlayerObject(playerObj, clientId)}");
+                    return true;
+                }
+
                     if (ShouldIgnoreTransientTeamHookPlayer(playerObj, clientId, steamId))
                     {
                         Debug.Log($"[{Constants.MOD_NAME}] Ignoring transient replay/anonymous team change: steamId={steamId ?? "?"} clientId={clientId}");
@@ -810,13 +1184,6 @@ namespace schrader.Server
                         }
                     }
                     Debug.Log($"[{Constants.MOD_NAME}] Allowing internal team assignment: {steamId ?? (clientId != 0 ? $"clientId:{clientId}" : "unknown")} -> {FormatTeamValue(newTeam)}");
-                    return true;
-                }
-
-                // If player is joining mid-match (oldTeam None -> newTeam RealTeam), allow it.
-                if (active && !draftTeamLockActive && IsTeamNoneLike(oldTeam) && !IsTeamNoneLike(newTeam))
-                {
-                    Debug.Log($"[{Constants.MOD_NAME}] Allowing initial team assignment during active match: {FormatTeamValue(oldTeam)} -> {FormatTeamValue(newTeam)}");
                     return true;
                 }
 
@@ -906,6 +1273,12 @@ namespace schrader.Server
                 if (player == null) player = TryGetPlayerFromDict(dict);
 
                     var playerKey = TryGetPlayerIdNoFallback(player);
+                    if (ShouldBypassReplayTeamHooks(player, clientId, playerKey))
+                    {
+                        Debug.Log($"[{Constants.MOD_NAME}] PlayerSelectTeamPrefix bypassed for replay/transient player during replay phase={GetTrackedPhaseName()} clientId={clientId}");
+                        return true;
+                    }
+
                     if (ShouldIgnoreTransientTeamHookPlayer(player, clientId, playerKey))
                     {
                         return true;
@@ -914,6 +1287,10 @@ namespace schrader.Server
                 var currentTeam = GetCurrentTeamValue(player);
 
                 Debug.Log($"[{Constants.MOD_NAME}] Event_Client_OnPlayerSelectTeam protectActive={protectActive} clientId={clientId} current={FormatTeamValue(currentTeam)} requested={FormatTeamValue(requestedTeam)}");
+                if (IsReplayPlaybackPhaseActive())
+                {
+                    Debug.Log($"[{Constants.MOD_NAME}] [JOIN-DEBUG] Replay-phase team select kept on approval path for live player clientId={clientId} current={FormatTeamValue(currentTeam)} requested={FormatTeamValue(requestedTeam)}");
+                }
 
                 if (IsInternalTeamAssignmentAllowed(player, clientId, requestedTeam, false))
                 {
@@ -939,13 +1316,6 @@ namespace schrader.Server
 
                 if (!protectActive) return true;
 
-                // Allow initial assignment when joining mid-match: current is None/Unknown and requested is a real team
-                if (!draftTeamLockActive && IsTeamNoneLike(currentTeam) && !IsTeamNoneLike(requestedTeam))
-                {
-                    Debug.Log($"[{Constants.MOD_NAME}] PlayerSelectTeamPrefix: allowing initial assignment during match.");
-                    return true;
-                }
-
                 // Block manual team changes during active match
                 TryWarnTeamSwitchBlocked(player);
                 return false;
@@ -961,7 +1331,16 @@ namespace schrader.Server
             {
                 if (forcedTeamAssignmentDepth > 0) return true;
 
+                    ulong replayClientId = 0;
+                    TryGetClientId(__instance, out replayClientId);
+
                     var playerKey = TryGetPlayerIdNoFallback(__instance);
+                    if (ShouldBypassReplayTeamHooks(__instance, replayClientId, playerKey))
+                    {
+                        Debug.Log($"[{Constants.MOD_NAME}] PlayerTeamSetPrefix bypassed for replay/transient player during replay phase={GetTrackedPhaseName()} clientId={replayClientId} requested={FormatTeamValue(__0)} replayPlayer={IsReplayPlayerObject(__instance, replayClientId)}");
+                        return true;
+                    }
+
                     if (ShouldIgnoreTransientTeamHookPlayer(__instance, 0UL, playerKey))
                     {
                         return true;
@@ -996,13 +1375,6 @@ namespace schrader.Server
                     return false;
                 }
 
-                // Allow initial team assignment while match is active (joining mid-game): current == None/Unknown, requested is a real team
-                if (!draftTeamLockActive && IsTeamNoneLike(currentTeam) && !IsTeamNoneLike(requestedTeam))
-                {
-                    Debug.Log($"[{Constants.MOD_NAME}] PlayerTeamSetPrefix: allowing initial assignment {FormatTeamValue(currentTeam)} -> {FormatTeamValue(requestedTeam)}");
-                    return true;
-                }
-
                 // Block any real manual switch (including intermediate set to None)
                 Debug.Log($"[{Constants.MOD_NAME}] PlayerTeamSetPrefix BLOCKED: {FormatTeamValue(currentTeam)} -> {FormatTeamValue(requestedTeam)}");
                 TryWarnTeamSwitchBlocked(__instance);
@@ -1027,10 +1399,563 @@ namespace schrader.Server
             return true; // allow original
         }
 
+        private static bool ConnectionApprovalPrefix(object __instance, object __0, object __1)
+        {
+            try
+            {
+                if (!Application.isBatchMode)
+                {
+                    return true;
+                }
+
+                if (!TryParseConnectionApprovalRequest(__0, out var clientId, out var payload) || clientId == 0 || payload == null)
+                {
+                    return true;
+                }
+
+                Debug.Log($"[{Constants.MOD_NAME}] [ADMIN] Pre-Connection approval incoming from {clientId} ({payload.SteamId ?? "unknown"})");
+
+                var isSocketIdValid = !string.IsNullOrWhiteSpace(payload.SocketId);
+                var isSteamIdValid = !string.IsNullOrWhiteSpace(payload.SteamId);
+                var hasMissingMods = IsMissingRequiredMods(__instance, payload.EnabledModIds ?? Array.Empty<ulong>());
+
+                if (!isSocketIdValid || !isSteamIdValid || hasMissingMods)
+                {
+                    return true;
+                }
+
+                if (!IsAdminSteamId(payload.SteamId))
+                {
+                    return true;
+                }
+
+                if (!TrySetConnectionApprovalFlag(__1, "Approved", true))
+                {
+                    return true;
+                }
+
+                TrySetConnectionApprovalFlag(__1, "Pending", false);
+                TrySetConnectionApprovalFlag(__1, "Reason", null);
+                TryTriggerConnectionApprovalEvent(clientId, approved: true);
+                Debug.Log($"[{Constants.MOD_NAME}] [ADMIN] Pre-Connection approved for {clientId} ({payload.SteamId}) (admin).");
+
+                return false;
+            }
+            catch { }
+
+            return true;
+        }
+
+        private static bool ConnectionApprovalResponsePrefix(object __instance, object __0)
+        {
+            return true;
+        }
+
+        private static bool TryParseConnectionApprovalRequest(object request, out ulong clientId, out ConnectionApprovalPayload payload)
+        {
+            clientId = 0;
+            payload = null;
+
+            try
+            {
+                if (request == null)
+                {
+                    return false;
+                }
+
+                if (!TryGetMemberValue(request, "ClientNetworkId", out var clientIdValue) || !TryConvertToUlong(clientIdValue, out clientId))
+                {
+                    return false;
+                }
+
+                if (!TryGetMemberValue(request, "Payload", out var payloadValue) || !(payloadValue is byte[] payloadBytes) || payloadBytes.Length == 0)
+                {
+                    return false;
+                }
+
+                payload = JsonConvert.DeserializeObject<ConnectionApprovalPayload>(Encoding.ASCII.GetString(payloadBytes));
+                return payload != null;
+            }
+            catch { }
+
+            payload = null;
+            return false;
+        }
+
+        private static bool CanApproveConnectionIgnoringCapacity(object serverManager, ConnectionApprovalPayload payload)
+        {
+            try
+            {
+                if (payload == null)
+                {
+                    return false;
+                }
+
+                var password = ResolveServerPassword(serverManager);
+                var hasPassword = !string.IsNullOrEmpty(password);
+                var hasSteamId = !string.IsNullOrEmpty(payload.SteamId);
+                var timedOut = hasSteamId && IsTimedOutSteamId(serverManager, payload.SteamId);
+                var banned = hasSteamId && IsBannedSteamId(serverManager, payload.SteamId);
+                var missingPassword = string.IsNullOrEmpty(payload.Password) && hasPassword;
+                var validPassword = payload.Password == password || !hasPassword;
+                var missingMods = IsMissingRequiredMods(serverManager, payload.EnabledModIds ?? Array.Empty<ulong>());
+
+                return hasSteamId && !timedOut && !banned && !missingPassword && validPassword && !missingMods;
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static bool IsAdminSteamId(string steamId)
+        {
+            try
+            {
+                return !string.IsNullOrWhiteSpace(steamId)
+                    && TryGetNativeAdminSteamIds(out var adminSteamIds)
+                    && adminSteamIds.Contains(steamId.Trim());
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static bool IsServerAtCapacity()
+        {
+            try
+            {
+                var connectedClients = Unity.Netcode.NetworkManager.Singleton?.ConnectedClientsList;
+                var serverManagerType = FindTypeByName("ServerManager", "Puck.ServerManager");
+                var serverManager = GetManagerInstance(serverManagerType);
+                if (connectedClients == null || serverManager == null)
+                {
+                    return false;
+                }
+
+                if (!TryGetMemberValue(serverManager, "Server", out var serverValue) || serverValue == null)
+                {
+                    return false;
+                }
+
+                if (!TryGetMemberValue(serverValue, "MaxPlayers", out var maxPlayersValue) || !TryConvertToIntValue(maxPlayersValue, out var maxPlayers))
+                {
+                    return false;
+                }
+
+                return connectedClients.Count >= maxPlayers;
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static string ResolveServerPassword(object serverManager)
+        {
+            try
+            {
+                if (serverManager == null || !TryGetMemberValue(serverManager, "Server", out var serverValue) || serverValue == null)
+                {
+                    return string.Empty;
+                }
+
+                if (!TryGetMemberValue(serverValue, "Password", out var passwordValue))
+                {
+                    return string.Empty;
+                }
+
+                return ExtractSimpleValueToString(passwordValue) ?? string.Empty;
+            }
+            catch { }
+
+            return string.Empty;
+        }
+
+        private static bool IsTimedOutSteamId(object serverManager, string steamId)
+        {
+            try
+            {
+                if (serverManager == null || string.IsNullOrWhiteSpace(steamId))
+                {
+                    return false;
+                }
+
+                var verifyTimeouts = serverManager.GetType().GetMethod("Server_VerifyTimeouts", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
+                verifyTimeouts?.Invoke(serverManager, null);
+
+                if (!TryGetMemberValue(serverManager, "SteamIdTimeouts", out var timeoutsValue) || !(timeoutsValue is IDictionary timeouts))
+                {
+                    return false;
+                }
+
+                return timeouts.Contains(steamId.Trim());
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static bool IsBannedSteamId(object serverManager, string steamId)
+        {
+            try
+            {
+                if (serverManager == null || string.IsNullOrWhiteSpace(steamId))
+                {
+                    return false;
+                }
+
+                if (!TryGetMemberValue(serverManager, "BannedSteamIds", out var bannedValue) || !(bannedValue is IEnumerable bannedIds))
+                {
+                    return false;
+                }
+
+                var normalizedSteamId = steamId.Trim();
+                foreach (var bannedId in bannedIds)
+                {
+                    if (string.Equals(ExtractSimpleValueToString(bannedId), normalizedSteamId, StringComparison.Ordinal))
+                    {
+                        return true;
+                    }
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static bool IsMissingRequiredMods(object serverManager, ulong[] enabledModIds)
+        {
+            try
+            {
+                if (serverManager == null)
+                {
+                    return false;
+                }
+
+                if (!TryGetMemberValue(serverManager, "ServerConfigurationManager", out var configManager) || configManager == null)
+                {
+                    return false;
+                }
+
+                if (!TryGetMemberValue(configManager, "ClientRequiredModIds", out var requiredModsValue) || !(requiredModsValue is IEnumerable requiredMods))
+                {
+                    return false;
+                }
+
+                var enabled = new HashSet<ulong>(enabledModIds ?? Array.Empty<ulong>());
+                foreach (var requiredMod in requiredMods)
+                {
+                    if (!TryConvertToUlong(requiredMod, out var requiredModId) || enabled.Contains(requiredModId))
+                    {
+                        continue;
+                    }
+
+                    return true;
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static bool UsePuckBannedSteamIds(object serverManager)
+        {
+            try
+            {
+                if (serverManager == null || !TryGetMemberValue(serverManager, "ServerConfigurationManager", out var configManager) || configManager == null)
+                {
+                    return false;
+                }
+
+                if (!TryGetMemberValue(configManager, "ServerConfiguration", out var configValue) || configValue == null)
+                {
+                    return false;
+                }
+
+                if (!TryGetMemberValue(configValue, "usePuckBannedSteamIds", out var flagValue))
+                {
+                    return false;
+                }
+
+                return flagValue is bool enabled && enabled;
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static void TryRegisterPendingConnectionApproval(object serverManager, string steamId, object response)
+        {
+            try
+            {
+                if (serverManager == null || string.IsNullOrWhiteSpace(steamId))
+                {
+                    return;
+                }
+
+                if (!TryGetMemberValue(serverManager, "ConnectionApprovalRequests", out var requestsValue) || !(requestsValue is IDictionary requests))
+                {
+                    return;
+                }
+
+                var normalizedSteamId = steamId.Trim();
+                if (requests.Contains(normalizedSteamId))
+                {
+                    requests.Remove(normalizedSteamId);
+                }
+
+                requests[normalizedSteamId] = response;
+            }
+            catch { }
+        }
+
+        private static bool TryGetPendingConnectionApprovalResponse(object controllerInstance, string steamId, out object response)
+        {
+            response = null;
+            try
+            {
+                if (controllerInstance == null || string.IsNullOrWhiteSpace(steamId))
+                {
+                    return false;
+                }
+
+                if (!TryGetMemberValue(controllerInstance, "serverManager", out var serverManager) || serverManager == null)
+                {
+                    return false;
+                }
+
+                if (!TryGetMemberValue(serverManager, "ConnectionApprovalRequests", out var requestsValue) || !(requestsValue is IDictionary requests))
+                {
+                    return false;
+                }
+
+                var normalizedSteamId = steamId.Trim();
+                if (!requests.Contains(normalizedSteamId))
+                {
+                    return false;
+                }
+
+                response = requests[normalizedSteamId];
+                return response != null;
+            }
+            catch { }
+
+            response = null;
+            return false;
+        }
+
+        private static void TryRemovePendingConnectionApproval(object controllerInstance, string steamId)
+        {
+            try
+            {
+                if (controllerInstance == null || string.IsNullOrWhiteSpace(steamId))
+                {
+                    return;
+                }
+
+                if (!TryGetMemberValue(controllerInstance, "serverManager", out var serverManager) || serverManager == null)
+                {
+                    return;
+                }
+
+                if (!TryGetMemberValue(serverManager, "ConnectionApprovalRequests", out var requestsValue) || !(requestsValue is IDictionary requests))
+                {
+                    return;
+                }
+
+                var normalizedSteamId = steamId.Trim();
+                if (requests.Contains(normalizedSteamId))
+                {
+                    requests.Remove(normalizedSteamId);
+                }
+            }
+            catch { }
+        }
+
+        private static void TryEmitServerConnectionApprovalRequest(string steamId, string socketId)
+        {
+            try
+            {
+                var webSocketManagerType = FindTypeByName("WebSocketManager", "Puck.WebSocketManager");
+                var webSocketManager = GetManagerInstance(webSocketManagerType);
+                if (webSocketManager == null)
+                {
+                    return;
+                }
+
+                var emit = webSocketManager.GetType().GetMethod("Emit", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
+                if (emit == null)
+                {
+                    return;
+                }
+
+                emit.Invoke(webSocketManager, new object[]
+                {
+                    "serverConnectionApprovalRequest",
+                    new Dictionary<string, object>
+                    {
+                        { "steamId", steamId },
+                        { "socketId", socketId }
+                    },
+                    "serverConnectionApprovalResponse"
+                });
+            }
+            catch { }
+        }
+
+        private static void TryTriggerConnectionApprovalEvent(ulong clientId, bool approved)
+        {
+            try
+            {
+                var eventManagerType = FindTypeByName("EventManager", "Puck.EventManager");
+                var eventManager = GetManagerInstance(eventManagerType);
+                if (eventManager == null)
+                {
+                    return;
+                }
+
+                var triggerEvent = eventManager.GetType().GetMethod("TriggerEvent", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
+                if (triggerEvent == null)
+                {
+                    return;
+                }
+
+                triggerEvent.Invoke(eventManager, new object[]
+                {
+                    "Event_Server_ConnectionApproval",
+                    new Dictionary<string, object>
+                    {
+                        { "clientId", clientId },
+                        { "approved", approved }
+                    }
+                });
+            }
+            catch { }
+        }
+
+        private static string TryGetConnectionApprovalResponseSteamId(object message)
+        {
+            try
+            {
+                if (!(message is Dictionary<string, object> dict)
+                    || !dict.TryGetValue("response", out var responseValue)
+                    || responseValue == null)
+                {
+                    return null;
+                }
+
+                var getValueMethod = responseValue.GetType().GetMethods(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public)
+                    .FirstOrDefault(method => method.Name == "GetValue" && method.IsGenericMethodDefinition && method.GetParameters().Length == 0);
+                if (getValueMethod == null)
+                {
+                    return null;
+                }
+
+                var typedMethod = getValueMethod.MakeGenericMethod(typeof(ConnectionApprovalResponsePayload));
+                var payload = typedMethod.Invoke(responseValue, null) as ConnectionApprovalResponsePayload;
+                return payload?.steamId?.Trim();
+            }
+            catch { }
+
+            return null;
+        }
+
+        private static bool TrySetConnectionApprovalFlag(object response, string memberName, object value)
+        {
+            try
+            {
+                if (response == null || string.IsNullOrWhiteSpace(memberName))
+                {
+                    return false;
+                }
+
+                var type = response.GetType();
+                var property = type.GetProperty(memberName, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
+                if (property != null && property.CanWrite)
+                {
+                    property.SetValue(response, value, null);
+                    return true;
+                }
+
+                var field = type.GetField(memberName, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
+                if (field != null)
+                {
+                    field.SetValue(response, value);
+                    return true;
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static bool TryGetMemberValue(object instance, string memberName, out object value)
+        {
+            value = null;
+            try
+            {
+                if (instance == null || string.IsNullOrWhiteSpace(memberName))
+                {
+                    return false;
+                }
+
+                var type = instance.GetType();
+                var property = type.GetProperty(memberName, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
+                if (property != null)
+                {
+                    value = property.GetValue(instance, null);
+                    return true;
+                }
+
+                var field = type.GetField(memberName, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
+                if (field != null)
+                {
+                    value = field.GetValue(instance);
+                    return true;
+                }
+            }
+            catch { }
+
+            value = null;
+            return false;
+        }
+
+        private static bool TryConvertToIntValue(object value, out int parsed)
+        {
+            parsed = 0;
+            try
+            {
+                if (value == null)
+                {
+                    return false;
+                }
+
+                if (value is int intValue)
+                {
+                    parsed = intValue;
+                    return true;
+                }
+
+                if (value is IConvertible)
+                {
+                    parsed = Convert.ToInt32(value);
+                    return true;
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
         private static void GameStateUpdatePostfix(object __instance, object __0, object __1, object __2, object __3, object __4)
         {
             try
             {
+                string previousTrackedPhase;
+                lock (phaseLock)
+                {
+                    previousTrackedPhase = lastGamePhaseName;
+                }
+
                 if (TryGetGamePhaseValue(__0, out var phaseStrTracked))
                 {
                     lock (phaseLock)
@@ -1047,6 +1972,13 @@ namespace schrader.Server
                             lastKnownPlayerTeam.Clear();
                             teamRevertActive.Clear();
                         }
+                    }
+
+                    var previousNormalized = (previousTrackedPhase ?? string.Empty).Trim().ToLowerInvariant();
+                    if (previousNormalized.Contains("replay") && !p.Contains("replay"))
+                    {
+                        Debug.Log($"[{Constants.MOD_NAME}] [REPLAY-CLEANUP] Replay phase transition detected: {previousTrackedPhase ?? "unknown"} -> {phaseStrTracked ?? "unknown"}. Forcing transient sweep.");
+                        TryPurgeReplayLeftovers(force: true, reason: $"phase-transition:{previousTrackedPhase ?? "unknown"}->{phaseStrTracked ?? "unknown"}");
                     }
                 }
 

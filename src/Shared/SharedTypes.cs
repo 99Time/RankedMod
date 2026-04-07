@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using Newtonsoft.Json;
 using UnityEngine;
 
 namespace schrader
@@ -25,6 +26,12 @@ namespace schrader
         public int mmr = Constants.DEFAULT_MMR;
         public int wins = 0;
         public int losses = 0;
+        [JsonIgnore]
+        public int starPoints = 0;
+        [JsonIgnore]
+        public int winStreak = 0;
+        [JsonIgnore]
+        public string chatColorHex = null;
         public string lastUpdated = null;
     }
 

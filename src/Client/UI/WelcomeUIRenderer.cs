@@ -111,7 +111,7 @@ namespace schrader
             var titleLabel = CreateLabel("Welcome to SpeedRankeds", 27, FontStyle.Bold, TextAnchor.MiddleCenter, new Color(0.98f, 0.99f, 1f, 1f));
             titleLabel.style.marginTop = new StyleLength(new Length(12, LengthUnit.Pixel));
 
-            var subtitleLabel = CreateLabel("Read the rules, scan the key commands, then continue to choose Spectator, Red, or Blue.", 12, FontStyle.Normal, TextAnchor.MiddleCenter, new Color(0.82f, 0.89f, 0.95f, 0.92f));
+            var subtitleLabel = CreateLabel("Read the basics, then choose Spectator, Red, or Blue.", 12, FontStyle.Normal, TextAnchor.MiddleCenter, new Color(0.82f, 0.89f, 0.95f, 0.92f));
             subtitleLabel.style.marginTop = new StyleLength(new Length(6, LengthUnit.Pixel));
             subtitleLabel.style.maxWidth = 560;
 
@@ -119,17 +119,17 @@ namespace schrader
             hero.Add(titleLabel);
             hero.Add(subtitleLabel);
 
-            var rulesSection = CreateSectionPanel("RULES");
+            var rulesSection = CreateSectionPanel("START HERE");
             view.RulesSection = rulesSection;
-            AddRuleRow(rulesSection, "No racism");
-            AddRuleRow(rulesSection, "No insults or harassment");
-            AddRuleRow(rulesSection, "No mocking other players");
-            AddRuleRow(rulesSection, "Play to have fun");
+            AddRuleRow(rulesSection, "Keep chat clean");
+            AddRuleRow(rulesSection, "No slurs, harassment, or dogpiling");
+            AddRuleRow(rulesSection, "Respect teammates and opponents");
+            AddRuleRow(rulesSection, "Continue, then pick Spectator, Red, or Blue");
 
-            var commandsSection = CreateSectionPanel("COMMANDS OVERVIEW");
+            var commandsSection = CreateSectionPanel("QUICK COMMANDS");
             view.CommandsSection = commandsSection;
             commandsSection.style.marginTop = new StyleLength(new Length(10, LengthUnit.Pixel));
-            var commandsHintLabel = CreateLabel("Use /commands for the full list. These are the ones players use most.", 12, FontStyle.Normal, TextAnchor.MiddleLeft, new Color(0.82f, 0.89f, 0.95f, 0.90f));
+            var commandsHintLabel = CreateLabel("Need everything? Use /commands. Admin-only lines appear automatically for admins.", 12, FontStyle.Normal, TextAnchor.MiddleLeft, new Color(0.82f, 0.89f, 0.95f, 0.90f));
             commandsHintLabel.style.marginBottom = new StyleLength(new Length(8, LengthUnit.Pixel));
             commandsSection.Add(commandsHintLabel);
             commandsSection.Add(BuildCommandGrid());
@@ -164,7 +164,7 @@ namespace schrader
                 new Color(0.23f, 0.42f, 0.84f, 1f),
                 new Color(0.11f, 0.25f, 0.56f, 1f),
                 Color.white));
-            SetButtonContent(view.DiscordButton, CreateButtonContent("DISCORD", CreateDiscordIcon()));
+            SetButtonContent(view.DiscordButton, CreateButtonContent("JOIN DISCORD", CreateDiscordIcon()));
             view.DiscordButton.style.minWidth = 184;
             view.DiscordButton.style.height = 46;
             view.DiscordButton.style.alignSelf = Align.Center;
@@ -178,7 +178,7 @@ namespace schrader
                 new Color(0.23f, 0.66f, 0.44f, 1f),
                 new Color(0.12f, 0.42f, 0.28f, 1f),
                 Color.white));
-            SetButtonContent(view.ContinueButton, CreateButtonContent("CONTINUE", null));
+            SetButtonContent(view.ContinueButton, CreateButtonContent("CHOOSE TEAM", null));
             view.ContinueButton.style.minWidth = 208;
             view.ContinueButton.style.height = 46;
             view.ContinueButton.style.alignSelf = Align.Center;
@@ -326,14 +326,15 @@ namespace schrader
 
             var leftColumn = CreateCommandColumn();
             leftColumn.style.marginRight = new StyleLength(new Length(6, LengthUnit.Pixel));
-            leftColumn.Add(CreateCommandCard("/vr", "Start a Ranked vote. Use /y or /n to answer."));
-            leftColumn.Add(CreateCommandCard("/s", "Spawn a puck quickly for practice or resets."));
+            leftColumn.Add(CreateCommandCard("/commands", "Show the full command list in chat."));
+            leftColumn.Add(CreateCommandCard("/vr", "Start the ranked ready vote."));
+            leftColumn.Add(CreateCommandCard("/y or /n", "Answer ready checks and forfeit votes."));
 
             var rightColumn = CreateCommandColumn();
             rightColumn.style.marginLeft = new StyleLength(new Length(6, LengthUnit.Pixel));
-            rightColumn.Add(CreateCommandCard("/discord", "Open the Discord invite in your browser."));
-            rightColumn.Add(CreateCommandCard("/cs", "Clear all pucks on the rink."));
+            rightColumn.Add(CreateCommandCard("/ff", "Start or vote on a team forfeit."));
             rightColumn.Add(CreateCommandCard("/mmr", "Show your current MMR."));
+            rightColumn.Add(CreateCommandCard("/discord", "Open the Discord invite in your browser."));
 
             grid.Add(leftColumn);
             grid.Add(rightColumn);

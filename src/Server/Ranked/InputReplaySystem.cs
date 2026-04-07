@@ -397,6 +397,13 @@ namespace schrader.Server
 
         private static void HandleReplayCommand(object player, ulong clientId, string selector)
         {
+            if (!AreSyntheticPlayersAllowed())
+            {
+                StopReplay(null, 0);
+                SendSystemChatToClient("<size=14><color=#ff6666>Replay</color> replay bots are disabled on this server.</size>", clientId);
+                return;
+            }
+
             StopReplay(null, 0);
 
             string pinnedRecordingName = null;
@@ -1081,6 +1088,11 @@ namespace schrader.Server
         {
             botId = null;
             controller = null;
+
+            if (!AreSyntheticPlayersAllowed())
+            {
+                return false;
+            }
 
             lock (inputReplayLock)
             {

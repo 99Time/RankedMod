@@ -7,6 +7,9 @@ namespace schrader
 {
     internal static class PostMatchUIRenderer
     {
+        private const int AvatarRefreshMaxAttempts = 30;
+        private const int AvatarRefreshIntervalMilliseconds = 300;
+
         private const float PanelEntranceDurationSeconds = 0.24f;
 
         internal sealed class TeamSectionView
@@ -86,10 +89,10 @@ namespace schrader
             headerChip.style.borderRightColor = new StyleColor(new Color(1f, 1f, 1f, 0.06f));
             headerChip.style.borderBottomColor = new StyleColor(new Color(0f, 0f, 0f, 0.28f));
             headerChip.style.borderLeftColor = new StyleColor(new Color(1f, 1f, 1f, 0.06f));
-            headerChip.Add(CreateLabel("RANKED RESULTS", 12, FontStyle.Bold, TextAnchor.MiddleCenter, new Color(0.86f, 0.92f, 0.98f, 1f)));
+            headerChip.Add(CreateLabel("MATCH FINAL", 12, FontStyle.Bold, TextAnchor.MiddleCenter, new Color(0.86f, 0.92f, 0.98f, 1f)));
 
-            view.TitleLabel = CreateLabel("MATCH COMPLETE", 28, FontStyle.Bold, TextAnchor.MiddleCenter, new Color(0.98f, 0.99f, 1f, 1f));
-            view.WinnerLabel = CreateLabel("RED TEAM VICTORY", 15, FontStyle.Bold, TextAnchor.MiddleCenter, new Color(1f, 0.91f, 0.64f, 1f));
+            view.TitleLabel = CreateLabel("FINAL RESULTS", 28, FontStyle.Bold, TextAnchor.MiddleCenter, new Color(0.98f, 0.99f, 1f, 1f));
+            view.WinnerLabel = CreateLabel("RED TEAM WINS", 15, FontStyle.Bold, TextAnchor.MiddleCenter, new Color(1f, 0.91f, 0.64f, 1f));
             view.WinnerLabel.style.marginTop = new StyleLength(new Length(6, LengthUnit.Pixel));
             view.WinnerLabel.style.opacity = 0.92f;
 
@@ -186,8 +189,8 @@ namespace schrader
             }
 
             var view = rootView.PostMatch;
-            view.TitleLabel.text = "MATCH COMPLETE";
-            view.WinnerLabel.text = FormatWinningTeam(state.WinningTeam);
+            view.TitleLabel.text = "FINAL RESULTS";
+            view.WinnerLabel.text = BuildWinningHeadline(state);
             view.WinnerLabel.style.display = string.IsNullOrWhiteSpace(view.WinnerLabel.text) ? DisplayStyle.None : DisplayStyle.Flex;
             view.WinnerLabel.style.color = new StyleColor(state.WinningTeam == TeamResult.Red
                 ? new Color(1f, 0.82f, 0.82f, 1f)
@@ -243,7 +246,7 @@ namespace schrader
             titleColumn.style.flexDirection = FlexDirection.Column;
 
             var teamLabel = CreateLabel(FormatTeamName(team), 17, FontStyle.Bold, TextAnchor.MiddleLeft, ReadableTeamColor(team));
-            var teamMeta = CreateLabel("Competitive Summary", 11, FontStyle.Normal, TextAnchor.MiddleLeft, new Color(0.86f, 0.90f, 0.96f, 0.72f));
+            var teamMeta = CreateLabel("Final MMR and player stats", 11, FontStyle.Normal, TextAnchor.MiddleLeft, new Color(0.86f, 0.90f, 0.96f, 0.72f));
             teamMeta.style.marginTop = new StyleLength(new Length(2, LengthUnit.Pixel));
             titleColumn.Add(teamLabel);
             titleColumn.Add(teamMeta);
@@ -273,7 +276,7 @@ namespace schrader
             mvpContainer.style.marginBottom = new StyleLength(new Length(12, LengthUnit.Pixel));
             teamView.MvpContainer = mvpContainer;
 
-            var rosterTitle = CreateLabel("ROSTER", 11, FontStyle.Bold, TextAnchor.MiddleLeft, new Color(0.90f, 0.93f, 0.97f, 0.82f));
+            var rosterTitle = CreateLabel("TEAM BREAKDOWN", 11, FontStyle.Bold, TextAnchor.MiddleLeft, new Color(0.90f, 0.93f, 0.97f, 0.82f));
             rosterTitle.style.marginBottom = new StyleLength(new Length(8, LengthUnit.Pixel));
             teamView.RosterLabel = rosterTitle;
 
@@ -306,7 +309,7 @@ namespace schrader
             var teamPlayers = SortPlayers(state, team).ToArray();
             var additionalPlayerCount = Mathf.Max(0, teamPlayers.Length - 1);
             teamView.SummaryLabel.text = teamPlayers.Length == 1 ? "1 PLAYER" : $"{teamPlayers.Length} PLAYERS";
-            teamView.RosterLabel.text = additionalPlayerCount > 0 ? $"ROSTER · {additionalPlayerCount}" : "ROSTER";
+            teamView.RosterLabel.text = additionalPlayerCount > 0 ? $"TEAM BREAKDOWN · {additionalPlayerCount}" : "TEAM BREAKDOWN";
 
             if (teamPlayers.Length > 0)
             {
@@ -413,14 +416,24 @@ namespace schrader
             ApplyPillVisual(badge, new Color(0.95f, 0.82f, 0.38f, 0.98f), new Color(0.20f, 0.15f, 0.05f, 1f));
             StartPulseAnimation(badge, 0.92f, 0.06f, 0.025f, 2.5f);
 
-            var delta = CreatePillLabel(FormatMmrDelta(player.MmrDelta), 13, FontStyle.Bold, TextAnchor.MiddleCenter, DeltaColor(player.MmrDelta));
-            ApplyPillVisual(delta, Tint(DeltaColor(player.MmrDelta), 0.36f, 0.10f), DeltaColor(player.MmrDelta));
+            var delta = CreatePillLabel(FormatRatingDelta(player), 13, FontStyle.Bold, TextAnchor.MiddleCenter, RatingDeltaColor(player));
+            ApplyPillVisual(delta, Tint(RatingDeltaColor(player), 0.36f, 0.10f), RatingDeltaColor(player));
 
             topRow.Add(badge);
             topRow.Add(delta);
 
+            var nameRow = new VisualElement();
+            nameRow.style.display = DisplayStyle.Flex;
+            nameRow.style.flexDirection = FlexDirection.Row;
+            nameRow.style.alignItems = Align.Center;
+            nameRow.style.marginTop = new StyleLength(new Length(7, LengthUnit.Pixel));
+
             var nameLabel = CreateLabel(player.Username ?? "---", 20, FontStyle.Bold, TextAnchor.MiddleLeft, Color.white);
-            nameLabel.style.marginTop = new StyleLength(new Length(7, LengthUnit.Pixel));
+            nameRow.Add(nameLabel);
+            if (player != null && player.IsSharedGoalie)
+            {
+                nameRow.Add(CreateSharedGoalieBadge(11));
+            }
 
             var statsRow = new VisualElement();
             statsRow.style.display = DisplayStyle.Flex;
@@ -438,11 +451,11 @@ namespace schrader
             mmrRow.style.alignItems = Align.Center;
             mmrRow.style.marginTop = new StyleLength(new Length(9, LengthUnit.Pixel));
 
-            var mmrLabel = CreateLabel($"MMR {player.MmrBefore} → {player.MmrAfter}", 12, FontStyle.Bold, TextAnchor.MiddleLeft, new Color(0.96f, 0.92f, 0.74f, 1f));
+            var mmrLabel = CreateLabel(FormatDetailedRatingSummary(player), 12, FontStyle.Bold, TextAnchor.MiddleLeft, new Color(0.96f, 0.92f, 0.74f, 1f));
             mmrRow.Add(mmrLabel);
 
             content.Add(topRow);
-            content.Add(nameLabel);
+            content.Add(nameRow);
             content.Add(statsRow);
             content.Add(mmrRow);
 
@@ -505,6 +518,10 @@ namespace schrader
             }
 
             nameRow.Add(nameLabel);
+            if (player != null && player.IsSharedGoalie)
+            {
+                nameRow.Add(CreateSharedGoalieBadge(10));
+            }
 
             var statsLabel = CreateLabel(FormatInlineStats(player), 11, FontStyle.Normal, TextAnchor.MiddleLeft, new Color(0.83f, 0.89f, 0.95f, 0.94f));
             statsLabel.style.marginTop = new StyleLength(new Length(4, LengthUnit.Pixel));
@@ -519,10 +536,10 @@ namespace schrader
             right.style.alignItems = Align.FlexEnd;
             right.style.marginLeft = new StyleLength(new Length(12, LengthUnit.Pixel));
 
-            var deltaLabel = CreatePillLabel(FormatMmrDelta(player.MmrDelta), 11, FontStyle.Bold, TextAnchor.MiddleCenter, DeltaColor(player.MmrDelta));
-            ApplyPillVisual(deltaLabel, Tint(DeltaColor(player.MmrDelta), 0.35f, 0.08f), DeltaColor(player.MmrDelta));
+            var deltaLabel = CreatePillLabel(FormatRatingDelta(player), 11, FontStyle.Bold, TextAnchor.MiddleCenter, RatingDeltaColor(player));
+            ApplyPillVisual(deltaLabel, Tint(RatingDeltaColor(player), 0.35f, 0.08f), RatingDeltaColor(player));
 
-            var mmrLabel = CreateLabel($"{player.MmrAfter} MMR", 11, FontStyle.Normal, TextAnchor.MiddleRight, new Color(0.95f, 0.92f, 0.75f, 1f));
+            var mmrLabel = CreateLabel(FormatCompactRatingSummary(player), 11, FontStyle.Normal, TextAnchor.MiddleRight, new Color(0.95f, 0.92f, 0.75f, 1f));
             mmrLabel.style.marginTop = new StyleLength(new Length(4, LengthUnit.Pixel));
 
             right.Add(deltaLabel);
@@ -600,6 +617,33 @@ namespace schrader
             }
         }
 
+        private static string BuildWinningHeadline(MatchResultMessage state)
+        {
+            if (state == null)
+            {
+                return string.Empty;
+            }
+
+            var winner = FormatWinningTeam(state.WinningTeam);
+            if (string.IsNullOrWhiteSpace(winner))
+            {
+                return "RESULTS READY";
+            }
+
+            var redGoals = CountTeamGoals(state, TeamResult.Red);
+            var blueGoals = CountTeamGoals(state, TeamResult.Blue);
+            return redGoals > 0 || blueGoals > 0
+                ? $"{winner}  ·  {redGoals} - {blueGoals}"
+                : winner;
+        }
+
+        private static int CountTeamGoals(MatchResultMessage state, TeamResult team)
+        {
+            return (state?.Players ?? Array.Empty<MatchResultPlayerMessage>())
+                .Where(player => player != null && player.Team == team)
+                .Sum(player => Mathf.Max(0, player.Goals));
+        }
+
         private static string FormatTeamName(TeamResult team)
         {
             switch (team)
@@ -618,9 +662,49 @@ namespace schrader
             return $"G {player?.Goals ?? 0}   A {player?.Assists ?? 0}   S {player?.Saves ?? 0}   SH {player?.Shots ?? 0}";
         }
 
+        private static string FormatRatingDelta(MatchResultPlayerMessage player)
+        {
+            if (player != null && player.ExcludedFromMmr)
+            {
+                return "SG";
+            }
+
+            return FormatMmrDelta(player?.MmrDelta ?? 0);
+        }
+
+        private static string FormatDetailedRatingSummary(MatchResultPlayerMessage player)
+        {
+            if (player != null && player.ExcludedFromMmr)
+            {
+                return "Shared Goalie • Unrated";
+            }
+
+            return $"MMR {player?.MmrBefore ?? 0} → {player?.MmrAfter ?? 0}";
+        }
+
+        private static string FormatCompactRatingSummary(MatchResultPlayerMessage player)
+        {
+            if (player != null && player.ExcludedFromMmr)
+            {
+                return "Unrated";
+            }
+
+            return $"{player?.MmrAfter ?? 0} MMR";
+        }
+
         private static string FormatMmrDelta(int delta)
         {
             return delta > 0 ? $"+{delta}" : delta.ToString();
+        }
+
+        private static Color RatingDeltaColor(MatchResultPlayerMessage player)
+        {
+            if (player != null && player.ExcludedFromMmr)
+            {
+                return new Color(0.98f, 0.84f, 0.44f, 1f);
+            }
+
+            return DeltaColor(player?.MmrDelta ?? 0);
         }
 
         private static Color DeltaColor(int delta)
@@ -636,6 +720,14 @@ namespace schrader
             }
 
             return new Color(0.85f, 0.89f, 0.95f, 1f);
+        }
+
+        private static VisualElement CreateSharedGoalieBadge(int fontSize)
+        {
+            var badge = CreatePillLabel("SG", fontSize, FontStyle.Bold, TextAnchor.MiddleCenter, new Color(0.22f, 0.16f, 0.05f, 1f));
+            ApplyPillVisual(badge, new Color(0.98f, 0.84f, 0.44f, 0.98f), new Color(0.22f, 0.16f, 0.05f, 1f));
+            badge.style.marginLeft = new StyleLength(new Length(8, LengthUnit.Pixel));
+            return badge;
         }
 
         private static Color TeamPanelColor(TeamResult team)
@@ -702,20 +794,23 @@ namespace schrader
                 frame.style.borderLeftColor = new StyleColor(new Color(1f, 1f, 1f, emphasize ? 0.10f : 0.08f));
                 frame.style.overflow = Overflow.Hidden;
 
-                BindAvatarFrameContent(frame, player?.Id, player?.Username, size >= 52 ? 20 : 12);
+                BindAvatarFrameContent(frame, player?.SteamId, player?.Id, player?.Username, size >= 52 ? 20 : 12);
                 return frame;
             }
 
-            private static void BindAvatarFrameContent(VisualElement frame, string playerId, string username, int fontSize)
+            private static void BindAvatarFrameContent(VisualElement frame, string steamId, string playerId, string username, int fontSize)
             {
-                var avatarSteamId = ResolveAvatarSteamId(playerId);
+                var avatarSteamId = ResolveAvatarSteamId(steamId) ?? ResolveAvatarSteamId(playerId);
+                Debug.Log($"[AVATAR] UI bind request. context=postmatch requested={avatarSteamId ?? "none"} steamField={steamId ?? "none"} playerId={playerId ?? "none"}");
                 if (TryApplyAvatarFrameContent(frame, avatarSteamId, username, fontSize))
                 {
+                    Debug.Log($"[AVATAR] UI bind success. context=postmatch steamId={avatarSteamId ?? "none"} attempts=0");
                     return;
                 }
 
                 if (string.IsNullOrEmpty(avatarSteamId))
                 {
+                    Debug.LogWarning($"[AVATAR] UI bind failed. context=postmatch reason=missing-steam-id username={username ?? "?"}");
                     return;
                 }
 
@@ -730,11 +825,15 @@ namespace schrader
                     }
 
                     attempts++;
-                    if (TryApplyAvatarFrameContent(frame, avatarSteamId, username, fontSize) || attempts >= 12)
+                    if (TryApplyAvatarFrameContent(frame, avatarSteamId, username, fontSize) || attempts >= AvatarRefreshMaxAttempts)
                     {
+                        if (frame.panel != null)
+                        {
+                            Debug.Log($"[AVATAR] UI bind {(attempts >= AvatarRefreshMaxAttempts ? "stopped" : "success")}. context=postmatch steamId={avatarSteamId} attempts={attempts}");
+                        }
                         refreshItem.Pause();
                     }
-                }).Every(300);
+                }).Every(AvatarRefreshIntervalMilliseconds);
             }
 
             private static bool TryApplyAvatarFrameContent(VisualElement frame, string avatarSteamId, string username, int fontSize)

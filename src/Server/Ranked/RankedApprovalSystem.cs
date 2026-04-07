@@ -20,7 +20,12 @@ namespace schrader.Server
 
         private static readonly object approvalRequestLock = new object();
         private static readonly object joinStateLock = new object();
+        private const float ApprovalRequestTimeoutSeconds = 15f;
+        private const float ApprovalResultNotificationDurationSeconds = 4.5f;
+        private const float ApprovalRejectCooldownSeconds = 7f;
         private static readonly Dictionary<string, TeamApprovalRequest> pendingTeamApprovalRequests = new Dictionary<string, TeamApprovalRequest>(StringComparer.OrdinalIgnoreCase);
+        private static readonly Dictionary<string, ApprovalRequestNotification> approvalNotificationsByPlayerKey = new Dictionary<string, ApprovalRequestNotification>(StringComparer.OrdinalIgnoreCase);
+        private static readonly Dictionary<string, float> rejectedRequestCooldownEndsAtByPlayerKey = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
         private static readonly Dictionary<string, RankedJoinState> joinStateByPlayerKey = new Dictionary<string, RankedJoinState>(StringComparer.OrdinalIgnoreCase);
         private static readonly Dictionary<string, HashSet<TeamResult>> rejectedLateJoinTeams = new Dictionary<string, HashSet<TeamResult>>(StringComparer.OrdinalIgnoreCase);
         private static int nextApprovalRequestSequence = 1;
@@ -44,6 +49,21 @@ namespace schrader.Server
             public TeamApprovalRequestKind Kind;
             public string TargetCaptainKey;
             public ulong TargetCaptainClientId;
+        }
+
+        private sealed class ApprovalRequestNotification
+        {
+            public string PlayerId;
+            public ulong ClientId;
+            public string RequestId;
+            public string PlayerName;
+            public TeamResult TargetTeam;
+            public TeamResult PreviousTeam;
+            public TeamApprovalRequestKind Kind;
+            public string CaptainName;
+            public ApprovalRequestDisplayStatus Status;
+            public float ExpiresAt;
+            public float CooldownEndsAt;
         }
 
         private static RankedJoinState GetJoinState(string playerKey)
@@ -103,45 +123,62 @@ namespace schrader.Server
         {
             try
             {
-                if (!TryGetCaptainIdentityForClient(clientId, out _, out var captainKey))
+                if (TryGetCaptainIdentityForClient(clientId, out _, out var captainKey))
+                {
+                    TeamApprovalRequest captainRequest;
+                    int queueLength;
+                    lock (approvalRequestLock)
+                    {
+                        captainRequest = CloneApprovalRequest(GetNextApprovalRequestForCaptainLocked(captainKey, clientId));
+                        queueLength = CountApprovalRequestsForCaptainLocked(captainKey, clientId);
+                    }
+
+                    if (captainRequest != null)
+                    {
+                        return BuildCaptainApprovalState(captainRequest, queueLength);
+                    }
+                }
+
+                if (clientId != 0)
+                {
+                    TeamApprovalRequest targetedCaptainRequest;
+                    int targetedQueueLength;
+                    lock (approvalRequestLock)
+                    {
+                        targetedCaptainRequest = CloneApprovalRequest(GetNextApprovalRequestForCaptainLocked(null, clientId));
+                        targetedQueueLength = CountApprovalRequestsForCaptainLocked(null, clientId);
+                    }
+
+                    if (targetedCaptainRequest != null)
+                    {
+                        return BuildCaptainApprovalState(targetedCaptainRequest, targetedQueueLength);
+                    }
+                }
+
+                if (!TryGetApprovalPlayerKeyForClient(clientId, out var playerKey))
                 {
                     return ApprovalRequestStateMessage.Hidden();
                 }
 
-                TeamApprovalRequest request;
+                TeamApprovalRequest requesterPendingRequest;
+                ApprovalRequestNotification requesterNotification;
                 lock (approvalRequestLock)
                 {
-                    request = CloneApprovalRequest(GetNextApprovalRequestForCaptainLocked(captainKey, clientId));
+                    requesterPendingRequest = CloneApprovalRequest(GetPendingApprovalRequestForPlayerLocked(playerKey, clientId));
+                    requesterNotification = CloneApprovalRequestNotification(GetApprovalNotificationLocked(playerKey, clientId));
                 }
 
-                if (request == null)
+                if (requesterPendingRequest != null)
                 {
-                    return ApprovalRequestStateMessage.Hidden();
+                    return BuildRequesterPendingState(requesterPendingRequest);
                 }
 
-                var targetTeamText = FormatTeamLabel(request.TargetTeam);
-                var previousTeamText = request.PreviousTeam == TeamResult.Red || request.PreviousTeam == TeamResult.Blue
-                    ? FormatTeamLabel(request.PreviousTeam)
-                    : string.Empty;
-                var promptText = request.Kind == TeamApprovalRequestKind.TeamSwitch
-                    ? $"{request.PlayerName} wants to switch from {previousTeamText} to {targetTeamText}."
-                    : $"{request.PlayerName} wants to join {targetTeamText}.";
-                var footerText = request.Kind == TeamApprovalRequestKind.TeamSwitch
-                    ? "Approve to move the player into the target team and reopen position selection. Reject leaves them on their current team and position."
-                    : "Approve to move the player into the team and open position selection. Reject keeps them out of the match.";
-
-                return new ApprovalRequestStateMessage
+                if (requesterNotification != null)
                 {
-                    IsVisible = true,
-                    RequestId = request.RequestId,
-                    Title = "TEAM APPROVAL REQUIRED",
-                    PlayerName = request.PlayerName,
-                    PromptText = promptText,
-                    TargetTeamName = targetTeamText,
-                    PreviousTeamName = previousTeamText,
-                    IsSwitchRequest = request.Kind == TeamApprovalRequestKind.TeamSwitch,
-                    FooterText = footerText
-                };
+                    return BuildRequesterNotificationState(requesterNotification);
+                }
+
+                return ApprovalRequestStateMessage.Hidden();
             }
             catch
             {
@@ -153,20 +190,43 @@ namespace schrader.Server
         {
             try
             {
-                if (!rankedActive)
-                {
-                    ClearApprovalRequests();
-                    return;
-                }
-
                 List<TeamApprovalRequest> playerDisconnectedRequests = null;
                 List<TeamApprovalRequest> captainUnavailableRequests = null;
+                List<TeamApprovalRequest> expiredRequests = null;
+                List<ApprovalRequestNotification> expiredNotifications = null;
 
                 lock (approvalRequestLock)
                 {
+                    TrimRejectedRequestCooldownsLocked(Time.unscaledTime);
+
+                    foreach (var notification in approvalNotificationsByPlayerKey.Values.ToList())
+                    {
+                        if (notification == null)
+                        {
+                            continue;
+                        }
+
+                        if (notification.ExpiresAt > Time.unscaledTime)
+                        {
+                            continue;
+                        }
+
+                        if (expiredNotifications == null) expiredNotifications = new List<ApprovalRequestNotification>();
+                        expiredNotifications.Add(CloneApprovalRequestNotification(notification));
+                        approvalNotificationsByPlayerKey.Remove(notification.PlayerId);
+                    }
+
                     foreach (var request in pendingTeamApprovalRequests.Values.ToList())
                     {
                         if (request == null) continue;
+
+                        if (GetApprovalSecondsRemaining(request) <= 0f)
+                        {
+                            if (expiredRequests == null) expiredRequests = new List<TeamApprovalRequest>();
+                            expiredRequests.Add(CloneApprovalRequest(request));
+                            pendingTeamApprovalRequests.Remove(request.RequestId);
+                            continue;
+                        }
 
                         if (ShouldAutoApproveTeamSelection(request.TargetTeam, request.PlayerId))
                         {
@@ -192,6 +252,14 @@ namespace schrader.Server
                     }
                 }
 
+                if (expiredRequests != null)
+                {
+                    foreach (var request in expiredRequests)
+                    {
+                        ResolveExpiredRequest(request);
+                    }
+                }
+
                 if (playerDisconnectedRequests != null)
                 {
                     foreach (var request in playerDisconnectedRequests)
@@ -205,6 +273,8 @@ namespace schrader.Server
                 {
                     foreach (var request in captainUnavailableRequests)
                     {
+                        RegisterApprovalNotification(request, ApprovalRequestDisplayStatus.Cancelled, "System");
+
                         if (request.Kind == TeamApprovalRequestKind.TeamSwitch)
                         {
                             SetJoinState(request.PlayerId, RankedJoinState.InTeam);
@@ -222,7 +292,7 @@ namespace schrader.Server
                     }
                 }
 
-                if (playerDisconnectedRequests != null || captainUnavailableRequests != null)
+                if (expiredRequests != null || playerDisconnectedRequests != null || captainUnavailableRequests != null || expiredNotifications != null)
                 {
                     RefreshCaptainApprovalPanels();
                 }
@@ -235,8 +305,10 @@ namespace schrader.Server
             var hadRequests = false;
             lock (approvalRequestLock)
             {
-                hadRequests = pendingTeamApprovalRequests.Count > 0 || rejectedLateJoinTeams.Count > 0;
+                hadRequests = pendingTeamApprovalRequests.Count > 0 || rejectedLateJoinTeams.Count > 0 || approvalNotificationsByPlayerKey.Count > 0;
                 pendingTeamApprovalRequests.Clear();
+                approvalNotificationsByPlayerKey.Clear();
+                rejectedRequestCooldownEndsAtByPlayerKey.Clear();
                 rejectedLateJoinTeams.Clear();
             }
 
@@ -252,7 +324,7 @@ namespace schrader.Server
             {
                 if (!rankedActive || draftActive || draftTeamLockActive) return false;
 
-                var targetTeam = ConvertTeamValue(requestedTeam);
+                var targetTeam = ResolveRequestedTeamSelectionValue(requestedTeam);
                 if (targetTeam != TeamResult.Red && targetTeam != TeamResult.Blue)
                 {
                     if (IsTeamNoneLike(currentTeam))
@@ -264,6 +336,8 @@ namespace schrader.Server
                     return true;
                 }
 
+                Debug.Log($"[{Constants.MOD_NAME}] [JOIN-DEBUG] phase={GetTrackedPhaseName() ?? "unknown"} replayPhase={IsReplayPlaybackPhaseActive().ToString().ToLowerInvariant()} clientId={clientId} current={FormatTeamValue(currentTeam)} requested={FormatTeamValue(requestedTeam)} approvalRequired=true");
+
                 if (TryQueueTeamApprovalRequest(player, clientId, targetTeam))
                 {
                     return true;
@@ -272,6 +346,65 @@ namespace schrader.Server
             catch { }
 
             return false;
+        }
+
+        private static TeamResult ResolveRequestedTeamSelectionValue(object requestedTeam)
+        {
+            if (requestedTeam == null)
+            {
+                return TeamResult.Unknown;
+            }
+
+            try
+            {
+                if (requestedTeam is Enum requestedEnum)
+                {
+                    var enumName = requestedEnum.ToString();
+                    if (!string.IsNullOrWhiteSpace(enumName))
+                    {
+                        var normalizedName = enumName.ToLowerInvariant();
+                        if (normalizedName.Contains("blue")) return TeamResult.Blue;
+                        if (normalizedName.Contains("red")) return TeamResult.Red;
+                        return TeamResult.Unknown;
+                    }
+
+                    var enumNumericValue = Convert.ToInt64(requestedEnum);
+                    if (enumNumericValue == 2L) return TeamResult.Blue;
+                    if (enumNumericValue == 3L) return TeamResult.Red;
+                    return TeamResult.Unknown;
+                }
+
+                if (requestedTeam is int menuIndex)
+                {
+                    if (menuIndex == 0 || menuIndex == 2) return TeamResult.Blue;
+                    if (menuIndex == 1 || menuIndex == 3) return TeamResult.Red;
+                    return TeamResult.Unknown;
+                }
+
+                if (requestedTeam is uint unsignedMenuIndex)
+                {
+                    if (unsignedMenuIndex == 0U || unsignedMenuIndex == 2U) return TeamResult.Blue;
+                    if (unsignedMenuIndex == 1U || unsignedMenuIndex == 3U) return TeamResult.Red;
+                    return TeamResult.Unknown;
+                }
+
+                if (requestedTeam is long longMenuIndex)
+                {
+                    if (longMenuIndex == 0L || longMenuIndex == 2L) return TeamResult.Blue;
+                    if (longMenuIndex == 1L || longMenuIndex == 3L) return TeamResult.Red;
+                    return TeamResult.Unknown;
+                }
+
+                if (requestedTeam is ulong unsignedLongMenuIndex)
+                {
+                    if (unsignedLongMenuIndex == 0UL || unsignedLongMenuIndex == 2UL) return TeamResult.Blue;
+                    if (unsignedLongMenuIndex == 1UL || unsignedLongMenuIndex == 3UL) return TeamResult.Red;
+                    return TeamResult.Unknown;
+                }
+            }
+            catch { }
+
+            return ConvertTeamValue(requestedTeam);
         }
 
         private static TeamResult ResolveEffectiveCurrentTeamForSelection(object player, ulong clientId, object currentTeam)
@@ -351,7 +484,7 @@ namespace schrader.Server
             return false;
         }
 
-        private static bool TryQueueTeamApprovalRequest(object player, ulong clientId, TeamResult targetTeam)
+        private static bool TryQueueTeamApprovalRequest(object player, ulong clientId, TeamResult targetTeam, string explicitCaptainKey = null, ulong explicitCaptainClientId = 0UL, string explicitCaptainName = null, bool allowSelfTargetedCaptainAutoApprove = true)
         {
             if (targetTeam != TeamResult.Red && targetTeam != TeamResult.Blue)
             {
@@ -388,6 +521,18 @@ namespace schrader.Server
                     return true;
                 }
 
+                if (TryGetRejectedRequestCooldownRemaining(playerKey, out var cooldownSecondsRemaining))
+                {
+                    var cooldownMessage = $"<size=13><color=#ffcc66>Ranked</color> Please wait {cooldownSecondsRemaining:0.0}s before sending another team request.</size>";
+                    Debug.Log($"[{Constants.MOD_NAME}] [JOIN][COOLDOWN] blocked requester={playerKey} clientId={snapshot.clientId} remaining={cooldownSecondsRemaining:0.0}s target={FormatTeamLabel(targetTeam)}");
+                    SendSystemChatToClient(cooldownMessage, clientId);
+                    RegisterCooldownNotification(playerKey, snapshot.clientId, requestId: string.Empty, snapshot.displayName ?? $"Player {snapshot.clientId}", targetTeam, currentTeam, isSwitchRequest ? TeamApprovalRequestKind.TeamSwitch : TeamApprovalRequestKind.LateJoin, cooldownSecondsRemaining);
+                    RefreshCaptainApprovalPanels();
+                    return true;
+                }
+
+                ClearApprovalNotification(playerKey);
+
                 TeamApprovalRequest existingRequest;
                 lock (approvalRequestLock)
                 {
@@ -415,6 +560,8 @@ namespace schrader.Server
                     Kind = isSwitchRequest ? TeamApprovalRequestKind.TeamSwitch : TeamApprovalRequestKind.LateJoin
                 };
 
+                Debug.Log($"[{Constants.MOD_NAME}] [JOIN-DEBUG] queueRequest phase={GetTrackedPhaseName() ?? "unknown"} replayPhase={IsReplayPlaybackPhaseActive().ToString().ToLowerInvariant()} player={request.PlayerId} target={FormatTeamLabel(targetTeam)} previous={FormatTeamLabel(currentTeam)} switch={isSwitchRequest.ToString().ToLowerInvariant()}");
+
                 if (ShouldAutoApproveTeamSelection(targetTeam, playerKey))
                 {
                     Debug.Log($"[{Constants.MOD_NAME}] [JOIN] Auto-approving request {request.RequestId} for {request.PlayerName} -> {FormatTeamLabel(targetTeam)} because no other approver is available on that team.");
@@ -423,7 +570,11 @@ namespace schrader.Server
                     return true;
                 }
 
-                if (!TryGetCaptainClientIdForTeam(targetTeam, out var captainClientId, out var captainKey, out var captainName))
+                var captainClientId = explicitCaptainClientId;
+                var captainKey = explicitCaptainKey;
+                var captainName = explicitCaptainName;
+                if ((captainClientId == 0 && string.IsNullOrWhiteSpace(captainKey))
+                    && !TryGetCaptainClientIdForTeam(targetTeam, out captainClientId, out captainKey, out captainName))
                 {
                     SetJoinState(playerKey, isSwitchRequest ? RankedJoinState.InTeam : RankedJoinState.Idle);
                     if (!isSwitchRequest)
@@ -435,7 +586,7 @@ namespace schrader.Server
                     return true;
                 }
 
-                if (string.Equals(captainKey, playerKey, StringComparison.OrdinalIgnoreCase))
+                if (allowSelfTargetedCaptainAutoApprove && string.Equals(captainKey, playerKey, StringComparison.OrdinalIgnoreCase))
                 {
                     Debug.Log($"[{Constants.MOD_NAME}] [JOIN] Auto-approving self-owned captain request {request.RequestId} for {snapshot.displayName} ({playerKey}) targeting {FormatTeamLabel(targetTeam)}.");
                     ResolveApprovedRequest(CloneApprovalRequest(request), null);
@@ -480,6 +631,7 @@ namespace schrader.Server
                 }
 
                 var requestLabel = isSameTeamRequest ? "rejoin" : isSwitchRequest ? "switch" : "join";
+                Debug.Log($"[{Constants.MOD_NAME}] [JOIN][COOLDOWN] accepted requester={playerKey} clientId={snapshot.clientId} target={FormatTeamLabel(targetTeam)} cooldownExpired=true");
                 SendSystemChatToClient($"<size=13><color=#66ccff>Ranked</color> {requestLabel} request sent to {FormatTeamLabel(targetTeam)} captain.</size>", clientId);
                 SendSystemChatToClient($"<size=13><color=#ffcc66>Ranked</color> {request.PlayerName} wants to {(isSameTeamRequest ? $"re-enter {FormatTeamLabel(targetTeam)}" : isSwitchRequest ? $"switch into {FormatTeamLabel(targetTeam)}" : $"join {FormatTeamLabel(targetTeam)}")}. Use the approval popup.</size>", captainClientId);
                 Debug.Log($"[{Constants.MOD_NAME}] [JOIN] Sent to captain {captainName ?? captainKey ?? "unknown"}: request {request.RequestId} for {request.PlayerName} -> {FormatTeamLabel(targetTeam)}.");
@@ -553,10 +705,25 @@ namespace schrader.Server
         {
             try
             {
-                if (!rankedActive || draftActive)
+                if (draftActive)
                 {
                     SendSystemChatToClient("<size=13><color=#ffcc66>Ranked</color> there is no active approval flow right now.</size>", clientId);
                     return;
+                }
+
+                if (!rankedActive)
+                {
+                    TeamApprovalRequest targetedRequest;
+                    lock (approvalRequestLock)
+                    {
+                        targetedRequest = GetNextApprovalRequestForCaptainLocked(null, clientId);
+                    }
+
+                    if (targetedRequest == null)
+                    {
+                        SendSystemChatToClient("<size=13><color=#ffcc66>Ranked</color> there is no active approval flow right now.</size>", clientId);
+                        return;
+                    }
                 }
 
                 if (string.IsNullOrWhiteSpace(requestId))
@@ -568,7 +735,8 @@ namespace schrader.Server
                 EnsureValidCaptainAssignments(publishOverlayState: false, refreshApprovalPanels: false);
 
                 var actorKey = GetPlayerKey(player, clientId);
-                if (!TryGetCaptainTeam(actorKey, out _))
+                var isOfficialCaptain = TryGetCaptainTeam(actorKey, out _);
+                if (!isOfficialCaptain && clientId == 0)
                 {
                     SendSystemChatToClient("<size=13><color=#ff6666>Ranked</color> only team captains can approve or reject requests.</size>", clientId);
                     return;
@@ -638,6 +806,7 @@ namespace schrader.Server
                     SendSystemChatToClient($"<size=13><color=#ff6666>Ranked</color> approval failed. Your state was left unchanged.</size>", request.ClientId);
                 }
 
+                RegisterApprovalNotification(request, ApprovalRequestDisplayStatus.Cancelled, GetCaptainDisplayNameByKey(captainKey) ?? "Captain");
                 SendCaptainChatForRequest(request.TargetTeam, $"<size=13><color=#ff6666>Ranked</color> could not move <b>{request.PlayerName}</b> into {FormatTeamLabel(request.TargetTeam)}. The player was left unchanged.</size>");
                 return;
             }
@@ -661,6 +830,8 @@ namespace schrader.Server
             MergeOrReplaceParticipant(participant, request.TargetTeam);
             ClearRejectedLateJoinState(request.PlayerId);
             SetJoinState(request.PlayerId, RankedJoinState.InTeam);
+            RecordApprovedLateJoinForCurrentMatch(request);
+            PublishScoreboardStarState();
 
             var captainName = string.IsNullOrWhiteSpace(captainKey)
                 ? "System"
@@ -670,6 +841,7 @@ namespace schrader.Server
                 SendSystemChatToClient($"<size=13><color=#00ff99>Ranked</color> approved for {FormatTeamLabel(request.TargetTeam)}. Select a position to enter the match.</size>", request.ClientId);
             }
 
+            RegisterApprovalNotification(request, ApprovalRequestDisplayStatus.Approved, captainName);
             Debug.Log($"[{Constants.MOD_NAME}] [JOIN] Approved: {request.PlayerName} ({request.PlayerId}) -> {FormatTeamLabel(request.TargetTeam)} by {captainName}.");
             SendSystemChatToAll($"<size=14><color=#ffcc66>Ranked</color> {captainName} approved <b>{request.PlayerName}</b> for {FormatTeamLabel(request.TargetTeam)}.</size>");
         }
@@ -680,6 +852,8 @@ namespace schrader.Server
 
             var captainName = GetCaptainDisplayNameByKey(captainKey) ?? "Captain";
             SetJoinState(request.PlayerId, RankedJoinState.Rejected);
+            StartRejectedRequestCooldown(request);
+            RegisterApprovalNotification(request, ApprovalRequestDisplayStatus.Rejected, captainName);
             if (request.Kind == TeamApprovalRequestKind.TeamSwitch)
             {
                 EnsureRejectedSwitchState(request);
@@ -1040,9 +1214,15 @@ namespace schrader.Server
             {
                 if (clientId != 0 && TryGetPlayerByClientId(clientId, out var playerByClientId) && playerByClientId != null)
                 {
+                    var resolvedKey = ResolvePlayerObjectKey(playerByClientId, clientId) ?? playerKey;
+                    if (ShouldIgnoreTransientTeamHookPlayer(playerByClientId, clientId, resolvedKey))
+                    {
+                        return false;
+                    }
+
                     player = playerByClientId;
                     resolvedClientId = clientId;
-                    resolvedPlayerKey = ResolvePlayerObjectKey(playerByClientId, clientId) ?? playerKey;
+                    resolvedPlayerKey = resolvedKey;
                     return true;
                 }
 
@@ -1052,6 +1232,13 @@ namespace schrader.Server
                     if (candidate == null) continue;
                     var candidateKey = ResolvePlayerObjectKey(candidate, 0UL);
                     var candidateStoredKey = TryGetPlayerId(candidate, 0UL);
+                    ulong candidateClientId = 0;
+                    TryGetClientId(candidate, out candidateClientId);
+                    if (ShouldIgnoreTransientTeamHookPlayer(candidate, candidateClientId, candidateKey ?? candidateStoredKey))
+                    {
+                        continue;
+                    }
+
                     if (!string.Equals(candidateKey, normalizedKey, StringComparison.OrdinalIgnoreCase)
                         && !string.Equals(candidateStoredKey, normalizedKey, StringComparison.OrdinalIgnoreCase)
                         && !string.Equals(candidateStoredKey, playerKey, StringComparison.OrdinalIgnoreCase))
@@ -1060,7 +1247,7 @@ namespace schrader.Server
                     }
 
                     player = candidate;
-                    TryGetClientId(candidate, out resolvedClientId);
+                    resolvedClientId = candidateClientId;
                     resolvedPlayerKey = candidateKey ?? candidateStoredKey ?? playerKey;
                     return true;
                 }
@@ -1144,6 +1331,16 @@ namespace schrader.Server
 
             try
             {
+                if (request.TargetCaptainClientId != 0 && TryGetPlayerByClientId(request.TargetCaptainClientId, out var targetedCaptainPlayer) && targetedCaptainPlayer != null)
+                {
+                    clientId = request.TargetCaptainClientId;
+                    captainKey = !string.IsNullOrWhiteSpace(request.TargetCaptainKey)
+                        ? request.TargetCaptainKey
+                        : GetPlayerKey(targetedCaptainPlayer, request.TargetCaptainClientId);
+                    request.TargetCaptainKey = captainKey;
+                    return true;
+                }
+
                 if (TryGetCaptainClientIdForTeam(request.TargetTeam, out var currentCaptainClientId, out var currentCaptainKey, out _))
                 {
                     if (!controlledTestModeEnabled && (IsDummyKey(currentCaptainKey) || BotManager.IsBotKey(currentCaptainKey)))
@@ -1190,6 +1387,30 @@ namespace schrader.Server
                 .FirstOrDefault();
         }
 
+        private static TeamApprovalRequest GetPendingApprovalRequestForPlayerLocked(string playerKey, ulong clientId)
+        {
+            return pendingTeamApprovalRequests.Values
+                .Where(request => request != null)
+                .Where(request =>
+                    (!string.IsNullOrWhiteSpace(playerKey)
+                        && !string.IsNullOrWhiteSpace(request.PlayerId)
+                        && string.Equals(request.PlayerId, playerKey, StringComparison.OrdinalIgnoreCase))
+                    || (clientId != 0 && request.ClientId != 0 && request.ClientId == clientId))
+                .OrderBy(request => request.Timestamp)
+                .ThenBy(request => request.RequestId, StringComparer.OrdinalIgnoreCase)
+                .FirstOrDefault();
+        }
+
+        private static int CountApprovalRequestsForCaptainLocked(string captainKey, ulong clientId)
+        {
+            return pendingTeamApprovalRequests.Values.Count(request =>
+                request != null
+                && (((!string.IsNullOrWhiteSpace(captainKey)
+                        && !string.IsNullOrWhiteSpace(request.TargetCaptainKey)
+                        && string.Equals(request.TargetCaptainKey, captainKey, StringComparison.OrdinalIgnoreCase))
+                    || (clientId != 0 && request.TargetCaptainClientId != 0 && request.TargetCaptainClientId == clientId))));
+        }
+
         private static TeamApprovalRequest CloneApprovalRequest(TeamApprovalRequest request)
         {
             if (request == null) return null;
@@ -1207,6 +1428,342 @@ namespace schrader.Server
                 TargetCaptainKey = request.TargetCaptainKey,
                 TargetCaptainClientId = request.TargetCaptainClientId
             };
+        }
+
+        private static ApprovalRequestNotification CloneApprovalRequestNotification(ApprovalRequestNotification notification)
+        {
+            if (notification == null) return null;
+            return new ApprovalRequestNotification
+            {
+                PlayerId = notification.PlayerId,
+                ClientId = notification.ClientId,
+                RequestId = notification.RequestId,
+                PlayerName = notification.PlayerName,
+                TargetTeam = notification.TargetTeam,
+                PreviousTeam = notification.PreviousTeam,
+                Kind = notification.Kind,
+                CaptainName = notification.CaptainName,
+                Status = notification.Status,
+                ExpiresAt = notification.ExpiresAt,
+                CooldownEndsAt = notification.CooldownEndsAt
+            };
+        }
+
+        private static ApprovalRequestNotification GetApprovalNotificationLocked(string playerKey, ulong clientId)
+        {
+            if (!string.IsNullOrWhiteSpace(playerKey)
+                && approvalNotificationsByPlayerKey.TryGetValue(playerKey, out var byPlayerKey)
+                && byPlayerKey != null)
+            {
+                return byPlayerKey;
+            }
+
+            return approvalNotificationsByPlayerKey.Values.FirstOrDefault(notification =>
+                notification != null
+                && clientId != 0
+                && notification.ClientId != 0
+                && notification.ClientId == clientId);
+        }
+
+        private static void RegisterApprovalNotification(TeamApprovalRequest request, ApprovalRequestDisplayStatus status, string captainName)
+        {
+            if (request == null || string.IsNullOrWhiteSpace(request.PlayerId))
+            {
+                return;
+            }
+
+            lock (approvalRequestLock)
+            {
+                approvalNotificationsByPlayerKey[request.PlayerId] = new ApprovalRequestNotification
+                {
+                    PlayerId = request.PlayerId,
+                    ClientId = request.ClientId,
+                    RequestId = request.RequestId,
+                    PlayerName = request.PlayerName,
+                    TargetTeam = request.TargetTeam,
+                    PreviousTeam = request.PreviousTeam,
+                    Kind = request.Kind,
+                    CaptainName = captainName,
+                    Status = status,
+                    ExpiresAt = Time.unscaledTime + ApprovalResultNotificationDurationSeconds,
+                    CooldownEndsAt = 0f
+                };
+            }
+        }
+
+        private static void RegisterCooldownNotification(string playerKey, ulong clientId, string requestId, string playerName, TeamResult targetTeam, TeamResult previousTeam, TeamApprovalRequestKind kind, float cooldownSecondsRemaining)
+        {
+            if (string.IsNullOrWhiteSpace(playerKey))
+            {
+                return;
+            }
+
+            var now = Time.unscaledTime;
+            lock (approvalRequestLock)
+            {
+                approvalNotificationsByPlayerKey[playerKey] = new ApprovalRequestNotification
+                {
+                    PlayerId = playerKey,
+                    ClientId = clientId,
+                    RequestId = requestId,
+                    PlayerName = playerName,
+                    TargetTeam = targetTeam,
+                    PreviousTeam = previousTeam,
+                    Kind = kind,
+                    CaptainName = string.Empty,
+                    Status = ApprovalRequestDisplayStatus.Cooldown,
+                    ExpiresAt = now + ApprovalResultNotificationDurationSeconds,
+                    CooldownEndsAt = now + Mathf.Max(0f, cooldownSecondsRemaining)
+                };
+            }
+        }
+
+        private static void ClearApprovalNotification(string playerKey)
+        {
+            if (string.IsNullOrWhiteSpace(playerKey))
+            {
+                return;
+            }
+
+            lock (approvalRequestLock)
+            {
+                approvalNotificationsByPlayerKey.Remove(playerKey);
+            }
+        }
+
+        private static bool TryGetApprovalPlayerKeyForClient(ulong clientId, out string playerKey)
+        {
+            playerKey = null;
+
+            try
+            {
+                if (clientId == 0 || !TryGetPlayerByClientId(clientId, out var player) || player == null)
+                {
+                    return false;
+                }
+
+                playerKey = GetPlayerKey(player, clientId);
+                return !string.IsNullOrWhiteSpace(playerKey);
+            }
+            catch
+            {
+                playerKey = null;
+                return false;
+            }
+        }
+
+        private static float GetApprovalSecondsRemaining(TeamApprovalRequest request)
+        {
+            if (request == null)
+            {
+                return 0f;
+            }
+
+            return Mathf.Max(0f, ApprovalRequestTimeoutSeconds - (Time.unscaledTime - request.Timestamp));
+        }
+
+        private static bool TryGetRejectedRequestCooldownRemaining(string playerKey, out float remainingSeconds)
+        {
+            remainingSeconds = 0f;
+            if (string.IsNullOrWhiteSpace(playerKey))
+            {
+                return false;
+            }
+
+            lock (approvalRequestLock)
+            {
+                TrimRejectedRequestCooldownsLocked(Time.unscaledTime);
+                if (!rejectedRequestCooldownEndsAtByPlayerKey.TryGetValue(playerKey, out var cooldownEndsAt))
+                {
+                    return false;
+                }
+
+                remainingSeconds = Mathf.Max(0f, cooldownEndsAt - Time.unscaledTime);
+                return remainingSeconds > 0f;
+            }
+        }
+
+        private static void StartRejectedRequestCooldown(TeamApprovalRequest request)
+        {
+            if (request == null || string.IsNullOrWhiteSpace(request.PlayerId))
+            {
+                return;
+            }
+
+            var cooldownEndsAt = Time.unscaledTime + ApprovalRejectCooldownSeconds;
+            lock (approvalRequestLock)
+            {
+                rejectedRequestCooldownEndsAtByPlayerKey[request.PlayerId] = cooldownEndsAt;
+            }
+
+            Debug.Log($"[{Constants.MOD_NAME}] [JOIN][COOLDOWN] started requester={request.PlayerId} clientId={request.ClientId} requestId={request.RequestId} endsAt={cooldownEndsAt:0.00} duration={ApprovalRejectCooldownSeconds:0.0}s");
+        }
+
+        private static void TrimRejectedRequestCooldownsLocked(float now)
+        {
+            var expiredKeys = rejectedRequestCooldownEndsAtByPlayerKey
+                .Where(entry => entry.Value <= now)
+                .Select(entry => entry.Key)
+                .ToList();
+
+            foreach (var expiredKey in expiredKeys)
+            {
+                rejectedRequestCooldownEndsAtByPlayerKey.Remove(expiredKey);
+            }
+        }
+
+        private static ApprovalRequestStateMessage BuildCaptainApprovalState(TeamApprovalRequest request, int queueLength)
+        {
+            var targetTeamText = FormatTeamLabel(request.TargetTeam);
+            var previousTeamText = request.PreviousTeam == TeamResult.Red || request.PreviousTeam == TeamResult.Blue
+                ? FormatTeamLabel(request.PreviousTeam)
+                : string.Empty;
+            var secondsRemaining = GetApprovalSecondsRemaining(request);
+            var promptText = request.Kind == TeamApprovalRequestKind.TeamSwitch
+                ? $"{request.PlayerName} wants to switch from {previousTeamText} to {targetTeamText}."
+                : $"{request.PlayerName} wants to join {targetTeamText}.";
+            var footerText = queueLength > 1
+                ? $"Oldest request shown first. {queueLength - 1} more request(s) are waiting behind this one."
+                : "Oldest request shown first. Approve opens position select; reject leaves the player's state unchanged.";
+
+            return new ApprovalRequestStateMessage
+            {
+                IsVisible = true,
+                RequestId = request.RequestId,
+                ViewRole = ApprovalRequestViewRole.CaptainDecision,
+                Status = ApprovalRequestDisplayStatus.Pending,
+                Title = "TEAM APPROVAL REQUIRED",
+                PlayerName = request.PlayerName,
+                PromptText = promptText,
+                TargetTeamName = targetTeamText,
+                PreviousTeamName = previousTeamText,
+                IsSwitchRequest = request.Kind == TeamApprovalRequestKind.TeamSwitch,
+                FooterText = footerText,
+                SecondsRemaining = secondsRemaining,
+                QueuePosition = queueLength > 0 ? 1 : 0,
+                QueueLength = Mathf.Max(0, queueLength)
+            };
+        }
+
+        private static ApprovalRequestStateMessage BuildRequesterPendingState(TeamApprovalRequest request)
+        {
+            var targetTeamText = FormatTeamLabel(request.TargetTeam);
+            var previousTeamText = request.PreviousTeam == TeamResult.Red || request.PreviousTeam == TeamResult.Blue
+                ? FormatTeamLabel(request.PreviousTeam)
+                : string.Empty;
+
+            return new ApprovalRequestStateMessage
+            {
+                IsVisible = true,
+                RequestId = request.RequestId,
+                ViewRole = ApprovalRequestViewRole.RequesterStatus,
+                Status = ApprovalRequestDisplayStatus.Pending,
+                Title = request.Kind == TeamApprovalRequestKind.TeamSwitch ? "SWITCH REQUEST SENT" : "JOIN REQUEST SENT",
+                PlayerName = request.PlayerName,
+                PromptText = request.Kind == TeamApprovalRequestKind.TeamSwitch
+                    ? $"Waiting for the {targetTeamText} captain to review your switch from {previousTeamText}."
+                    : $"Waiting for the {targetTeamText} captain to review your join request.",
+                TargetTeamName = targetTeamText,
+                PreviousTeamName = previousTeamText,
+                IsSwitchRequest = request.Kind == TeamApprovalRequestKind.TeamSwitch,
+                FooterText = "You can keep playing while this request is pending.",
+                SecondsRemaining = GetApprovalSecondsRemaining(request),
+                QueuePosition = 0,
+                QueueLength = 0
+            };
+        }
+
+        private static ApprovalRequestStateMessage BuildRequesterNotificationState(ApprovalRequestNotification notification)
+        {
+            var targetTeamText = FormatTeamLabel(notification.TargetTeam);
+            var previousTeamText = notification.PreviousTeam == TeamResult.Red || notification.PreviousTeam == TeamResult.Blue
+                ? FormatTeamLabel(notification.PreviousTeam)
+                : string.Empty;
+            var captainName = string.IsNullOrWhiteSpace(notification.CaptainName) ? "Captain" : notification.CaptainName;
+            string title;
+            string promptText;
+
+            switch (notification.Status)
+            {
+                case ApprovalRequestDisplayStatus.Approved:
+                    title = notification.Kind == TeamApprovalRequestKind.TeamSwitch ? "SWITCH APPROVED" : "JOIN APPROVED";
+                    promptText = notification.Kind == TeamApprovalRequestKind.TeamSwitch
+                        ? $"{captainName} approved your switch to {targetTeamText}."
+                        : $"{captainName} approved your request to join {targetTeamText}.";
+                    break;
+                case ApprovalRequestDisplayStatus.Rejected:
+                    title = notification.Kind == TeamApprovalRequestKind.TeamSwitch ? "SWITCH DENIED" : "JOIN DENIED";
+                    promptText = notification.Kind == TeamApprovalRequestKind.TeamSwitch
+                        ? $"{captainName} rejected your switch request. You remain on {previousTeamText}."
+                        : $"{captainName} rejected your request to join {targetTeamText}.";
+                    break;
+                case ApprovalRequestDisplayStatus.Cooldown:
+                    title = "REQUEST COOLDOWN";
+                    promptText = $"Please wait {Mathf.Max(0f, notification.CooldownEndsAt - Time.unscaledTime):0.0}s before sending another team request.";
+                    break;
+                case ApprovalRequestDisplayStatus.Expired:
+                    title = "REQUEST EXPIRED";
+                    promptText = $"Your request for {targetTeamText} expired before the captain responded.";
+                    break;
+                default:
+                    title = "REQUEST CANCELLED";
+                    promptText = $"Your request for {targetTeamText} was cancelled before it could be completed.";
+                    break;
+            }
+
+            return new ApprovalRequestStateMessage
+            {
+                IsVisible = true,
+                RequestId = notification.RequestId,
+                ViewRole = ApprovalRequestViewRole.RequesterStatus,
+                Status = notification.Status,
+                Title = title,
+                PlayerName = notification.PlayerName,
+                PromptText = promptText,
+                TargetTeamName = targetTeamText,
+                PreviousTeamName = previousTeamText,
+                IsSwitchRequest = notification.Kind == TeamApprovalRequestKind.TeamSwitch,
+                FooterText = "This popup closes automatically.",
+                SecondsRemaining = notification.Status == ApprovalRequestDisplayStatus.Cooldown
+                    ? Mathf.Max(0f, notification.CooldownEndsAt - Time.unscaledTime)
+                    : Mathf.Max(0f, notification.ExpiresAt - Time.unscaledTime),
+                QueuePosition = 0,
+                QueueLength = 0
+            };
+        }
+
+        private static void ResolveExpiredRequest(TeamApprovalRequest request)
+        {
+            if (request == null)
+            {
+                return;
+            }
+
+            RegisterApprovalNotification(request, ApprovalRequestDisplayStatus.Expired, GetCaptainDisplayNameByKey(request.TargetCaptainKey) ?? "Captain");
+
+            if (request.Kind == TeamApprovalRequestKind.TeamSwitch)
+            {
+                EnsureRejectedSwitchState(request);
+                SetJoinState(request.PlayerId, RankedJoinState.InTeam);
+            }
+            else
+            {
+                TryOpenPlayerTeamSelection(request.PlayerId, request.ClientId);
+                SetJoinState(request.PlayerId, RankedJoinState.Idle);
+            }
+
+            if (request.ClientId != 0)
+            {
+                var requesterMessage = request.Kind == TeamApprovalRequestKind.TeamSwitch
+                    ? $"<size=13><color=#ffcc66>Ranked</color> your team change to {FormatTeamLabel(request.TargetTeam)} expired before anyone answered.</size>"
+                    : $"<size=13><color=#ffcc66>Ranked</color> your request to join {FormatTeamLabel(request.TargetTeam)} expired before anyone answered.</size>";
+                SendSystemChatToClient(requesterMessage, request.ClientId);
+            }
+
+            var captainMessage = request.Kind == TeamApprovalRequestKind.TeamSwitch
+                ? $"<size=13><color=#ffcc66>Ranked</color> <b>{request.PlayerName}</b>'s team change request expired.</size>"
+                : $"<size=13><color=#ffcc66>Ranked</color> <b>{request.PlayerName}</b>'s join request expired.</size>";
+            SendCaptainChatForRequest(request.TargetTeam, captainMessage);
         }
 
         private static bool RegisterRejectedLateJoinTeam(string playerId, TeamResult team)
@@ -1242,8 +1799,15 @@ namespace schrader.Server
         {
             try
             {
-                PublishApprovalRequestPanelForTeam(TeamResult.Red);
-                PublishApprovalRequestPanelForTeam(TeamResult.Blue);
+                foreach (var player in GetAllPlayers())
+                {
+                    if (!TryGetClientId(player, out var clientId) || clientId == 0)
+                    {
+                        continue;
+                    }
+
+                    RankedOverlayNetwork.PublishApprovalRequestStateToClient(clientId, GetApprovalRequestStateForClient(clientId));
+                }
             }
             catch { }
         }

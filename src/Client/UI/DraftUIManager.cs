@@ -6,6 +6,7 @@ using HarmonyLib;
 using Unity.Collections;
 using Unity.Netcode;
 using UnityEngine;
+using UnityEngine.InputSystem;
 using UnityEngine.UIElements;
 
 namespace schrader
@@ -61,11 +62,14 @@ namespace schrader
         private static bool localVoteAccepted;
         private static bool localVoteRejected;
         private static float voteStateReceivedAt;
+        private static float approvalStateReceivedAt;
+        private static bool approvalInteractionActive;
         private static string lastVoteRenderSignature;
         private static string lastApprovalRenderSignature;
         private static string lastDraftRenderSignature;
         private static string lastPostMatchRenderSignature;
         private static string lastOverlayTickSignature;
+        private static string lastCursorDebugSignature;
         private static OverlayUiState currentUiState = OverlayUiState.None;
         private static CustomMessagingManager currentMessagingManager;
         private static VoteOverlayStateMessage currentVoteState = VoteOverlayStateMessage.Hidden();
@@ -75,7 +79,7 @@ namespace schrader
         private static MatchResultMessage currentMatchResultState = MatchResultMessage.Hidden();
         private static MatchResultMessage cachedMatchResultState = MatchResultMessage.Hidden();
         private static bool postMatchDismissed;
-        private static bool welcomePendingAcknowledgement = true;
+        private static bool welcomePendingAcknowledgement;
         private static float currentStateEnteredAt = -1f;
         private static float welcomeRequestedAt = -1f;
         private static float lastVisibleMatchResultReceivedAt = -1f;
@@ -277,7 +281,11 @@ namespace schrader
                 return;
             }
 
-            DraftUIPlugin.Log("Local player initialized before team selection; arming welcome flow.");
+            welcomePendingAcknowledgement = true;
+            welcomeRequestedAt = -1f;
+            hasLoggedWelcomeFallback = false;
+            DraftUIPlugin.Log("[CLIENT][JOIN] Local player created. Welcome flow armed with safe gameplay gating.");
+            EnsureMessagingHandlers();
             EnsureViewSetup();
             RefreshUi(forceRefresh: true);
             EnforceGameplayUiPriority();
@@ -308,6 +316,7 @@ namespace schrader
             currentDraftExtendedState = DraftOverlayExtendedMessage.Hidden();
             currentMatchResultState = MatchResultMessage.Hidden();
             cachedMatchResultState = MatchResultMessage.Hidden();
+            ScoreboardStarClientState.Reset();
             suppressVoteUntilHidden = false;
             localVoteAccepted = false;
             localVoteRejected = false;
@@ -316,7 +325,7 @@ namespace schrader
             lastDraftRenderSignature = null;
             lastPostMatchRenderSignature = null;
             postMatchDismissed = false;
-            welcomePendingAcknowledgement = true;
+            welcomePendingAcknowledgement = false;
             currentStateEnteredAt = -1f;
             welcomeRequestedAt = -1f;
             lastVisibleMatchResultReceivedAt = -1f;
@@ -352,6 +361,7 @@ namespace schrader
                 messagingManager.RegisterNamedMessageHandler(RankedOverlayChannels.DraftState, OnDraftStateReceived);
                 messagingManager.RegisterNamedMessageHandler(RankedOverlayChannels.DraftStateExtended, OnDraftExtendedStateReceived);
                 messagingManager.RegisterNamedMessageHandler(RankedOverlayChannels.MatchResult, OnMatchResultReceived);
+                messagingManager.RegisterNamedMessageHandler(RankedOverlayChannels.ScoreboardStars, ScoreboardStarClientState.OnScoreboardStarsReceived);
                 messagingManager.RegisterNamedMessageHandler(RankedOverlayChannels.DiscordInviteOpen, OnDiscordInviteOpenReceived);
                 currentMessagingManager = messagingManager;
                 handlersRegistered = true;
@@ -371,6 +381,7 @@ namespace schrader
                 try { currentMessagingManager.UnregisterNamedMessageHandler(RankedOverlayChannels.DraftState); } catch { }
                 try { currentMessagingManager.UnregisterNamedMessageHandler(RankedOverlayChannels.DraftStateExtended); } catch { }
                 try { currentMessagingManager.UnregisterNamedMessageHandler(RankedOverlayChannels.MatchResult); } catch { }
+                try { currentMessagingManager.UnregisterNamedMessageHandler(RankedOverlayChannels.ScoreboardStars); } catch { }
                 try { currentMessagingManager.UnregisterNamedMessageHandler(RankedOverlayChannels.DiscordInviteOpen); } catch { }
             }
 
@@ -384,8 +395,11 @@ namespace schrader
             {
                 var incomingState = RankedOverlayNetcode.ReadJson<VoteOverlayStateMessage>(ref reader) ?? VoteOverlayStateMessage.Hidden();
                 var preservePostMatch = incomingState.IsVisible && IsPostMatchStateLocked();
+                DraftUIPlugin.Log($"[CLIENT] [VOTE][DEBUG] Vote state received. sender={senderClientId} incomingVisible={incomingState.IsVisible} currentUi={currentUiState} postMatchLock={DescribePostMatchLockState()} welcomePending={welcomePendingAcknowledgement} suppressVoteUntilHidden={suppressVoteUntilHidden}");
                 currentVoteState = preservePostMatch ? VoteOverlayStateMessage.Hidden() : incomingState;
                 voteStateReceivedAt = Time.unscaledTime;
+
+                DraftUIPlugin.Log($"[CLIENT] [VOTE] Vote state received. Visible={incomingState.IsVisible} Eligible={incomingState.EligibleCount} Yes={incomingState.YesVotes} No={incomingState.NoVotes} Required={incomingState.RequiredYesVotes} preservePostMatch={preservePostMatch} welcomePending={welcomePendingAcknowledgement}");
 
                 if (!currentVoteState.IsVisible)
                 {
@@ -402,10 +416,11 @@ namespace schrader
 
                 if (preservePostMatch)
                 {
-                    DraftUIPlugin.Log("Ignoring vote overlay while post-match results are visible.");
+                    DraftUIPlugin.Log($"[CLIENT] [VOTE][DEBUG] Vote overlay suppressed by post-match lock. {DescribePostMatchLockState()}");
                 }
 
                 RefreshUi(forceRefresh: true);
+                DraftUIPlugin.Log($"[CLIENT] [VOTE][DEBUG] Vote processing complete. resultingUi={currentUiState} storedVoteVisible={(currentVoteState?.IsVisible ?? false)} postMatchLock={DescribePostMatchLockState()}");
             }
             catch (Exception ex)
             {
@@ -497,6 +512,10 @@ namespace schrader
                 var incomingState = RankedOverlayNetcode.ReadJson<ApprovalRequestStateMessage>(ref reader) ?? ApprovalRequestStateMessage.Hidden();
                 var preservePostMatch = incomingState.IsVisible && IsPostMatchStateLocked();
                 currentApprovalRequestState = preservePostMatch ? ApprovalRequestStateMessage.Hidden() : incomingState;
+                approvalStateReceivedAt = Time.unscaledTime;
+                approvalInteractionActive = false;
+                SyncApprovalPopupInteractionCursor();
+
                 if (currentApprovalRequestState != null && currentApprovalRequestState.IsVisible)
                 {
                     currentMatchResultState = MatchResultMessage.Hidden();
@@ -508,6 +527,7 @@ namespace schrader
                     DraftUIPlugin.Log("Ignoring approval overlay while post-match results are visible.");
                 }
 
+                LogCursorState("approval-state-received");
                 RefreshUi(forceRefresh: true);
             }
             catch (Exception ex)
@@ -538,11 +558,13 @@ namespace schrader
                     cachedMatchResultState = MatchResultMessage.Hidden();
                     lastVisibleMatchResultReceivedAt = -1f;
                     hasLoggedPostMatchFallback = false;
-                    postMatchDismissed = false;
+                    postMatchDismissed = true;
+                    DraftUIPlugin.Log($"[CLIENT] [POST_MATCH][DEBUG] Hidden post-match payload received. Clearing post-match lock. currentUi={currentUiState}");
                 }
 
                 currentVoteState = VoteOverlayStateMessage.Hidden();
                 currentApprovalRequestState = ApprovalRequestStateMessage.Hidden();
+                approvalInteractionActive = false;
                 currentDraftState = DraftOverlayStateMessage.Hidden();
                 currentDraftExtendedState = DraftOverlayExtendedMessage.Hidden();
                 suppressVoteUntilHidden = false;
@@ -582,6 +604,7 @@ namespace schrader
             EnsureViewSetup();
             EnsureMessagingHandlers();
             SyncInputState();
+            HandleApprovalKeyboardShortcuts();
             RefreshUi(forceRefresh: false);
             TryRecoverApprovedLateJoinHandoff();
             TrackLocalSelectionUiState();
@@ -602,6 +625,12 @@ namespace schrader
             var nextState = ResolveTargetUiState();
             LogOverlayTick(nextState);
             ApplyUiState(nextState, forceRefresh);
+            RenderApprovalPopup(forceRefresh);
+
+            if (nextState == OverlayUiState.None || nextState == OverlayUiState.TeamSelect)
+            {
+                SyncApprovalPopupInteractionCursor();
+            }
 
             if (nextState == OverlayUiState.Draft)
             {
@@ -697,6 +726,16 @@ namespace schrader
                 return OverlayUiState.Draft;
             }
 
+            if (ShouldShowDraftUi())
+            {
+                if (currentVoteState != null && currentVoteState.IsVisible)
+                {
+                    DraftUIPlugin.Log($"[CLIENT] [VOTE] Vote overlay takes priority. welcomePending={welcomePendingAcknowledgement} suppressVoteUntilHidden={suppressVoteUntilHidden}");
+                }
+
+                return OverlayUiState.Draft;
+            }
+
             if (ShouldAwaitWelcomeFlow())
             {
                 if (welcomeRequestedAt < 0f)
@@ -713,11 +752,6 @@ namespace schrader
 
             welcomeRequestedAt = -1f;
             hasLoggedWelcomeFallback = false;
-
-            if (ShouldShowDraftUi())
-            {
-                return OverlayUiState.Draft;
-            }
 
             if (ShouldShowTeamSelectState())
             {
@@ -737,7 +771,6 @@ namespace schrader
         private static bool ShouldShowDraftUi()
         {
             return HasActiveDraftPayload()
-                || (currentApprovalRequestState != null && currentApprovalRequestState.IsVisible)
                 || (currentVoteState != null && currentVoteState.IsVisible && !suppressVoteUntilHidden);
         }
 
@@ -759,10 +792,28 @@ namespace schrader
 
         private static bool IsPostMatchStateLocked()
         {
-            return !postMatchDismissed
-                && (ShouldShowPostMatchUi()
-                    || HasCachedPostMatchResult()
-                    || currentUiState == OverlayUiState.PostMatch);
+            if (postMatchDismissed)
+            {
+                return false;
+            }
+
+            var hasVisiblePostMatchPayload = ShouldShowPostMatchUi() || HasCachedPostMatchResult();
+            if (hasVisiblePostMatchPayload)
+            {
+                return true;
+            }
+
+            if (currentUiState == OverlayUiState.PostMatch)
+            {
+                DraftUIPlugin.Log($"[CLIENT] [POST_MATCH][DEBUG] Ignoring stale PostMatch UI state without visible payload. {DescribePostMatchLockState()}");
+            }
+
+            return false;
+        }
+
+        private static string DescribePostMatchLockState()
+        {
+            return $"dismissed={postMatchDismissed} currentVisible={(currentMatchResultState?.IsVisible ?? false)} cachedVisible={(cachedMatchResultState?.IsVisible ?? false)} currentUi={currentUiState}";
         }
 
         private static bool ShouldShowTeamSelectState()
@@ -779,12 +830,6 @@ namespace schrader
                 return;
             }
 
-            if (currentApprovalRequestState != null && currentApprovalRequestState.IsVisible)
-            {
-                DraftUIRenderer.ShowApproval(view);
-                return;
-            }
-
             DraftUIRenderer.ShowVoting(view);
         }
 
@@ -793,12 +838,6 @@ namespace schrader
             if (HasActiveDraftPayload())
             {
                 RenderDraft(forceRefresh);
-                return;
-            }
-
-            if (currentApprovalRequestState != null && currentApprovalRequestState.IsVisible)
-            {
-                RenderApproval(forceRefresh);
                 return;
             }
 
@@ -842,17 +881,18 @@ namespace schrader
         private static void RenderVoting(bool forceRefresh)
         {
             var secondsRemainingPrecise = Mathf.Max(0f, currentVoteState.SecondsRemainingPrecise - (Time.unscaledTime - voteStateReceivedAt));
+            var renderState = BuildRenderableVoteState(secondsRemainingPrecise);
             var signature = string.Join("|",
-                currentVoteState.Title ?? string.Empty,
-                currentVoteState.PromptText ?? string.Empty,
-                currentVoteState.InitiatorName ?? string.Empty,
-                currentVoteState.YesVotes,
-                currentVoteState.NoVotes,
-                currentVoteState.RequiredYesVotes,
-                currentVoteState.EligibleCount,
-                currentVoteState.VoteDurationSeconds,
-                string.Join(",", (currentVoteState.PlayerEntries ?? Array.Empty<VoteOverlayPlayerEntryMessage>()).Select(BuildVoteEntrySignature)),
-                currentVoteState.FooterText ?? string.Empty,
+                renderState.Title ?? string.Empty,
+                renderState.PromptText ?? string.Empty,
+                renderState.InitiatorName ?? string.Empty,
+                renderState.YesVotes,
+                renderState.NoVotes,
+                renderState.RequiredYesVotes,
+                renderState.EligibleCount,
+                renderState.VoteDurationSeconds,
+                string.Join(",", (renderState.PlayerEntries ?? Array.Empty<VoteOverlayPlayerEntryMessage>()).Select(BuildVoteEntrySignature)),
+                renderState.FooterText ?? string.Empty,
                 localVoteAccepted,
                 localVoteRejected);
             var contentChanged = forceRefresh || !string.Equals(signature, lastVoteRenderSignature, StringComparison.Ordinal);
@@ -862,20 +902,61 @@ namespace schrader
                 lastVoteRenderSignature = signature;
             }
 
-            DraftUIRenderer.RenderVoting(view, currentVoteState, secondsRemainingPrecise, localVoteAccepted, localVoteRejected, contentChanged);
+            DraftUIRenderer.RenderVoting(view, renderState, secondsRemainingPrecise, localVoteAccepted, localVoteRejected, contentChanged);
         }
 
         private static void RenderApproval(bool forceRefresh)
         {
+            RenderApprovalPopup(forceRefresh);
+        }
+
+        private static void RenderApprovalPopup(bool forceRefresh)
+        {
+            if (view == null)
+            {
+                return;
+            }
+
+            if (currentApprovalRequestState == null || !currentApprovalRequestState.IsVisible)
+            {
+                lastApprovalRenderSignature = string.Empty;
+                DraftUIRenderer.SetApprovalPopupVisible(view, false);
+                return;
+            }
+
+            var secondsRemaining = Mathf.Max(0f, currentApprovalRequestState.SecondsRemaining - (Time.unscaledTime - approvalStateReceivedAt));
+            var renderState = new ApprovalRequestStateMessage
+            {
+                IsVisible = currentApprovalRequestState.IsVisible,
+                RequestId = currentApprovalRequestState.RequestId,
+                ViewRole = currentApprovalRequestState.ViewRole,
+                Status = currentApprovalRequestState.Status,
+                Title = currentApprovalRequestState.Title,
+                PlayerName = currentApprovalRequestState.PlayerName,
+                PromptText = currentApprovalRequestState.PromptText,
+                TargetTeamName = currentApprovalRequestState.TargetTeamName,
+                PreviousTeamName = currentApprovalRequestState.PreviousTeamName,
+                IsSwitchRequest = currentApprovalRequestState.IsSwitchRequest,
+                FooterText = currentApprovalRequestState.FooterText,
+                SecondsRemaining = secondsRemaining,
+                QueuePosition = currentApprovalRequestState.QueuePosition,
+                QueueLength = currentApprovalRequestState.QueueLength
+            };
+
             var signature = string.Join("|",
-                currentApprovalRequestState.RequestId ?? string.Empty,
-                currentApprovalRequestState.Title ?? string.Empty,
-                currentApprovalRequestState.PlayerName ?? string.Empty,
-                currentApprovalRequestState.PromptText ?? string.Empty,
-                currentApprovalRequestState.TargetTeamName ?? string.Empty,
-                currentApprovalRequestState.PreviousTeamName ?? string.Empty,
-                currentApprovalRequestState.IsSwitchRequest,
-                currentApprovalRequestState.FooterText ?? string.Empty);
+                renderState.RequestId ?? string.Empty,
+                renderState.ViewRole,
+                renderState.Status,
+                renderState.Title ?? string.Empty,
+                renderState.PlayerName ?? string.Empty,
+                renderState.PromptText ?? string.Empty,
+                renderState.TargetTeamName ?? string.Empty,
+                renderState.PreviousTeamName ?? string.Empty,
+                renderState.IsSwitchRequest,
+                renderState.FooterText ?? string.Empty,
+                Mathf.CeilToInt(secondsRemaining),
+                renderState.QueuePosition,
+                renderState.QueueLength);
 
             if (!forceRefresh && string.Equals(signature, lastApprovalRenderSignature, StringComparison.Ordinal))
             {
@@ -883,7 +964,142 @@ namespace schrader
             }
 
             lastApprovalRenderSignature = signature;
-            DraftUIRenderer.RenderApproval(view, currentApprovalRequestState);
+            DraftUIRenderer.SetApprovalPopupVisible(view, true);
+            DraftUIRenderer.RenderApproval(view, renderState, false);
+        }
+
+        private static bool IsApprovalPopupVisible()
+        {
+            return currentApprovalRequestState != null && currentApprovalRequestState.IsVisible;
+        }
+
+        private static bool CanInteractWithApprovalPopup()
+        {
+            return IsApprovalPopupVisible()
+                && currentApprovalRequestState.ViewRole == ApprovalRequestViewRole.CaptainDecision
+                && currentApprovalRequestState.Status == ApprovalRequestDisplayStatus.Pending;
+        }
+
+        private static bool IsApprovalPopupCaptainPending()
+        {
+            return CanInteractWithApprovalPopup();
+        }
+
+        private static bool IsSelectionUiVisible()
+        {
+            try
+            {
+                var uiManager = UIManager.Instance;
+                if (!uiManager)
+                {
+                    return false;
+                }
+
+                return (uiManager.TeamSelect != null && uiManager.TeamSelect.IsVisible)
+                    || (uiManager.PositionSelect != null && uiManager.PositionSelect.IsVisible);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool IsNativeMouseOwnedByOtherUi()
+        {
+            try
+            {
+                var uiManager = UIManager.Instance;
+                if (!uiManager || !uiManager.isMouseActive)
+                {
+                    return false;
+                }
+
+                if (IsSelectionUiVisible())
+                {
+                    return false;
+                }
+
+                return !UIInputState.isScoreboardOpen
+                    && !ShouldOwnCursor(currentUiState)
+                    && !UIInputState.isApprovalPopupInteractionOpen;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool CanBeginApprovalPopupInteraction()
+        {
+            return false;
+        }
+
+        private static void HandleApprovalKeyboardShortcuts()
+        {
+            if (!CanUseApprovalKeyboardShortcuts())
+            {
+                return;
+            }
+
+            var keyboard = Keyboard.current;
+            if (keyboard == null)
+            {
+                return;
+            }
+
+            if (keyboard.enterKey.wasPressedThisFrame || keyboard.numpadEnterKey.wasPressedThisFrame)
+            {
+                OnApprovalAcceptedClicked();
+                return;
+            }
+
+            if (keyboard.deleteKey.wasPressedThisFrame || keyboard.backspaceKey.wasPressedThisFrame)
+            {
+                OnApprovalRejectedClicked();
+            }
+        }
+
+        private static bool CanUseApprovalKeyboardShortcuts()
+        {
+            return CanInteractWithApprovalPopup()
+                && currentUiState == OverlayUiState.None
+                && !IsSelectionUiVisible();
+        }
+
+        private static bool ShouldApprovalPopupOwnCursor()
+        {
+            return approvalInteractionActive && CanBeginApprovalPopupInteraction();
+        }
+
+        private static void SyncApprovalPopupInteractionCursor()
+        {
+            if (currentUiState == OverlayUiState.Welcome
+                || currentUiState == OverlayUiState.Draft
+                || currentUiState == OverlayUiState.PostMatch)
+            {
+                if (UIInputState.isApprovalPopupInteractionOpen)
+                {
+                    UIInputState.isApprovalPopupInteractionOpen = false;
+                    ReleaseCursor();
+                }
+
+                LogCursorState("approval-overlay-blocked");
+                return;
+            }
+
+            var shouldOwnCursor = ShouldApprovalPopupOwnCursor();
+            var hadOverride = UIInputState.isApprovalPopupInteractionOpen;
+            UIInputState.isApprovalPopupInteractionOpen = shouldOwnCursor;
+            if (shouldOwnCursor)
+            {
+                AcquireCursor(forceResetInputs: !hadOverride);
+            }
+            else if (hadOverride)
+            {
+                ReleaseCursor();
+            }
+
+            LogCursorState("approval-sync");
         }
 
         private static void RenderDraft(bool forceRefresh)
@@ -922,17 +1138,21 @@ namespace schrader
 
         private static DraftOverlayStateMessage GetRenderableDraftState()
         {
+            DraftOverlayStateMessage baseState;
             if (currentDraftState != null && currentDraftState.IsVisible)
             {
-                return currentDraftState;
+                baseState = currentDraftState;
             }
-
-            if (currentDraftExtendedState != null && currentDraftExtendedState.IsVisible)
+            else if (currentDraftExtendedState != null && currentDraftExtendedState.IsVisible)
             {
-                return CreateFallbackDraftStateFromExtended();
+                baseState = CreateFallbackDraftStateFromExtended();
+            }
+            else
+            {
+                baseState = currentDraftState ?? DraftOverlayStateMessage.Hidden();
             }
 
-            return currentDraftState ?? DraftOverlayStateMessage.Hidden();
+            return BuildRenderableDraftState(baseState, currentDraftExtendedState);
         }
 
         private static DraftOverlayStateMessage CreateFallbackDraftStateFromExtended()
@@ -941,7 +1161,7 @@ namespace schrader
             {
                 IsVisible = currentDraftExtendedState != null && currentDraftExtendedState.IsVisible,
                 IsCompleted = false,
-                Title = string.IsNullOrWhiteSpace(currentDraftState?.Title) ? "RANKED MATCH SETUP" : currentDraftState.Title,
+                Title = string.IsNullOrWhiteSpace(currentDraftState?.Title) ? "CAPTAIN DRAFT" : currentDraftState.Title,
                 RedCaptainName = currentDraftState?.RedCaptainName,
                 BlueCaptainName = currentDraftState?.BlueCaptainName,
                 CurrentTurnName = currentDraftState?.CurrentTurnName,
@@ -954,9 +1174,166 @@ namespace schrader
                 PendingLateJoiners = currentDraftState?.PendingLateJoiners ?? Array.Empty<string>(),
                 DummyModeActive = currentDraftState?.DummyModeActive ?? false,
                 FooterText = string.IsNullOrWhiteSpace(currentDraftState?.FooterText)
-                    ? "Draft payload active. Waiting for full state..."
+                    ? "Draft data received. Waiting for the full team view..."
                     : currentDraftState.FooterText
             };
+        }
+
+        private static VoteOverlayStateMessage BuildRenderableVoteState(float secondsRemainingPrecise)
+        {
+            var state = currentVoteState ?? VoteOverlayStateMessage.Hidden();
+            if (!state.IsVisible)
+            {
+                return state;
+            }
+
+            var remainingSeconds = Mathf.Max(0, Mathf.CeilToInt(secondsRemainingPrecise));
+            var remainingYesVotes = Mathf.Max(0, state.RequiredYesVotes - state.YesVotes);
+            var promptText = localVoteAccepted
+                ? "Your vote is locked in as YES. Waiting for the rest of the lobby."
+                : localVoteRejected
+                    ? "Your vote is locked in as NO. Waiting for the rest of the lobby."
+                    : "Vote now with /y or /n, or use the buttons below.";
+            var footerText = localVoteAccepted || localVoteRejected
+                ? $"{remainingSeconds}s left. Need {remainingYesVotes} more yes vote{(remainingYesVotes == 1 ? string.Empty : "s")} to start."
+                : $"Action: /y starts ranked, /n stops it. {remainingSeconds}s left.";
+
+            return new VoteOverlayStateMessage
+            {
+                IsVisible = state.IsVisible,
+                Title = "RANKED MATCH STARTING VOTE",
+                PromptText = promptText,
+                InitiatorName = state.InitiatorName,
+                SecondsRemaining = state.SecondsRemaining,
+                SecondsRemainingPrecise = state.SecondsRemainingPrecise,
+                VoteDurationSeconds = state.VoteDurationSeconds,
+                EligibleCount = state.EligibleCount,
+                YesVotes = state.YesVotes,
+                NoVotes = state.NoVotes,
+                RequiredYesVotes = state.RequiredYesVotes,
+                FooterText = footerText,
+                PlayerEntries = state.PlayerEntries ?? Array.Empty<VoteOverlayPlayerEntryMessage>()
+            };
+        }
+
+        private static DraftOverlayStateMessage BuildRenderableDraftState(DraftOverlayStateMessage state, DraftOverlayExtendedMessage extendedState)
+        {
+            state = state ?? DraftOverlayStateMessage.Hidden();
+            ResolveDraftTurnContext(state, extendedState, out var isLocalTurn, out _);
+
+            return new DraftOverlayStateMessage
+            {
+                IsVisible = state.IsVisible,
+                IsCompleted = state.IsCompleted,
+                Title = state.IsCompleted ? "TEAMS LOCKED" : "CAPTAIN DRAFT",
+                RedCaptainName = state.RedCaptainName,
+                BlueCaptainName = state.BlueCaptainName,
+                CurrentTurnName = state.CurrentTurnName,
+                CurrentTurnClientId = state.CurrentTurnClientId,
+                CurrentTurnSteamId = state.CurrentTurnSteamId,
+                AvailablePlayers = state.AvailablePlayers ?? Array.Empty<string>(),
+                RedPlayers = state.RedPlayers ?? Array.Empty<string>(),
+                BluePlayers = state.BluePlayers ?? Array.Empty<string>(),
+                PendingLateJoinerCount = state.PendingLateJoinerCount,
+                PendingLateJoiners = state.PendingLateJoiners ?? Array.Empty<string>(),
+                DummyModeActive = state.DummyModeActive,
+                FooterText = BuildDraftFooterText(state, extendedState, isLocalTurn)
+            };
+        }
+
+        private static string BuildDraftFooterText(DraftOverlayStateMessage state, DraftOverlayExtendedMessage extendedState, bool isLocalTurn)
+        {
+            if (state == null)
+            {
+                return string.Empty;
+            }
+
+            if (state.IsCompleted)
+            {
+                return "Final teams are set. Match start is next.";
+            }
+
+            var role = ResolveLocalDraftRoleText(extendedState, isLocalTurn);
+            var footerParts = new List<string>();
+            if (!string.IsNullOrWhiteSpace(role))
+            {
+                footerParts.Add(role);
+            }
+
+            if (isLocalTurn)
+            {
+                footerParts.Add("Action: pick 1 player from AVAILABLE PICKS.");
+            }
+            else if (!string.IsNullOrWhiteSpace(state.CurrentTurnName))
+            {
+                footerParts.Add($"Current captain: {NormalizeDraftName(state.CurrentTurnName)}.");
+            }
+            else
+            {
+                footerParts.Add("Waiting for the next captain turn.");
+            }
+
+            var pendingCount = Mathf.Max(state.PendingLateJoinerCount, extendedState?.PendingLateJoinerEntries?.Length ?? 0);
+            if (pendingCount > 0)
+            {
+                footerParts.Add($"Late join requests: {pendingCount}.");
+            }
+
+            return string.Join("  ", footerParts.Where(part => !string.IsNullOrWhiteSpace(part)));
+        }
+
+        private static string ResolveLocalDraftRoleText(DraftOverlayExtendedMessage extendedState, bool isLocalTurn)
+        {
+            if (TryFindLocalDraftEntry(extendedState?.RedPlayerEntries, out var redEntry))
+            {
+                return redEntry.IsCaptain ? "Role: Red captain" : "Role: Red team player";
+            }
+
+            if (TryFindLocalDraftEntry(extendedState?.BluePlayerEntries, out var blueEntry))
+            {
+                return blueEntry.IsCaptain ? "Role: Blue captain" : "Role: Blue team player";
+            }
+
+            if (TryFindLocalDraftEntry(extendedState?.PendingLateJoinerEntries, out _))
+            {
+                return "Role: Waiting for captain approval";
+            }
+
+            if (TryFindLocalDraftEntry(extendedState?.AvailablePlayerEntries, out _))
+            {
+                return isLocalTurn ? "Role: Captain on the clock" : "Role: Waiting in the draft pool";
+            }
+
+            return isLocalTurn ? "Role: Captain on the clock" : "Role: Waiting for captains";
+        }
+
+        private static bool TryFindLocalDraftEntry(IEnumerable<DraftOverlayPlayerEntryMessage> entries, out DraftOverlayPlayerEntryMessage localEntry)
+        {
+            localEntry = null;
+            if (entries == null)
+            {
+                return false;
+            }
+
+            var localClientId = NetworkManager.Singleton != null ? NetworkManager.Singleton.LocalClientId : 0UL;
+            string localSteamId = null;
+            if (TryGetLocalPlayer(out var localPlayer))
+            {
+                localSteamId = localPlayer.SteamId.Value.ToString();
+            }
+
+            localEntry = entries.FirstOrDefault(entry =>
+                entry != null
+                && ((localClientId != 0 && entry.ClientId != 0 && entry.ClientId == localClientId)
+                    || (!string.IsNullOrWhiteSpace(localSteamId)
+                        && !string.IsNullOrWhiteSpace(entry.SteamId)
+                        && string.Equals(entry.SteamId, localSteamId, StringComparison.Ordinal))));
+            return localEntry != null;
+        }
+
+        private static string NormalizeDraftName(string displayName)
+        {
+            return string.IsNullOrWhiteSpace(displayName) ? "Captain" : displayName.Trim();
         }
 
         private static void LogOverlayTick(OverlayUiState nextState)
@@ -990,6 +1367,8 @@ namespace schrader
                 .Select(player => string.Join("~",
                     player?.Id ?? string.Empty,
                     player?.Username ?? string.Empty,
+                    player?.IsSharedGoalie ?? false,
+                    player?.ExcludedFromMmr ?? false,
                     player?.Team ?? TeamResult.Unknown,
                     player?.Goals ?? 0,
                     player?.Assists ?? 0,
@@ -1193,7 +1572,10 @@ namespace schrader
         {
             if (!string.IsNullOrWhiteSpace(currentApprovalRequestState?.RequestId))
             {
+                approvalInteractionActive = false;
+                SyncApprovalPopupInteractionCursor();
                 SendChatCommand($"/approve {currentApprovalRequestState.RequestId}");
+                RefreshUi(forceRefresh: true);
             }
         }
 
@@ -1201,7 +1583,10 @@ namespace schrader
         {
             if (!string.IsNullOrWhiteSpace(currentApprovalRequestState?.RequestId))
             {
+                approvalInteractionActive = false;
+                SyncApprovalPopupInteractionCursor();
                 SendChatCommand($"/reject {currentApprovalRequestState.RequestId}");
+                RefreshUi(forceRefresh: true);
             }
         }
 
@@ -1320,7 +1705,8 @@ namespace schrader
 
         private static bool ShouldSuppressGameplaySelectionUi()
         {
-            return ShouldAwaitWelcomeFlow()
+            return ShouldShowWelcomeScreen()
+                || currentUiState == OverlayUiState.Welcome
                 || currentUiState == OverlayUiState.Draft
                 || IsPostMatchStateLocked();
         }
@@ -1470,6 +1856,7 @@ namespace schrader
             hasLoggedWelcomeFallback = false;
             DraftUIPlugin.Log(actionLabel);
             ApplyUiState(OverlayUiState.TeamSelect, forceRefresh: true);
+            RestoreSuppressedGameplayUi();
             RefreshUi(forceRefresh: true);
         }
 
@@ -1627,7 +2014,6 @@ namespace schrader
                 && view?.Container != null
                 && view.Container.style.display == DisplayStyle.Flex
                 && ((view.DraftPanel != null && view.DraftPanel.style.display == DisplayStyle.Flex)
-                    || (view.ApprovalPanel != null && view.ApprovalPanel.style.display == DisplayStyle.Flex)
                     || (view.VotingPanel != null && view.VotingPanel.style.display == DisplayStyle.Flex));
         }
 
@@ -1813,6 +2199,7 @@ namespace schrader
         {
             if (!UIInputState.ShouldCursorBeVisible())
             {
+                LogCursorState("acquire-skipped-hidden");
                 return;
             }
 
@@ -1827,20 +2214,20 @@ namespace schrader
                 UIInputState.Sync(uiManager);
                 if (!UIInputState.isCursorLocked && !forceResetInputs)
                 {
+                    LogCursorState("acquire-skipped-already-unlocked");
                     return;
                 }
 
                 uiManagerShowMouseMethod?.Invoke(uiManager, null);
-                if (forceResetInputs || UIInputState.isCursorLocked)
+                UnityEngine.Cursor.lockState = CursorLockMode.None;
+                UnityEngine.Cursor.visible = true;
+                if (forceResetInputs)
                 {
                     ResetLocalInputs();
                 }
                 UIInputState.Sync(uiManager);
-
-                if (!UIInputState.isCursorLocked)
-                {
-                    DraftUIPlugin.Log("Cursor Unlocked");
-                }
+                UIInputState.isCursorLocked = false;
+                LogCursorState("cursor-acquired");
             }
             catch (Exception ex)
             {
@@ -1852,6 +2239,7 @@ namespace schrader
         {
             if (UIInputState.ShouldCursorBeVisible())
             {
+                LogCursorState("release-skipped-visible-owner");
                 return;
             }
 
@@ -1861,12 +2249,14 @@ namespace schrader
                 if (!uiManager)
                 {
                     UIInputState.isCursorLocked = true;
+                    LogCursorState("release-no-ui-manager");
                     return;
                 }
 
                 UIInputState.Sync(uiManager);
                 if (UIInputState.isCursorLocked)
                 {
+                    LogCursorState("release-noop-already-native");
                     return;
                 }
 
@@ -1880,11 +2270,7 @@ namespace schrader
                 }
 
                 UIInputState.Sync(uiManager);
-
-                if (UIInputState.isCursorLocked)
-                {
-                    DraftUIPlugin.Log("Cursor Locked");
-                }
+                LogCursorState("cursor-released");
             }
             catch (Exception ex)
             {
@@ -1947,8 +2333,11 @@ namespace schrader
                 UIInputState.Sync(uiManager);
                 if (UIInputState.ShouldCursorBeVisible() && UIInputState.isCursorLocked)
                 {
-                    AcquireCursor(forceResetInputs: true);
+                    AcquireCursor(forceResetInputs: false);
+                    return;
                 }
+
+                LogCursorState("cursor-consistency");
             }
             catch (Exception ex)
             {
@@ -1967,13 +2356,147 @@ namespace schrader
             UIInputState.isScoreboardOpen = false;
             SyncInputState();
 
-            if (UIInputState.isDraftUIOpen)
+            var approvalCursorOverrideActive = approvalInteractionActive && UIInputState.isApprovalPopupInteractionOpen;
+
+            if (UIInputState.isDraftUIOpen || UIInputState.isApprovalPopupInteractionOpen)
             {
-                AcquireCursor(forceResetInputs: true);
+                AcquireCursor(forceResetInputs: !approvalCursorOverrideActive);
             }
             else
             {
                 ReleaseCursor();
+            }
+
+            LogCursorState("scoreboard-closed");
+        }
+
+        private static string DescribeCursorContext()
+        {
+            try
+            {
+                var uiManager = UIManager.Instance;
+                var teamSelectVisible = uiManager != null && uiManager.TeamSelect != null && uiManager.TeamSelect.IsVisible;
+                var positionSelectVisible = uiManager != null && uiManager.PositionSelect != null && uiManager.PositionSelect.IsVisible;
+                var nativeMouseActive = uiManager != null && uiManager.isMouseActive;
+
+                if (UIInputState.isApprovalPopupInteractionOpen)
+                {
+                    return "approval-popup-interaction";
+                }
+
+                if (teamSelectVisible || positionSelectVisible)
+                {
+                    return "team-select";
+                }
+
+                if (nativeMouseActive && !UIInputState.isScoreboardOpen && !ShouldOwnCursor(currentUiState))
+                {
+                    return "chat-open-or-native-ui";
+                }
+
+                return "gameplay";
+            }
+            catch
+            {
+                return "unknown";
+            }
+        }
+
+        private static void LogCursorState(string reason)
+        {
+            try
+            {
+                var uiManager = UIManager.Instance;
+                var teamSelectVisible = uiManager != null && uiManager.TeamSelect != null && uiManager.TeamSelect.IsVisible;
+                var positionSelectVisible = uiManager != null && uiManager.PositionSelect != null && uiManager.PositionSelect.IsVisible;
+                var nativeMouseActive = uiManager != null && uiManager.isMouseActive;
+                var popupVisible = currentApprovalRequestState != null && currentApprovalRequestState.IsVisible;
+                var captainPending = IsApprovalPopupCaptainPending();
+                var scoreboardSuppressed = approvalInteractionActive && CanBeginApprovalPopupInteraction();
+                var signature = string.Join("|", new[]
+                {
+                    $"popup={popupVisible}",
+                    $"captainPending={captainPending}",
+                    $"tabHeld={approvalInteractionActive}",
+                    $"approvalOverride={UIInputState.isApprovalPopupInteractionOpen}",
+                    $"scoreboardSuppressed={scoreboardSuppressed}",
+                    $"draftCursor={UIInputState.isDraftUIOpen}",
+                    $"scoreboardOpen={UIInputState.isScoreboardOpen}",
+                    $"teamSelect={teamSelectVisible}",
+                    $"positionSelect={positionSelectVisible}",
+                    $"nativeMouseActive={nativeMouseActive}",
+                    $"cursorVisible={UnityEngine.Cursor.visible}",
+                    $"cursorLock={UnityEngine.Cursor.lockState}",
+                    $"context={DescribeCursorContext()}",
+                    $"ui={currentUiState}"
+                });
+
+                if (string.Equals(signature, lastCursorDebugSignature, StringComparison.Ordinal))
+                {
+                    return;
+                }
+
+                lastCursorDebugSignature = signature;
+                DraftUIPlugin.Log($"[CLIENT][CURSOR] {reason} {signature}");
+            }
+            catch (Exception ex)
+            {
+                DraftUIPlugin.LogError($"Failed to log cursor state: {ex}");
+            }
+        }
+
+        [HarmonyPatch(typeof(UIManager), "UpdateMouseVisibility")]
+        public static class UiManagerUpdateMouseVisibilityPatch
+        {
+            [HarmonyPrefix]
+            public static bool Prefix(UIManager __instance)
+            {
+                if (!UIInputState.isApprovalPopupInteractionOpen || !approvalInteractionActive)
+                {
+                    return true;
+                }
+
+                try
+                {
+                    uiManagerShowMouseMethod?.Invoke(__instance, null);
+                    UIInputState.Sync(__instance);
+                    UIInputState.isCursorLocked = false;
+                    LogCursorState("approval-blocked-native-update-mouse-visibility");
+                }
+                catch (Exception ex)
+                {
+                    DraftUIPlugin.LogError($"Failed to suppress native mouse visibility update during approval override: {ex}");
+                }
+
+                return false;
+            }
+        }
+
+        [HarmonyPatch(typeof(UIManager), "HideMouse")]
+        public static class UiManagerHideMousePatch
+        {
+            [HarmonyPrefix]
+            public static bool Prefix(UIManager __instance)
+            {
+                if (!UIInputState.isApprovalPopupInteractionOpen || !approvalInteractionActive)
+                {
+                    return true;
+                }
+
+                try
+                {
+                    uiManagerShowMouseMethod?.Invoke(__instance, null);
+                    UIInputState.Sync(__instance);
+                    UIInputState.isScoreboardOpen = false;
+                    UIInputState.isCursorLocked = false;
+                    LogCursorState("approval-blocked-native-hide-mouse");
+                }
+                catch (Exception ex)
+                {
+                    DraftUIPlugin.LogError($"Failed to suppress native HideMouse during approval override: {ex}");
+                }
+
+                return false;
             }
         }
 
@@ -2002,6 +2525,7 @@ namespace schrader
             [HarmonyPostfix]
             public static void Postfix(UIManager __instance)
             {
+                EnsureMessagingHandlers();
                 TrySetupFromUiManager();
             }
         }
@@ -2032,6 +2556,15 @@ namespace schrader
             [HarmonyPrefix]
             public static bool Prefix()
             {
+                if (CanBeginApprovalPopupInteraction())
+                {
+                    approvalInteractionActive = true;
+                    UIInputState.isScoreboardOpen = false;
+                    SyncApprovalPopupInteractionCursor();
+                    RefreshUi(forceRefresh: true);
+                    return false;
+                }
+
                 if (!IsBlockingGameplayUI())
                 {
                     return true;
@@ -2045,9 +2578,16 @@ namespace schrader
             [HarmonyPostfix]
             public static void Postfix()
             {
+                if (approvalInteractionActive)
+                {
+                    NotifyScoreboardClosed();
+                    return;
+                }
+
                 if (!IsBlockingGameplayUI())
                 {
                     NotifyScoreboardOpened();
+                    ScoreboardStarClientState.RefreshVisibleScoreboard();
                 }
             }
         }
@@ -2055,6 +2595,21 @@ namespace schrader
         [HarmonyPatch(typeof(UIManagerInputs), "OnScoreboardActionCanceled")]
         public static class UiManagerInputsScoreboardCanceledPatch
         {
+            [HarmonyPrefix]
+            public static bool Prefix()
+            {
+                if (!approvalInteractionActive)
+                {
+                    return true;
+                }
+
+                approvalInteractionActive = false;
+                SyncApprovalPopupInteractionCursor();
+                NotifyScoreboardClosed();
+                RefreshUi(forceRefresh: true);
+                return false;
+            }
+
             [HarmonyPostfix]
             public static void Postfix()
             {
@@ -2221,12 +2776,13 @@ namespace schrader
             currentUiState = OverlayUiState.None;
             currentVoteState = VoteOverlayStateMessage.Hidden();
             currentApprovalRequestState = ApprovalRequestStateMessage.Hidden();
+            approvalInteractionActive = false;
             currentDraftState = DraftOverlayStateMessage.Hidden();
             currentDraftExtendedState = DraftOverlayExtendedMessage.Hidden();
             currentMatchResultState = MatchResultMessage.Hidden();
             cachedMatchResultState = MatchResultMessage.Hidden();
             postMatchDismissed = false;
-            welcomePendingAcknowledgement = true;
+            welcomePendingAcknowledgement = false;
             currentStateEnteredAt = -1f;
             welcomeRequestedAt = -1f;
             lastVisibleMatchResultReceivedAt = -1f;

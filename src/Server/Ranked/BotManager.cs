@@ -20,6 +20,8 @@ namespace schrader.Server
             public object PlayerObject;
             public Component PlayerComponent;
             public BotAIController Controller;
+            public BotPlayStyle PlayStyle;
+            public BotGoalieDifficulty GoalieDifficulty;
         }
 
         private static readonly object botLock = new object();
@@ -109,8 +111,46 @@ namespace schrader.Server
 
         internal static RankedParticipant SpawnBot(TeamResult preferredTeam, string requestedName)
         {
+            return SpawnBotInternal(preferredTeam, requestedName, BotPlayStyle.Skater, BotGoalieDifficulty.Normal);
+        }
+
+        internal static RankedParticipant SpawnGoalieBot(TeamResult team, BotGoalieDifficulty difficulty, string requestedName)
+        {
+            if (team != TeamResult.Red && team != TeamResult.Blue) return null;
+            return SpawnBotInternal(team, requestedName, BotPlayStyle.Goalie, difficulty);
+        }
+
+        internal static bool TryGetGoalieBotId(TeamResult team, out string botId)
+        {
+            botId = null;
+            if (team != TeamResult.Red && team != TeamResult.Blue)
+            {
+                return false;
+            }
+
+            lock (botLock)
+            {
+                foreach (var pair in botsById)
+                {
+                    var record = pair.Value;
+                    if (record == null || record.PlayStyle != BotPlayStyle.Goalie || record.Team != team)
+                    {
+                        continue;
+                    }
+
+                    botId = pair.Key;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static RankedParticipant SpawnBotInternal(TeamResult preferredTeam, string requestedName, BotPlayStyle playStyle, BotGoalieDifficulty goalieDifficulty)
+        {
             try
             {
+                if (!RankedSystem.AreSyntheticPlayersAllowed()) return null;
                 if (NetworkManager.Singleton == null || !NetworkManager.Singleton.IsServer) return null;
 
                 var playerManagerType = SpawnManager.FindTypeByName("PlayerManager", "Puck.PlayerManager");
@@ -160,18 +200,37 @@ namespace schrader.Server
                 }
 
                 networkObject.SpawnWithOwnership(ownerClientId, true);
+                Debug.LogWarning($"[{Constants.MOD_NAME}] [ENTITY-SPAWN] Bot player root spawned. reason=SpawnBot botId={botId} requestedName={requestedName ?? "null"} {RankedSystem.DescribePlayerLifecycle(playerComponent, ownerClientId, "bot")}");
 
                 var teamValue = ResolveTeamValue(preferredTeam, allowNeutral: true);
-                var roleValue = ResolveRoleValue();
+                var roleValue = playStyle == BotPlayStyle.Goalie ? ResolveGoalieRoleValue() : ResolveRoleValue();
 
                 TrySetNetworkVariableValue(playerComponent, "Username", botName);
                 TrySetNetworkVariableValue(playerComponent, "Number", 90);
                 if (teamValue != null) TrySetNetworkVariableValue(playerComponent, "Team", teamValue);
                 if (roleValue != null) TrySetNetworkVariableValue(playerComponent, "Role", roleValue);
 
-                var claimedPositionKey = TryClaimOpenPosition(playerComponent, teamValue, roleValue, null, skipGoalie: true);
+                var claimedPositionKey = playStyle == BotPlayStyle.Goalie
+                    ? TryClaimOpenPosition(playerComponent, teamValue, roleValue, null, skipGoalie: false, requireGoaliePosition: true)
+                    : TryClaimOpenPosition(playerComponent, teamValue, roleValue, null, skipGoalie: true);
+                if (string.IsNullOrEmpty(claimedPositionKey))
+                {
+                    claimedPositionKey = TryClaimOpenPosition(playerComponent, teamValue, roleValue, null, skipGoalie: false);
+                }
+
+                if (playStyle == BotPlayStyle.Goalie && roleValue != null)
+                {
+                    TrySetNetworkVariableValue(playerComponent, "Role", roleValue);
+                }
+
                 TrySpawnCharacter(playerComponent, roleValue);
+                Debug.LogWarning($"[{Constants.MOD_NAME}] [ENTITY-SPAWN] Bot character spawn invoked. reason=SpawnBot botId={botId} claimedPosition={claimedPositionKey ?? "none"} {RankedSystem.DescribePlayerLifecycle(playerComponent, ownerClientId, "bot")}");
                 var botController = AttachBotController(playerComponent);
+                if (botController != null)
+                {
+                    if (playStyle == BotPlayStyle.Goalie) botController.ConfigureGoalkeeper(goalieDifficulty);
+                    else botController.ConfigureSkater();
+                }
 
                 var participant = new RankedParticipant
                 {
@@ -193,7 +252,9 @@ namespace schrader.Server
                         LockedPositionKey = claimedPositionKey,
                         PlayerObject = playerComponent,
                         PlayerComponent = playerComponent,
-                        Controller = botController
+                        Controller = botController,
+                        PlayStyle = playStyle,
+                        GoalieDifficulty = goalieDifficulty
                     };
                     botIdByClientId[ownerClientId] = botId;
                 }
@@ -253,7 +314,7 @@ namespace schrader.Server
                 var teamValue = ResolveTeamValue(team, allowNeutral: false);
                 if (teamValue == null) return false;
 
-                var roleValue = ResolveRoleValue();
+                var roleValue = record.PlayStyle == BotPlayStyle.Goalie ? ResolveGoalieRoleValue() : ResolveRoleValue();
                 if (roleValue != null) TrySetNetworkVariableValue(record.PlayerObject, "Role", roleValue);
                 TrySetNetworkVariableValue(record.PlayerObject, "Team", teamValue);
 
@@ -270,7 +331,9 @@ namespace schrader.Server
 
                 CollectClaimedPositionKeys(teamValue, usedPositionKeys);
 
-                var claimedKey = TryClaimOpenPosition(record.PlayerObject, teamValue, roleValue, usedPositionKeys, skipGoalie: true);
+                var claimedKey = record.PlayStyle == BotPlayStyle.Goalie
+                    ? TryClaimOpenPosition(record.PlayerObject, teamValue, roleValue, usedPositionKeys, skipGoalie: false, requireGoaliePosition: true)
+                    : TryClaimOpenPosition(record.PlayerObject, teamValue, roleValue, usedPositionKeys, skipGoalie: true);
                 if (string.IsNullOrEmpty(claimedKey))
                 {
                     claimedKey = TryClaimOpenPosition(record.PlayerObject, teamValue, roleValue, usedPositionKeys, skipGoalie: false);
@@ -278,6 +341,11 @@ namespace schrader.Server
 
                 if (!string.IsNullOrEmpty(claimedKey))
                 {
+                    if (record.PlayStyle == BotPlayStyle.Goalie && roleValue != null)
+                    {
+                        TrySetNetworkVariableValue(record.PlayerObject, "Role", roleValue);
+                    }
+
                     lock (botLock)
                     {
                         record.Team = team;
@@ -307,6 +375,7 @@ namespace schrader.Server
 
             try
             {
+                Debug.LogWarning($"[{Constants.MOD_NAME}] [ENTITY-DESPAWN] Removing bot. reason=RemoveBot botId={botId} {RankedSystem.DescribePlayerLifecycle(record.PlayerObject, record.OwnerClientId, "bot")}");
                 TryRemoveBotController(record);
                 TryDespawnPlayer(record.PlayerObject);
             }
@@ -400,6 +469,29 @@ namespace schrader.Server
             return Enum.Parse(roleType, names.First());
         }
 
+        private static object ResolveGoalieRoleValue()
+        {
+            var roleType = SpawnManager.FindTypeByName("PlayerRole", "Puck.PlayerRole");
+            if (roleType == null || !roleType.IsEnum) return null;
+
+            var names = Enum.GetNames(roleType);
+            foreach (var preferred in new[] { "Goalie", "Goalkeeper", "GK", "Goal" })
+            {
+                var match = names.FirstOrDefault(name => string.Equals(name, preferred, StringComparison.OrdinalIgnoreCase));
+                if (!string.IsNullOrEmpty(match)) return Enum.Parse(roleType, match, true);
+            }
+
+            foreach (var name in names)
+            {
+                if (name.IndexOf("goal", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return Enum.Parse(roleType, name, true);
+                }
+            }
+
+            return null;
+        }
+
         private static object ResolveTeamValue(TeamResult team, bool allowNeutral)
         {
             var teamType = SpawnManager.FindTypeByName("PlayerTeam", "Puck.PlayerTeam");
@@ -435,7 +527,7 @@ namespace schrader.Server
             return !string.IsNullOrEmpty(TryClaimOpenPosition(playerObject, teamValue, roleValue, null, skipGoalie: true));
         }
 
-        private static string TryClaimOpenPosition(object playerObject, object teamValue, object roleValue, ISet<string> usedPositionKeys, bool skipGoalie)
+        private static string TryClaimOpenPosition(object playerObject, object teamValue, object roleValue, ISet<string> usedPositionKeys, bool skipGoalie, bool requireGoaliePosition = false)
         {
             try
             {
@@ -477,7 +569,9 @@ namespace schrader.Server
                         }
                     }
 
-                    if (skipGoalie && IsGoaliePosition(position)) continue;
+                    var isGoaliePosition = IsGoaliePosition(position);
+                    if (requireGoaliePosition && !isGoaliePosition) continue;
+                    if (skipGoalie && isGoaliePosition) continue;
 
                     if (roleValue != null)
                     {
@@ -647,9 +741,16 @@ namespace schrader.Server
                 if (nameProp != null)
                 {
                     var nameValue = nameProp.GetValue(position) as string;
-                    if (!string.IsNullOrEmpty(nameValue) && nameValue.IndexOf("goal", StringComparison.OrdinalIgnoreCase) >= 0)
+                    if (!string.IsNullOrEmpty(nameValue))
                     {
-                        return true;
+                        var normalized = nameValue.Trim();
+                        if (normalized.Equals("G", StringComparison.OrdinalIgnoreCase)
+                            || normalized.Equals("GK", StringComparison.OrdinalIgnoreCase)
+                            || normalized.IndexOf("goal", StringComparison.OrdinalIgnoreCase) >= 0
+                            || normalized.IndexOf("keeper", StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            return true;
+                        }
                     }
                 }
             }
@@ -720,6 +821,7 @@ namespace schrader.Server
             try
             {
                 if (playerObject == null) return;
+                Debug.LogWarning($"[{Constants.MOD_NAME}] [ENTITY-DESPAWN] Despawning player object. reason=TryDespawnPlayer {RankedSystem.DescribePlayerLifecycle(playerObject, 0, null)}");
                 var playerType = playerObject.GetType();
 
                 var despawnCharacter = playerType.GetMethod("Server_DespawnCharacter", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);

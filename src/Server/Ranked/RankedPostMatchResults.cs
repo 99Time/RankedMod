@@ -19,6 +19,9 @@ namespace schrader.Server
             public RankedParticipant Participant;
             public MatchResultPlayerMessage Message;
             public int PerformanceScore;
+            public int PerformanceModifier;
+            public bool WasLateJoiner;
+            public bool ExcludedFromMmr;
         }
 
         private sealed class ScoreboardPlayerStatsSnapshot
@@ -39,10 +42,10 @@ namespace schrader.Server
 
         private static MatchResultMessage BuildMatchResultMessage(TeamResult winner)
         {
-            RefreshRankedParticipantsFromLiveState();
+            var finalParticipants = ResolveFinalMatchResultParticipants();
 
             var scoreboardStats = CaptureScoreboardStats();
-            var computations = rankedParticipants
+            var computations = finalParticipants
                 .Where(participant => participant != null)
                 .Select(participant => BuildMatchResultComputation(participant, scoreboardStats, winner))
                 .Where(computation => computation != null)
@@ -74,6 +77,124 @@ namespace schrader.Server
             };
         }
 
+        private static List<RankedParticipant> ResolveFinalMatchResultParticipants()
+        {
+            var finalParticipantsByKey = new Dictionary<string, RankedParticipant>(StringComparer.OrdinalIgnoreCase);
+            var liveKeyByClientId = new Dictionary<ulong, string>();
+
+            foreach (var livePlayer in GetAllPlayers())
+            {
+                if (!TryBuildConnectedPlayerSnapshot(livePlayer, out var liveParticipant) || liveParticipant == null)
+                {
+                    continue;
+                }
+
+                var identityKey = NormalizeResolvedPlayerKey(ResolveParticipantIdToKey(liveParticipant) ?? liveParticipant.playerId);
+                if (string.IsNullOrWhiteSpace(identityKey))
+                {
+                    continue;
+                }
+
+                liveKeyByClientId[liveParticipant.clientId] = identityKey;
+                var previousTeam = ResolveHistoricalParticipantTeamForLogs(identityKey, liveParticipant.clientId);
+                var exists = finalParticipantsByKey.TryGetValue(identityKey, out var existingParticipant);
+                var shouldReplace = !exists || ShouldReplaceFinalMatchResultParticipant(existingParticipant, liveParticipant);
+                Debug.Log($"[{Constants.MOD_NAME}] [POSTMATCH-DEBUG] identity={identityKey} currentTeam={liveParticipant.team} previousTeam={previousTeam} exists={exists.ToString().ToLowerInvariant()} action={(exists ? (shouldReplace ? "replace" : "ignore") : "add")}");
+                if (shouldReplace)
+                {
+                    finalParticipantsByKey[identityKey] = CloneParticipant(liveParticipant);
+                }
+            }
+
+            lock (rankedLock)
+            {
+                foreach (var historicalParticipant in rankedParticipants.Where(participant => participant != null))
+                {
+                    var historicalKey = NormalizeResolvedPlayerKey(ResolveParticipantIdToKey(historicalParticipant) ?? historicalParticipant.playerId);
+                    if (string.IsNullOrWhiteSpace(historicalKey))
+                    {
+                        continue;
+                    }
+
+                    if (historicalParticipant.isDummy || BotManager.IsBotKey(historicalKey) || IsDummyKey(historicalKey))
+                    {
+                        if (!finalParticipantsByKey.ContainsKey(historicalKey))
+                        {
+                            finalParticipantsByKey[historicalKey] = CloneParticipant(historicalParticipant);
+                            Debug.Log($"[{Constants.MOD_NAME}] [POSTMATCH-DEBUG] identity={historicalKey} currentTeam={historicalParticipant.team} previousTeam={historicalParticipant.team} exists=false action=retain-bot");
+                        }
+
+                        continue;
+                    }
+
+                    if (historicalParticipant.clientId != 0 && liveKeyByClientId.TryGetValue(historicalParticipant.clientId, out var reboundKey))
+                    {
+                        if (!string.Equals(historicalKey, reboundKey, StringComparison.OrdinalIgnoreCase))
+                        {
+                            Debug.Log($"[{Constants.MOD_NAME}] [POSTMATCH-DEBUG] identity={historicalKey} currentTeam={historicalParticipant.team} previousTeam={historicalParticipant.team} exists=true action=ignore-rebased replacedBy={reboundKey}");
+                        }
+
+                        continue;
+                    }
+
+                    Debug.Log($"[{Constants.MOD_NAME}] [POSTMATCH-DEBUG] disconnected identity={historicalKey} team={historicalParticipant.team} excludedFromResults=true excludedFromMmr=true");
+                }
+            }
+
+            return OrderParticipantsForDeterminism(finalParticipantsByKey.Values);
+        }
+
+        private static TeamResult ResolveHistoricalParticipantTeamForLogs(string identityKey, ulong clientId)
+        {
+            lock (rankedLock)
+            {
+                foreach (var participant in rankedParticipants.Where(participant => participant != null))
+                {
+                    var participantKey = NormalizeResolvedPlayerKey(ResolveParticipantIdToKey(participant) ?? participant.playerId);
+                    if (!string.IsNullOrWhiteSpace(identityKey)
+                        && !string.IsNullOrWhiteSpace(participantKey)
+                        && string.Equals(participantKey, identityKey, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return participant.team;
+                    }
+
+                    if (clientId != 0 && participant.clientId == clientId)
+                    {
+                        return participant.team;
+                    }
+                }
+            }
+
+            return TeamResult.Unknown;
+        }
+
+        private static bool ShouldReplaceFinalMatchResultParticipant(RankedParticipant existingParticipant, RankedParticipant candidateParticipant)
+        {
+            if (candidateParticipant == null)
+            {
+                return false;
+            }
+
+            if (existingParticipant == null)
+            {
+                return true;
+            }
+
+            var existingIsPlayableTeam = existingParticipant.team == TeamResult.Red || existingParticipant.team == TeamResult.Blue;
+            var candidateIsPlayableTeam = candidateParticipant.team == TeamResult.Red || candidateParticipant.team == TeamResult.Blue;
+            if (candidateIsPlayableTeam != existingIsPlayableTeam)
+            {
+                return candidateIsPlayableTeam;
+            }
+
+            if (existingParticipant.clientId == 0 && candidateParticipant.clientId != 0)
+            {
+                return true;
+            }
+
+            return false;
+        }
+
         private static MatchResultComputation BuildMatchResultComputation(RankedParticipant participant, List<ScoreboardPlayerStatsSnapshot> scoreboardStats, TeamResult winner)
         {
             if (participant == null)
@@ -94,21 +215,33 @@ namespace schrader.Server
             var saves = scoreboard != null && scoreboard.HasSaves ? scoreboard.Saves : 0;
             var shots = scoreboard != null && scoreboard.HasShots ? scoreboard.Shots : 0;
             var username = ResolvePreferredParticipantDisplayName(participant, scoreboard?.DisplayName, resolvedId);
+            var liveSteamId = ResolveParticipantSteamIdForUi(participant, resolvedId);
             var mmrBefore = GetAuthoritativeMmrOrDefault(participant, resolvedId, out var canonicalMmrKey);
             if (!string.IsNullOrWhiteSpace(canonicalMmrKey))
             {
                 resolvedId = canonicalMmrKey;
             }
+            var isSharedGoalie = IsSharedGoalieParticipantForResults(participant, resolvedId);
+            var isGoalieParticipant = isSharedGoalie || IsGoalieParticipantForResults(participant, resolvedId);
+            var excludedFromMmr = isGoalieParticipant;
             var performanceScore = ComputePerformanceScore(goals, assists, saves, shots, team, winner);
+            var wasLateJoiner = WasApprovedLateJoinForCurrentMatch(participant, resolvedId);
+
+            Debug.Log($"[{Constants.MOD_NAME}] [POSTMATCH-DEBUG] resultEntry identity={resolvedId ?? "none"} currentTeam={team} previousTeam={ResolveHistoricalParticipantTeamForLogs(resolvedId, participant.clientId)} steamId={liveSteamId ?? "none"} exists=false");
 
             return new MatchResultComputation
             {
                 Participant = participant,
                 PerformanceScore = performanceScore,
+                WasLateJoiner = wasLateJoiner,
+                ExcludedFromMmr = excludedFromMmr,
                 Message = new MatchResultPlayerMessage
                 {
                     Id = resolvedId,
+                    SteamId = liveSteamId,
                     Username = username,
+                    IsSharedGoalie = isSharedGoalie,
+                    ExcludedFromMmr = excludedFromMmr,
                     Team = team,
                     Goals = goals,
                     Assists = assists,
@@ -418,6 +551,7 @@ namespace schrader.Server
         {
             var teamMvp = (computations ?? new List<MatchResultComputation>())
                 .Where(computation => computation?.Message != null && computation.Message.Team == team)
+                .Where(computation => !computation.Message.ExcludedFromMmr)
                 .OrderByDescending(computation => computation.PerformanceScore)
                 .ThenByDescending(computation => computation.Message.Goals)
                 .ThenByDescending(computation => computation.Message.Assists)
@@ -448,7 +582,7 @@ namespace schrader.Server
                 }
 
                 var participant = computation.Participant;
-                if (participant == null || IsDummyParticipant(participant))
+                if (participant == null || IsDummyParticipant(participant) || computation.ExcludedFromMmr)
                 {
                     computation.Message.MmrAfter = computation.Message.MmrBefore;
                     computation.Message.MmrDelta = 0;
@@ -466,22 +600,24 @@ namespace schrader.Server
                 var didWin = team == winner;
                 var opponentAverageMmr = team == TeamResult.Red ? blueAverageMmr : redAverageMmr;
                 var baseDelta = ComputeBaseMmrDelta(computation.Message.MmrBefore, opponentAverageMmr, didWin);
-                var performanceModifier = ComputePerformanceModifier(computation, computations.Where(item => item?.Message?.Team == team).ToList());
+                var performanceModifier = ComputePerformanceModifier(computation, computations.Where(item => item?.Message?.Team == team && !item.Message.ExcludedFromMmr).ToList());
+                computation.PerformanceModifier = performanceModifier;
                 var requestedDelta = baseDelta + performanceModifier;
-                var appliedDelta = ApplyPersistentMmrDelta(computation.Message.Id, requestedDelta, didWin);
+                var appliedDelta = ApplyPersistentMmrDelta(computation, requestedDelta, didWin);
 
                 computation.Message.MmrDelta = appliedDelta;
                 computation.Message.MmrAfter = computation.Message.MmrBefore + appliedDelta;
             }
 
             SaveMmr();
+            PublishScoreboardStarState();
             Debug.Log($"[{Constants.MOD_NAME}] MMR applied. Winner={winner} Players={computations.Count(computation => computation?.Message != null)}");
         }
 
         private static int GetTeamAverageMmr(IEnumerable<MatchResultComputation> computations, TeamResult team)
         {
             var teamPlayers = (computations ?? Enumerable.Empty<MatchResultComputation>())
-                .Where(computation => computation?.Message != null && computation.Message.Team == team)
+                .Where(computation => computation?.Message != null && computation.Message.Team == team && !computation.Message.ExcludedFromMmr)
                 .Select(computation => computation.Message.MmrBefore)
                 .ToArray();
 
@@ -491,6 +627,45 @@ namespace schrader.Server
             }
 
             return Mathf.RoundToInt((float)teamPlayers.Average());
+        }
+
+        private static bool IsSharedGoalieParticipantForResults(RankedParticipant participant, string resolvedId)
+        {
+            if (!singleGoalieEnabled || participant == null)
+            {
+                return false;
+            }
+
+            var participantKey = NormalizeResolvedPlayerKey(ResolveParticipantIdToKey(participant) ?? participant.playerId ?? resolvedId);
+            var trackedKey = NormalizeResolvedPlayerKey(singleGoaliePlayerKey);
+            if (!string.IsNullOrWhiteSpace(participantKey)
+                && !string.IsNullOrWhiteSpace(trackedKey)
+                && string.Equals(participantKey, trackedKey, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            return participant.clientId != 0 && singleGoaliePlayerClientId != 0 && participant.clientId == singleGoaliePlayerClientId;
+        }
+
+        private static bool IsGoalieParticipantForResults(RankedParticipant participant, string resolvedId)
+        {
+            if (participant == null)
+            {
+                return false;
+            }
+
+            try
+            {
+                if (TryResolveConnectedPlayer(ResolveParticipantIdToKey(participant) ?? participant.playerId ?? resolvedId, participant.clientId, out var player, out _, out _)
+                    && TryIsGoalie(player, out var isGoalie))
+                {
+                    return isGoalie;
+                }
+            }
+            catch { }
+
+            return false;
         }
 
         private static int ComputeBaseMmrDelta(int mmrBefore, int opponentAverageMmr, bool didWin)
@@ -512,12 +687,15 @@ namespace schrader.Server
             return Mathf.Clamp(modifier, -MatchResultPerformanceModifierCap, MatchResultPerformanceModifierCap);
         }
 
-        private static int ApplyPersistentMmrDelta(string resolvedId, int requestedDelta, bool didWin)
+        private static int ApplyPersistentMmrDelta(MatchResultComputation computation, int requestedDelta, bool didWin)
         {
+            var resolvedId = computation?.Message?.Id;
             if (string.IsNullOrWhiteSpace(resolvedId))
             {
                 return 0;
             }
+
+            Debug.Log($"[{Constants.MOD_NAME}] [MMR-DEBUG] identity={resolvedId} team={computation?.Message?.Team} requestedDelta={requestedDelta} didWin={didWin.ToString().ToLowerInvariant()} queued=true");
 
             lock (mmrLock)
             {
@@ -527,8 +705,9 @@ namespace schrader.Server
                     mmrFile.players[resolvedId] = entry;
                 }
 
+                var adjustedDelta = AdjustRequestedDeltaForStarSystem(resolvedId, computation, requestedDelta, didWin);
                 var oldMmr = entry.mmr;
-                var newMmr = Math.Max(0, oldMmr + requestedDelta);
+                var newMmr = Math.Max(0, oldMmr + adjustedDelta);
                 entry.mmr = newMmr;
                 if (didWin)
                 {
@@ -538,9 +717,34 @@ namespace schrader.Server
                 {
                     entry.losses++;
                 }
+
+                UpdateStoredStarsForPlayerKey(resolvedId, didWin, computation?.PerformanceModifier ?? 0, computation?.Message?.IsMVP ?? false, computation?.WasLateJoiner ?? false, MaxStarPoints);
                 entry.lastUpdated = DateTime.UtcNow.ToString("o");
                 return newMmr - oldMmr;
             }
+        }
+
+        private static int AdjustRequestedDeltaForStarSystem(string playerKey, MatchResultComputation computation, int requestedDelta, bool didWin)
+        {
+            if (string.IsNullOrWhiteSpace(playerKey) || didWin || requestedDelta >= 0)
+            {
+                return requestedDelta;
+            }
+
+            var starShield = Mathf.Min(GetStoredStarLevel(playerKey), 3);
+            var performanceShield = computation != null && computation.PerformanceModifier > 0 ? 1 : 0;
+            var mvpShield = computation?.Message?.IsMVP == true ? 1 : 0;
+            var lateJoinShield = computation?.WasLateJoiner == true ? 2 : 0;
+            var totalShield = Mathf.Clamp(starShield + performanceShield + mvpShield + lateJoinShield, 0, MaxLossStarProtection);
+            var adjustedDelta = requestedDelta + totalShield;
+            if (adjustedDelta < 0)
+            {
+                return adjustedDelta;
+            }
+
+            var qualifiesForTinyReverse = GetStoredStarLevel(playerKey) >= 4
+                && (computation?.WasLateJoiner == true || computation?.Message?.IsMVP == true || (computation?.PerformanceModifier ?? 0) >= 2);
+            return qualifiesForTinyReverse ? 1 : 0;
         }
 
         private static int TeamSortOrder(TeamResult team)

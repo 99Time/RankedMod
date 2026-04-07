@@ -6,6 +6,8 @@ namespace schrader.Server
 {
     public static partial class RankedSystem
     {
+        private const ulong ReplayClientIdOffset = 1337UL;
+
         private static List<object> GetAllPlayers()
         {
             var result = new List<object>();
@@ -107,6 +109,173 @@ namespace schrader.Server
             return false;
         }
 
+        private static bool TryConvertToBool(object val, out bool result)
+        {
+            result = false;
+            if (val == null) return false;
+            try
+            {
+                if (val is bool b) { result = b; return true; }
+                if (val is int i) { result = i != 0; return true; }
+                if (val is long l) { result = l != 0; return true; }
+                if (val is uint ui) { result = ui != 0; return true; }
+                if (val is ulong ul) { result = ul != 0; return true; }
+                if (val is string s)
+                {
+                    if (bool.TryParse(s, out var parsedBool))
+                    {
+                        result = parsedBool;
+                        return true;
+                    }
+
+                    if (int.TryParse(s, out var parsedInt))
+                    {
+                        result = parsedInt != 0;
+                        return true;
+                    }
+                }
+
+                var valueProp = val.GetType().GetProperty("Value", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                if (valueProp != null)
+                {
+                    var inner = valueProp.GetValue(val);
+                    if (!ReferenceEquals(inner, val) && TryConvertToBool(inner, out result)) return true;
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static bool HasReplayFlag(object obj, int depth = 0)
+        {
+            if (obj == null || depth > 2)
+            {
+                return false;
+            }
+
+            try
+            {
+                var type = obj.GetType();
+                foreach (var memberName in new[] { "IsReplay", "isReplay", "m_IsReplay" })
+                {
+                    var property = type.GetProperty(memberName, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                    if (property != null)
+                    {
+                        var value = property.GetValue(obj);
+                        if (TryConvertToBool(value, out var replayFlag) && replayFlag)
+                        {
+                            return true;
+                        }
+                    }
+
+                    var field = type.GetField(memberName, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                    if (field != null)
+                    {
+                        var value = field.GetValue(obj);
+                        if (TryConvertToBool(value, out var replayFlag) && replayFlag)
+                        {
+                            return true;
+                        }
+                    }
+                }
+
+                foreach (var ownerName in new[] { "Player", "player" })
+                {
+                    var property = type.GetProperty(ownerName, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                    if (property != null)
+                    {
+                        var nested = property.GetValue(obj);
+                        if (nested != null && !ReferenceEquals(nested, obj) && HasReplayFlag(nested, depth + 1))
+                        {
+                            return true;
+                        }
+                    }
+
+                    var field = type.GetField(ownerName, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                    if (field != null)
+                    {
+                        var nested = field.GetValue(obj);
+                        if (nested != null && !ReferenceEquals(nested, obj) && HasReplayFlag(nested, depth + 1))
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static bool AreEquivalentPlayerObjects(object left, object right)
+        {
+            if (left == null || right == null)
+            {
+                return false;
+            }
+
+            if (ReferenceEquals(left, right))
+            {
+                return true;
+            }
+
+            try
+            {
+                if (TryGetClientId(left, out var leftClientId)
+                    && TryGetClientId(right, out var rightClientId)
+                    && leftClientId != 0
+                    && leftClientId == rightClientId)
+                {
+                    return true;
+                }
+
+                var leftId = TryGetPlayerIdNoFallback(left);
+                var rightId = TryGetPlayerIdNoFallback(right);
+                if (!string.IsNullOrWhiteSpace(leftId) && string.Equals(leftId, rightId, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static bool IsReplayClientId(ulong clientId)
+        {
+            if (clientId == 0 || !TryGetPlayerManager(out var manager) || manager == null)
+            {
+                return false;
+            }
+
+            try
+            {
+                var method = manager.GetType().GetMethod("GetReplayPlayerByClientId", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                if (method == null)
+                {
+                    return false;
+                }
+
+                if (method.Invoke(manager, new object[] { clientId }) != null)
+                {
+                    return true;
+                }
+
+                if (clientId >= ReplayClientIdOffset)
+                {
+                    var sourceClientId = clientId - ReplayClientIdOffset;
+                    if (method.Invoke(manager, new object[] { sourceClientId }) != null)
+                    {
+                        return true;
+                    }
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
         public static string TryGetPlayerId(object player, ulong fallbackClientId)
         {
             var found = TryGetPlayerIdNoFallback(player);
@@ -120,7 +289,7 @@ namespace schrader.Server
             {
                 if (player == null) return null;
                 var t = player.GetType();
-                string[] names = { "SteamId", "steamId", "SteamID", "steamID", "SteamId64", "Steam64Id", "steamID64", "AccountId", "m_SteamId", "Id", "id" };
+                string[] names = { "SteamId", "steamId", "SteamID", "steamID", "SteamId64", "Steam64Id", "steamID64", "m_SteamId" };
                 foreach (var n in names)
                 {
                     var prop = t.GetProperty(n, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
@@ -388,6 +557,7 @@ namespace schrader.Server
                 }
 
                 if (val is bool b) { isGoalie = b; return true; }
+                if (TryConvertToBool(val, out b)) { isGoalie = b; return true; }
             }
 
             string[] roleNames = { "Role", "role", "Position", "position" };
@@ -401,8 +571,173 @@ namespace schrader.Server
                     var field = t.GetField(n, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
                     if (field != null) val = field.GetValue(player);
                 }
-                if (val is string s && s.IndexOf("goal", StringComparison.OrdinalIgnoreCase) >= 0) { isGoalie = true; return true; }
+
+                if (TryValueRepresentsGoalieRole(val))
+                {
+                    isGoalie = true;
+                    return true;
+                }
             }
+
+            if (TryIsGoalieByClaimedPosition(player, out isGoalie))
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool TryValueRepresentsGoalieRole(object value)
+        {
+            if (value == null)
+            {
+                return false;
+            }
+
+            try
+            {
+                if (TryConvertToInt(value, out var numericRole))
+                {
+                    return numericRole == 2;
+                }
+
+                var text = ExtractSimpleValueToString(value) ?? value.ToString();
+                if (string.IsNullOrWhiteSpace(text))
+                {
+                    return false;
+                }
+
+                var normalized = text.Trim();
+                if (normalized.Equals("G", StringComparison.OrdinalIgnoreCase)
+                    || normalized.Equals("GK", StringComparison.OrdinalIgnoreCase)
+                    || normalized.IndexOf("goal", StringComparison.OrdinalIgnoreCase) >= 0
+                    || normalized.IndexOf("keeper", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return true;
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static bool TryIsGoalieByClaimedPosition(object player, out bool isGoalie)
+        {
+            isGoalie = false;
+            if (player == null)
+            {
+                return false;
+            }
+
+            try
+            {
+                var ppmType = FindTypeByName("PlayerPositionManager", "Puck.PlayerPositionManager");
+                if (ppmType == null)
+                {
+                    return false;
+                }
+
+                var ppm = GetManagerInstance(ppmType);
+                if (ppm == null)
+                {
+                    return false;
+                }
+
+                var allPositionsProperty = ppmType.GetProperty("AllPositions", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
+                var allPositions = allPositionsProperty?.GetValue(ppm) as System.Collections.IEnumerable;
+                if (allPositions == null)
+                {
+                    return false;
+                }
+
+                foreach (var position in allPositions)
+                {
+                    if (!IsGoaliePosition(position) || !IsPositionClaimedByPlayer(position, player))
+                    {
+                        continue;
+                    }
+
+                    isGoalie = true;
+                    return true;
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static bool IsGoaliePosition(object position)
+        {
+            if (position == null)
+            {
+                return false;
+            }
+
+            try
+            {
+                var posType = position.GetType();
+                var roleValue = posType.GetProperty("Role", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic)?.GetValue(position)
+                    ?? posType.GetField("Role", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic)?.GetValue(position)
+                    ?? posType.GetProperty("role", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic)?.GetValue(position)
+                    ?? posType.GetField("role", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic)?.GetValue(position);
+                if (TryValueRepresentsGoalieRole(roleValue))
+                {
+                    return true;
+                }
+
+                var nameValue = posType.GetProperty("Name", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic)?.GetValue(position)
+                    ?? posType.GetField("Name", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic)?.GetValue(position)
+                    ?? posType.GetProperty("name", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic)?.GetValue(position)
+                    ?? posType.GetField("name", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic)?.GetValue(position);
+                return TryValueRepresentsGoalieRole(nameValue);
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static bool IsPositionClaimedByPlayer(object position, object player)
+        {
+            if (position == null || player == null)
+            {
+                return false;
+            }
+
+            try
+            {
+                var posType = position.GetType();
+                object owner = posType.GetProperty("ClaimedBy", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic)?.GetValue(position)
+                    ?? posType.GetField("ClaimedBy", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic)?.GetValue(position)
+                    ?? posType.GetProperty("claimedBy", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic)?.GetValue(position)
+                    ?? posType.GetField("claimedBy", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic)?.GetValue(position)
+                    ?? posType.GetProperty("Player", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic)?.GetValue(position)
+                    ?? posType.GetField("Player", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic)?.GetValue(position)
+                    ?? posType.GetProperty("player", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic)?.GetValue(position)
+                    ?? posType.GetField("player", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic)?.GetValue(position);
+
+                if (owner == null)
+                {
+                    return false;
+                }
+
+                if (ReferenceEquals(owner, player))
+                {
+                    return true;
+                }
+
+                if (TryGetClientId(owner, out var ownerClientId) && TryGetClientId(player, out var playerClientId) && ownerClientId != 0 && ownerClientId == playerClientId)
+                {
+                    return true;
+                }
+
+                if (owner is Component ownerComponent && player is Component playerComponent)
+                {
+                    return ownerComponent == playerComponent;
+                }
+
+                return AreEquivalentPlayerObjects(owner, player);
+            }
+            catch { }
 
             return false;
         }

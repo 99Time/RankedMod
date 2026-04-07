@@ -24,24 +24,13 @@ namespace schrader.Server
                 if (!TryGetEligiblePlayers(out var liveParticipants, out _)) return;
                 if (liveParticipants == null || liveParticipants.Count == 0) return;
 
-                var merged = new Dictionary<ulong, RankedParticipant>();
-                foreach (var participant in rankedParticipants)
-                {
-                    if (participant == null) continue;
-                    if (participant.clientId == 0) continue;
-                    merged[participant.clientId] = participant;
-                }
-
-                foreach (var participant in liveParticipants)
-                {
-                    if (participant == null) continue;
-                    if (participant.clientId == 0) continue;
-                    merged[participant.clientId] = participant;
-                }
+                var merged = new Dictionary<string, RankedParticipant>(StringComparer.OrdinalIgnoreCase);
+                MergeRankedParticipantsByIdentity(merged, rankedParticipants, false);
+                MergeRankedParticipantsByIdentity(merged, liveParticipants, true);
 
                 if (merged.Count > 0)
                 {
-                    rankedParticipants = merged.Values.ToList();
+                    rankedParticipants = OrderParticipantsForDeterminism(merged.Values.Where(participant => participant != null));
                     lock (draftLock)
                     {
                         foreach (var participant in rankedParticipants)
@@ -57,6 +46,61 @@ namespace schrader.Server
                 }
             }
             catch { }
+        }
+
+        private static void MergeRankedParticipantsByIdentity(Dictionary<string, RankedParticipant> merged, IEnumerable<RankedParticipant> sourceParticipants, bool liveSource)
+        {
+            if (merged == null || sourceParticipants == null)
+            {
+                return;
+            }
+
+            foreach (var participant in sourceParticipants)
+            {
+                if (participant == null)
+                {
+                    continue;
+                }
+
+                var participantKey = ResolveRankedParticipantMergeKey(participant);
+                if (string.IsNullOrWhiteSpace(participantKey))
+                {
+                    continue;
+                }
+
+                if (liveSource
+                    && merged.TryGetValue(participantKey, out var existingParticipant)
+                    && existingParticipant != null
+                    && existingParticipant.clientId != 0
+                    && participant.clientId != 0
+                    && existingParticipant.clientId != participant.clientId)
+                {
+                    Debug.Log($"[{Constants.MOD_NAME}] [RANKED-IDENTITY] Rebinding participant {participantKey} from clientId={existingParticipant.clientId} to clientId={participant.clientId}.");
+                }
+
+                merged[participantKey] = participant;
+            }
+        }
+
+        private static string ResolveRankedParticipantMergeKey(RankedParticipant participant)
+        {
+            if (participant == null)
+            {
+                return null;
+            }
+
+            var resolvedKey = ResolveParticipantIdToKey(participant);
+            if (!string.IsNullOrWhiteSpace(resolvedKey))
+            {
+                return resolvedKey;
+            }
+
+            if (!string.IsNullOrWhiteSpace(participant.playerId))
+            {
+                return ResolveStoredIdToSteam(participant.playerId);
+            }
+
+            return participant.clientId != 0 ? $"clientId:{participant.clientId}" : null;
         }
 
         private static bool TryStartCaptainDraft(List<RankedParticipant> participants, bool forcedByAdmin)
@@ -477,6 +521,7 @@ namespace schrader.Server
         {
             try
             {
+                if (!AreSyntheticPlayersAllowed()) return;
                 if (combinedParticipants == null) return;
                 if (minimumPlayers < 2) minimumPlayers = 2;
 
@@ -498,6 +543,7 @@ namespace schrader.Server
         {
             try
             {
+                if (!AreSyntheticPlayersAllowed()) return null;
                 string captainName;
                 lock (dummyLock)
                 {
@@ -964,7 +1010,9 @@ namespace schrader.Server
             ApplyDraftTeamsToParticipants();
             PruneInvalidLiveRankedParticipants();
             Debug.Log($"[{Constants.MOD_NAME}] [RANKED] Teams finalized.");
+            MarkRankedMatchLiveStarted();
             PublishDraftOverlayState();
+            PublishScoreboardStarState();
             SendDraftTeamSummary();
             SendSystemChatToAll("<size=14><color=#00ff00>Ranked match started.</color></size>");
             Debug.Log($"[{Constants.MOD_NAME}] [RANKED] Starting ranked match directly.");
@@ -1402,6 +1450,9 @@ namespace schrader.Server
             {
                 if (player == null) return false;
                 if (!TryGetClientId(player, out var clientId) || clientId == 0) return false;
+
+                var playerKey = TryGetPlayerIdNoFallback(player);
+                if (ShouldIgnoreTransientTeamHookPlayer(player, clientId, playerKey)) return false;
 
                 var isBotPlayer = BotManager.TryGetBotIdByClientId(clientId, out var botKey);
                 if (isBotPlayer) return false;
@@ -2196,7 +2247,7 @@ namespace schrader.Server
             var resolvedId = ResolveAuthoritativeParticipantKey(sourceParticipant, null, provisionalResolvedId);
             var mmrValue = GetAuthoritativeMmrOrDefault(sourceParticipant, resolvedId, out var canonicalMmrKey);
             var effectiveMmrKey = !string.IsNullOrWhiteSpace(canonicalMmrKey) ? canonicalMmrKey : resolvedId;
-            var liveSteamId = TryResolveLiveSteamMmrKey(sourceParticipant);
+            var liveSteamId = ResolveParticipantSteamIdForUi(sourceParticipant, effectiveMmrKey);
             var displayName = ResolvePreferredParticipantDisplayName(sourceParticipant, null, resolvedId);
             if (string.IsNullOrWhiteSpace(displayName))
             {
@@ -2209,6 +2260,7 @@ namespace schrader.Server
             Debug.Log($"[{Constants.MOD_NAME}] [MMR] Draft authoritative key = {effectiveMmrKey ?? "none"}");
             Debug.Log($"[{Constants.MOD_NAME}] [MMR] Draft JSON hit = {hasJsonHit.ToString().ToLowerInvariant()}");
             Debug.Log($"[{Constants.MOD_NAME}] [MMR] Draft final MMR = {mmrValue}");
+            Debug.Log($"[{Constants.MOD_NAME}] [AVATAR] Draft entry identity={participantKey} steamId={liveSteamId ?? "none"} display={displayName}");
             if (!hasJsonHit && !BotManager.IsBotKey(participantKey))
             {
                 Debug.LogWarning($"[{Constants.MOD_NAME}] [MMR] Missing draft MMR entry for real player key={effectiveMmrKey ?? "none"}");

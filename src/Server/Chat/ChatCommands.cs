@@ -33,6 +33,18 @@ namespace schrader.Server
             if (string.IsNullOrWhiteSpace(message)) return false;
 
             var trimmed = message.Trim();
+            if (trimmed.StartsWith("/dummy ", StringComparison.OrdinalIgnoreCase))
+            {
+                HandleDummyCommand(player, clientId, trimmed.Substring(7).Trim());
+                return true;
+            }
+
+            if (trimmed.StartsWith("/dummygk ", StringComparison.OrdinalIgnoreCase))
+            {
+                HandleDummyGoalkeeperCommand(player, clientId, trimmed.Substring(9).Trim());
+                return true;
+            }
+
             if (trimmed.Equals("/record start", StringComparison.OrdinalIgnoreCase))
             {
                 HandleRecordCommand(player, clientId, true);
@@ -119,6 +131,12 @@ namespace schrader.Server
         {
             try
             {
+                if (!AreSyntheticPlayersAllowed())
+                {
+                    SendSystemChatToClient("<size=14><color=#ff6666>Dummy</color> synthetic players are disabled on this server.</size>", clientId);
+                    return;
+                }
+
                 if (!TryIsAdminInternal(player, clientId))
                 {
                     SendSystemChatToClient("<size=14><color=#ff6666>Dummy</color> permission denied.</size>", clientId);
@@ -164,8 +182,77 @@ namespace schrader.Server
             }
         }
 
+        private static void HandleDummyGoalkeeperCommand(object player, ulong clientId, string rawArguments)
+        {
+            try
+            {
+                if (!AreSyntheticPlayersAllowed())
+                {
+                    SendSystemChatToClient("<size=14><color=#ff6666>Dummy</color> synthetic players are disabled on this server.</size>", clientId);
+                    return;
+                }
+
+                if (!TryIsAdminInternal(player, clientId))
+                {
+                    SendSystemChatToClient("<size=14><color=#ff6666>Dummy</color> permission denied.</size>", clientId);
+                    return;
+                }
+
+                var tokens = (rawArguments ?? string.Empty)
+                    .Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                if (tokens.Length != 2
+                    || !TryParseDummyGoalkeeperTeam(tokens[0], out var team)
+                    || !TryParseDummyGoalkeeperDifficulty(tokens[1], out var difficulty))
+                {
+                    SendSystemChatToClient("<size=14>Usage: /dummygk &lt;red|blue&gt; &lt;easy|normal|hard&gt;</size>", clientId);
+                    return;
+                }
+
+                var replacedExisting = false;
+                if (BotManager.TryGetGoalieBotId(team, out var existingGoalieId))
+                {
+                    replacedExisting = RemoveTrackedBotParticipant(existingGoalieId);
+                }
+
+                var requestedName = team == TeamResult.Red ? "RedGoalie" : "BlueGoalie";
+                var participant = SpawnTrackedGoalkeeperParticipant(team, difficulty, requestedName);
+                if (participant == null)
+                {
+                    SendSystemChatToClient("<size=14><color=#ff6666>Dummy</color> could not spawn the goalkeeper.</size>", clientId);
+                    return;
+                }
+
+                lock (draftLock)
+                {
+                    pendingLateJoiners.Remove(participant.playerId);
+                    announcedLateJoinerIds.Remove(participant.playerId);
+                    draftAvailablePlayerIds.RemoveAll(id => string.Equals(id, participant.playerId, StringComparison.OrdinalIgnoreCase));
+                    draftAssignedTeams[participant.playerId] = team;
+                    draftPreferredPositionKeys.Remove(participant.playerId);
+                }
+
+                MergeOrReplaceParticipant(participant, team);
+                ForceApplyDraftTeam(participant.playerId, team);
+                BotManager.EnsureBotSafePosition(participant.playerId, team, null);
+
+                var difficultyLabel = difficulty.ToString().ToLowerInvariant();
+                var replacementLabel = replacedExisting ? "replaced and respawned" : "spawned";
+                SendSystemChatToAll($"<size=14><color=#ffcc66>Dummy</color> {replacementLabel} {FormatTeamLabel(team)} goalkeeper <b>{participant.displayName}</b> ({difficultyLabel}).</size>");
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[{Constants.MOD_NAME}] HandleDummyGoalkeeperCommand failed: {ex.Message}");
+                SendSystemChatToClient("<size=14><color=#ff6666>Dummy</color> command failed.</size>", clientId);
+            }
+        }
+
         private static RankedParticipant SpawnTrackedBotParticipant(TeamResult team, bool isPendingLateJoiner, string requestedName = null)
         {
+            if (!AreSyntheticPlayersAllowed())
+            {
+                return null;
+            }
+
             if (string.IsNullOrWhiteSpace(requestedName))
             {
                 lock (dummyLock)
@@ -189,6 +276,38 @@ namespace schrader.Server
                     displayName = participant.displayName,
                     team = participant.team,
                     isPendingLateJoiner = isPendingLateJoiner
+                };
+            }
+
+            return participant;
+        }
+
+        private static RankedParticipant SpawnTrackedGoalkeeperParticipant(TeamResult team, BotGoalieDifficulty difficulty, string requestedName = null)
+        {
+            if (!AreSyntheticPlayersAllowed())
+            {
+                return null;
+            }
+
+            if (string.IsNullOrWhiteSpace(requestedName))
+            {
+                requestedName = team == TeamResult.Red ? "RedGoalie" : "BlueGoalie";
+            }
+
+            var participant = BotManager.SpawnGoalieBot(team, difficulty, requestedName);
+            if (participant == null) return null;
+
+            participant.team = team;
+            participant.isDummy = true;
+
+            lock (dummyLock)
+            {
+                activeDraftDummies[participant.playerId] = new DummyPlayer
+                {
+                    dummyId = participant.playerId,
+                    displayName = participant.displayName,
+                    team = participant.team,
+                    isPendingLateJoiner = false
                 };
             }
 
@@ -297,6 +416,29 @@ namespace schrader.Server
             BotManager.RemoveAllBots();
         }
 
+        private static bool RemoveTrackedBotParticipant(string botId)
+        {
+            if (string.IsNullOrWhiteSpace(botId)) return false;
+
+            lock (draftLock)
+            {
+                draftAssignedTeams.Remove(botId);
+                draftPreferredPositionKeys.Remove(botId);
+                pendingLateJoiners.Remove(botId);
+                announcedLateJoinerIds.Remove(botId);
+                draftAvailablePlayerIds.RemoveAll(id => string.Equals(id, botId, StringComparison.OrdinalIgnoreCase));
+                rankedParticipants.RemoveAll(participant => string.Equals(ResolveParticipantIdToKey(participant), botId, StringComparison.OrdinalIgnoreCase));
+            }
+
+            lock (dummyLock)
+            {
+                activeDraftDummies.Remove(botId);
+                queuedDraftDummies.Remove(botId);
+            }
+
+            return BotManager.RemoveBot(botId);
+        }
+
         private static bool IsDummyParticipant(RankedParticipant participant)
         {
             return participant != null && (participant.isDummy || IsDummyKey(participant.playerId));
@@ -379,6 +521,45 @@ namespace schrader.Server
                 }
             }
             return false;
+        }
+
+        private static bool TryParseDummyGoalkeeperTeam(string token, out TeamResult team)
+        {
+            team = TeamResult.Unknown;
+            if (string.IsNullOrWhiteSpace(token)) return false;
+
+            switch (token.Trim().ToLowerInvariant())
+            {
+                case "red":
+                    team = TeamResult.Red;
+                    return true;
+                case "blue":
+                    team = TeamResult.Blue;
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        private static bool TryParseDummyGoalkeeperDifficulty(string token, out BotGoalieDifficulty difficulty)
+        {
+            difficulty = BotGoalieDifficulty.Normal;
+            if (string.IsNullOrWhiteSpace(token)) return false;
+
+            switch (token.Trim().ToLowerInvariant())
+            {
+                case "easy":
+                    difficulty = BotGoalieDifficulty.Easy;
+                    return true;
+                case "normal":
+                    difficulty = BotGoalieDifficulty.Normal;
+                    return true;
+                case "hard":
+                    difficulty = BotGoalieDifficulty.Hard;
+                    return true;
+                default:
+                    return false;
+            }
         }
 
     }

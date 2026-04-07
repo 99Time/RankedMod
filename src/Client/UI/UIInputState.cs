@@ -3,12 +3,13 @@ namespace schrader
     internal static class UIInputState
     {
         public static bool isDraftUIOpen;
+        public static bool isApprovalPopupInteractionOpen;
         public static bool isScoreboardOpen;
         public static bool isCursorLocked = true;
 
         public static bool ShouldCursorBeVisible()
         {
-            return isDraftUIOpen || isScoreboardOpen;
+            return isDraftUIOpen || isApprovalPopupInteractionOpen || isScoreboardOpen;
         }
 
         public static void Sync(UIManager uiManager)
@@ -25,6 +26,7 @@ namespace schrader
         public static void Reset()
         {
             isDraftUIOpen = false;
+            isApprovalPopupInteractionOpen = false;
             isScoreboardOpen = false;
             isCursorLocked = true;
         }

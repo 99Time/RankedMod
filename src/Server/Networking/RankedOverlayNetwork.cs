@@ -9,8 +9,10 @@ namespace schrader
 {
     internal static class RankedOverlayNetwork
     {
+        private const NetworkDelivery VoteStateDelivery = NetworkDelivery.ReliableFragmentedSequenced;
         private const NetworkDelivery MatchResultDelivery = NetworkDelivery.ReliableFragmentedSequenced;
         private const NetworkDelivery DraftExtendedDelivery = NetworkDelivery.ReliableFragmentedSequenced;
+        private const NetworkDelivery ScoreboardStarDelivery = NetworkDelivery.ReliableFragmentedSequenced;
         private static readonly Dictionary<ulong, string> lastApprovalRequestSignatureByClient = new Dictionary<ulong, string>();
         private static string lastDraftSignature;
         private static string lastDraftExtendedSignature;
@@ -55,13 +57,16 @@ namespace schrader
             var signature = BuildVoteSignature(message);
             if (string.Equals(signature, lastVoteSignature, StringComparison.Ordinal)) return;
 
+            LogVotePayloadDiagnostics(message, null, "broadcast");
             lastVoteSignature = signature;
-            Broadcast(RankedOverlayChannels.VoteState, message);
+            BroadcastReliable(RankedOverlayChannels.VoteState, message, VoteStateDelivery);
         }
 
         public static void PublishVoteStateToClient(ulong clientId, VoteOverlayStateMessage state)
         {
-            SendToClient(RankedOverlayChannels.VoteState, state ?? VoteOverlayStateMessage.Hidden(), clientId);
+            var message = state ?? VoteOverlayStateMessage.Hidden();
+            LogVotePayloadDiagnostics(message, clientId, "resync");
+            SendToClientReliable(RankedOverlayChannels.VoteState, message, clientId, VoteStateDelivery);
         }
 
         public static void PublishDraftState(Server.RankedSystem.DraftOverlayState state)
@@ -142,6 +147,16 @@ namespace schrader
             SendToClient(RankedOverlayChannels.ApprovalRequestState, message, clientId);
         }
 
+        public static void PublishScoreboardStars(ScoreboardStarStateMessage state)
+        {
+            BroadcastReliable(RankedOverlayChannels.ScoreboardStars, state ?? ScoreboardStarStateMessage.Empty(), ScoreboardStarDelivery);
+        }
+
+        public static void PublishScoreboardStarsToClient(ulong clientId, ScoreboardStarStateMessage state)
+        {
+            SendToClientReliable(RankedOverlayChannels.ScoreboardStars, state ?? ScoreboardStarStateMessage.Empty(), clientId, ScoreboardStarDelivery);
+        }
+
         public static void PublishDiscordInviteOpenToClient(ulong clientId, string url = null)
         {
             SendToClient(RankedOverlayChannels.DiscordInviteOpen, new OpenDiscordInviteMessage
@@ -154,10 +169,13 @@ namespace schrader
         {
             try
             {
+                Debug.Log($"[{Constants.MOD_NAME}] [JOIN][SERVER] Resyncing overlay state to client {clientId} after synchronize complete.");
                 PublishVoteStateToClient(clientId, Server.RankedSystem.GetVoteOverlayState());
                 PublishDraftStateToClient(clientId, Server.RankedSystem.GetDraftOverlayState());
                 PublishApprovalRequestStateToClient(clientId, Server.RankedSystem.GetApprovalRequestStateForClient(clientId));
                 PublishMatchResultToClient(clientId, Server.RankedSystem.GetMatchResultStateForClient(clientId));
+                PublishScoreboardStarsToClient(clientId, Server.RankedSystem.GetScoreboardStarStateForClient(clientId));
+                Debug.Log($"[{Constants.MOD_NAME}] [JOIN][SERVER] Overlay resync complete for client {clientId}.");
             }
             catch (Exception ex)
             {
@@ -397,13 +415,47 @@ namespace schrader
             return string.Join("|",
                 state.IsVisible,
                 state.RequestId ?? string.Empty,
+                state.ViewRole,
+                state.Status,
                 state.Title ?? string.Empty,
                 state.PlayerName ?? string.Empty,
                 state.PromptText ?? string.Empty,
                 state.TargetTeamName ?? string.Empty,
                 state.PreviousTeamName ?? string.Empty,
                 state.IsSwitchRequest,
-                state.FooterText ?? string.Empty);
+                state.FooterText ?? string.Empty,
+                state.SecondsRemaining,
+                state.QueuePosition,
+                state.QueueLength);
+        }
+
+        private static void LogVotePayloadDiagnostics(VoteOverlayStateMessage state, ulong? clientId, string context)
+        {
+            try
+            {
+                var message = state ?? VoteOverlayStateMessage.Hidden();
+                var estimatedCapacity = RankedOverlayNetcode.EstimateCapacity(message);
+                var utf8Bytes = RankedOverlayNetcode.GetUtf8ByteCount(message);
+                var writtenBytes = RankedOverlayNetcode.MeasureWrittenSize(message);
+                var targetText = clientId.HasValue ? $" targetClient={clientId.Value}" : string.Empty;
+                Debug.Log($"[{Constants.MOD_NAME}] [VOTE][SIZE] context={context}{targetText} visible={message.IsVisible} entries={(message.PlayerEntries?.Length ?? 0)} estimatedCapacity={estimatedCapacity} utf8Bytes={utf8Bytes} writtenBytes={writtenBytes} delivery={VoteStateDelivery}");
+
+                var entries = message.PlayerEntries ?? Array.Empty<VoteOverlayPlayerEntryMessage>();
+                for (var index = 0; index < entries.Length; index++)
+                {
+                    var entry = entries[index];
+                    if (entry == null)
+                    {
+                        continue;
+                    }
+
+                    Debug.Log($"[{Constants.MOD_NAME}] [VOTE][SIZE] entry[{index}] clientId={entry.ClientId} displayLen={(entry.DisplayName ?? string.Empty).Length} playerIdLen={(entry.PlayerId ?? string.Empty).Length} steamIdLen={(entry.SteamId ?? string.Empty).Length} initiator={entry.IsInitiator} voted={entry.HasVoted}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[{Constants.MOD_NAME}] [VOTE][SIZE] Diagnostics failed: {ex.Message}");
+            }
         }
     }
 }
