@@ -23,6 +23,8 @@ namespace schrader
                 starLevelByPlayerId.Clear();
                 starLevelByClientId.Clear();
             }
+
+            ScoreboardBadgeClientState.Reset();
         }
 
         internal static void OnScoreboardStarsReceived(ulong senderClientId, FastBufferReader reader)
@@ -107,7 +109,9 @@ namespace schrader
                 return;
             }
 
-            if (!TryGetStarLevel(player, out var starLevel) || starLevel <= 0)
+            var hasStar = TryGetStarLevel(player, out var starLevel) && starLevel > 0;
+            var hasBadge = ScoreboardBadgeClientState.TryGetBadge(player, out var badgeText, out var badgeColorHex);
+            if (!hasStar && !hasBadge)
             {
                 return;
             }
@@ -119,7 +123,9 @@ namespace schrader
             }
 
             var adminPrefix = BuildAdminPrefix(player);
-            label.text = $"{adminPrefix}<b><color={ResolveStarColorHex(starLevel)}>★</color></b><noparse> #{player.Number.Value} {player.Username.Value}</noparse>";
+            var starPrefix = hasStar ? $"<b><color={ResolveStarColorHex(starLevel)}>★</color></b>" : string.Empty;
+            var badgePrefix = hasBadge ? $"<b><color={badgeColorHex}>[{EscapeBadgeText(badgeText)}]</color></b> " : string.Empty;
+            label.text = $"{adminPrefix}{starPrefix}{(hasStar ? " " : string.Empty)}{badgePrefix}<noparse>#{player.Number.Value} {player.Username.Value}</noparse>";
         }
 
         private static bool TryGetStarLevel(Player player, out int starLevel)
@@ -189,6 +195,16 @@ namespace schrader
                 default:
                     return "#ff5d8f";
             }
+        }
+
+        private static string EscapeBadgeText(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+            {
+                return string.Empty;
+            }
+
+            return value.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;");
         }
 
         [HarmonyPatch(typeof(UIScoreboard), "UpdatePlayer")]

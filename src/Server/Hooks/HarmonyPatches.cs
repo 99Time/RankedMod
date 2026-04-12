@@ -1403,7 +1403,7 @@ namespace schrader.Server
         {
             try
             {
-                if (!Application.isBatchMode)
+                if (!IsDedicatedServerConnectionApprovalContext())
                 {
                     return true;
                 }
@@ -1424,7 +1424,7 @@ namespace schrader.Server
                     return true;
                 }
 
-                if (!IsAdminSteamId(payload.SteamId))
+                if (!IsAdminSteamId(__instance, payload.SteamId))
                 {
                     return true;
                 }
@@ -1507,16 +1507,127 @@ namespace schrader.Server
             return false;
         }
 
-        private static bool IsAdminSteamId(string steamId)
+        private static bool IsDedicatedServerConnectionApprovalContext()
         {
             try
             {
-                return !string.IsNullOrWhiteSpace(steamId)
-                    && TryGetNativeAdminSteamIds(out var adminSteamIds)
-                    && adminSteamIds.Contains(steamId.Trim());
+                if (Application.isBatchMode)
+                {
+                    return true;
+                }
+
+                return SystemInfo.graphicsDeviceType == UnityEngine.Rendering.GraphicsDeviceType.Null;
             }
             catch { }
 
+            return false;
+        }
+
+        private static bool IsAdminSteamId(object serverManager, string steamId)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(steamId))
+                {
+                    return false;
+                }
+
+                var normalizedSteamId = steamId.Trim();
+                if (TryGetLiveServerManagerAdminSteamIds(out var liveAdminSteamIds)
+                    && liveAdminSteamIds.Contains(normalizedSteamId))
+                {
+                    return true;
+                }
+
+                if (TryGetConfiguredAdminSteamIds(serverManager, out var configuredAdminSteamIds)
+                    && configuredAdminSteamIds.Contains(normalizedSteamId))
+                {
+                    return true;
+                }
+
+                return TryGetNativeAdminSteamIds(out var adminSteamIds)
+                    && adminSteamIds.Contains(normalizedSteamId);
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static bool TryGetLiveServerManagerAdminSteamIds(out HashSet<string> adminSteamIds)
+        {
+            adminSteamIds = null;
+            try
+            {
+                var serverManagerType = FindTypeByName("ServerManager", "Puck.ServerManager");
+                if (serverManagerType == null)
+                {
+                    return false;
+                }
+
+                object serverManager = null;
+                var instanceProperty = serverManagerType.GetProperty("Instance", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+                if (instanceProperty != null)
+                {
+                    serverManager = instanceProperty.GetValue(null, null);
+                }
+
+                if (serverManager == null)
+                {
+                    serverManager = GetManagerInstance(serverManagerType);
+                }
+
+                return TryGetConfiguredAdminSteamIds(serverManager, out adminSteamIds);
+            }
+            catch { }
+
+            adminSteamIds = null;
+            return false;
+        }
+
+        private static bool TryGetConfiguredAdminSteamIds(object serverManager, out HashSet<string> adminSteamIds)
+        {
+            adminSteamIds = null;
+            try
+            {
+                if (serverManager == null)
+                {
+                    return false;
+                }
+
+                if (!TryGetMemberValue(serverManager, "AdminSteamIds", out var configuredValue)
+                    && !TryGetMemberValue(serverManager, "adminSteamIds", out configuredValue))
+                {
+                    return false;
+                }
+
+                if (!(configuredValue is IEnumerable enumerable))
+                {
+                    return false;
+                }
+
+                var values = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var entry in enumerable)
+                {
+                    var value = ExtractSimpleValueToString(entry);
+                    if (string.IsNullOrWhiteSpace(value))
+                    {
+                        continue;
+                    }
+
+                    values.Add(value.Trim());
+                }
+
+                if (values.Count == 0)
+                {
+                    return false;
+                }
+
+                adminSteamIds = values;
+                return true;
+            }
+            catch { }
+
+            adminSteamIds = null;
             return false;
         }
 

@@ -29,11 +29,12 @@ namespace schrader
             public Label WinnerLabel;
             internal TeamSectionView RedTeam;
             internal TeamSectionView BlueTeam;
+            public Button HostButton;
             public Button ContinueButton;
             public Button CloseButton;
         }
 
-        public static void BuildUI(DraftUIRenderer.View rootView, Action onContinue, Action onClose)
+        public static void BuildUI(DraftUIRenderer.View rootView, Action onOpenHost, Action onContinue, Action onClose)
         {
             if (rootView?.Root == null)
             {
@@ -118,6 +119,16 @@ namespace schrader
             buttonRow.style.borderTopWidth = 1;
             buttonRow.style.borderTopColor = new StyleColor(new Color(1f, 1f, 1f, 0.08f));
 
+            view.HostButton = new Button(() => onOpenHost?.Invoke())
+            {
+                text = "Host My Server"
+            };
+            StyleButton(view.HostButton, new ButtonPalette(
+                new Color(0.14f, 0.42f, 0.78f, 0.98f),
+                new Color(0.20f, 0.52f, 0.92f, 1f),
+                new Color(0.10f, 0.30f, 0.60f, 1f),
+                Color.white));
+
             view.ContinueButton = new Button(() => onContinue?.Invoke())
             {
                 text = "Continue"
@@ -137,8 +148,10 @@ namespace schrader
                 new Color(0.31f, 0.37f, 0.45f, 1f),
                 new Color(0.18f, 0.22f, 0.27f, 1f),
                 new Color(0.94f, 0.96f, 0.99f, 1f)));
+            view.ContinueButton.style.marginLeft = new StyleLength(new Length(12, LengthUnit.Pixel));
             view.CloseButton.style.marginLeft = new StyleLength(new Length(12, LengthUnit.Pixel));
 
+            buttonRow.Add(view.HostButton);
             buttonRow.Add(view.ContinueButton);
             buttonRow.Add(view.CloseButton);
 

@@ -8,11 +8,12 @@ using UnityEngine;
 namespace schrader
 {
     internal static class RankedOverlayNetwork
-    {
+    {   
         private const NetworkDelivery VoteStateDelivery = NetworkDelivery.ReliableFragmentedSequenced;
         private const NetworkDelivery MatchResultDelivery = NetworkDelivery.ReliableFragmentedSequenced;
         private const NetworkDelivery DraftExtendedDelivery = NetworkDelivery.ReliableFragmentedSequenced;
         private const NetworkDelivery ScoreboardStarDelivery = NetworkDelivery.ReliableFragmentedSequenced;
+        private const NetworkDelivery ScoreboardBadgeDelivery = NetworkDelivery.ReliableFragmentedSequenced;
         private static readonly Dictionary<ulong, string> lastApprovalRequestSignatureByClient = new Dictionary<ulong, string>();
         private static string lastDraftSignature;
         private static string lastDraftExtendedSignature;
@@ -157,11 +158,29 @@ namespace schrader
             SendToClientReliable(RankedOverlayChannels.ScoreboardStars, state ?? ScoreboardStarStateMessage.Empty(), clientId, ScoreboardStarDelivery);
         }
 
+        public static void PublishScoreboardBadges(ScoreboardBadgeStateMessage state)
+        {
+            BroadcastReliable(RankedOverlayChannels.ScoreboardBadges, state ?? ScoreboardBadgeStateMessage.Empty(), ScoreboardBadgeDelivery);
+        }
+
+        public static void PublishScoreboardBadgesToClient(ulong clientId, ScoreboardBadgeStateMessage state)
+        {
+            SendToClientReliable(RankedOverlayChannels.ScoreboardBadges, state ?? ScoreboardBadgeStateMessage.Empty(), clientId, ScoreboardBadgeDelivery);
+        }
+
         public static void PublishDiscordInviteOpenToClient(ulong clientId, string url = null)
         {
             SendToClient(RankedOverlayChannels.DiscordInviteOpen, new OpenDiscordInviteMessage
             {
                 Url = string.IsNullOrWhiteSpace(url) ? Constants.DISCORD_INVITE_URL : url
+            }, clientId);
+        }
+
+        public static void PublishExternalUrlOpenToClient(ulong clientId, string url)
+        {
+            SendToClient(RankedOverlayChannels.ExternalUrlOpen, new OpenExternalUrlMessage
+            {
+                Url = string.IsNullOrWhiteSpace(url) ? string.Empty : url
             }, clientId);
         }
 
@@ -175,6 +194,7 @@ namespace schrader
                 PublishApprovalRequestStateToClient(clientId, Server.RankedSystem.GetApprovalRequestStateForClient(clientId));
                 PublishMatchResultToClient(clientId, Server.RankedSystem.GetMatchResultStateForClient(clientId));
                 PublishScoreboardStarsToClient(clientId, Server.RankedSystem.GetScoreboardStarStateForClient(clientId));
+                PublishScoreboardBadgesToClient(clientId, Server.RankedSystem.GetScoreboardBadgeStateForClient(clientId));
                 Debug.Log($"[{Constants.MOD_NAME}] [JOIN][SERVER] Overlay resync complete for client {clientId}.");
             }
             catch (Exception ex)

@@ -19,6 +19,7 @@ namespace schrader
             public VisualElement CommandsSection;
             public VisualElement ButtonRow;
             public Button DiscordButton;
+            public Button HostButton;
             public Button ContinueButton;
         }
 
@@ -27,7 +28,7 @@ namespace schrader
         private static Texture2D cachedDiscordTexture;
         private static bool discordLogoLoadAttempted;
 
-        public static void BuildUI(DraftUIRenderer.View rootView, Action onOpenDiscord, Action onContinue)
+        public static void BuildUI(DraftUIRenderer.View rootView, Action onOpenDiscord, Action onOpenHost, Action onContinue)
         {
             if (rootView?.Root == null)
             {
@@ -172,6 +173,20 @@ namespace schrader
             view.DiscordButton.style.marginRight = new StyleLength(new Length(12, LengthUnit.Pixel));
             view.DiscordButton.style.marginBottom = new StyleLength(new Length(6, LengthUnit.Pixel));
 
+            view.HostButton = new Button(() => onOpenHost?.Invoke());
+            StyleButton(view.HostButton, new ButtonPalette(
+                new Color(0.14f, 0.42f, 0.78f, 0.98f),
+                new Color(0.20f, 0.52f, 0.92f, 1f),
+                new Color(0.10f, 0.30f, 0.60f, 1f),
+                Color.white));
+            SetButtonContent(view.HostButton, CreateButtonContent("HOST MY SERVER", null));
+            view.HostButton.style.minWidth = 200;
+            view.HostButton.style.height = 46;
+            view.HostButton.style.alignSelf = Align.Center;
+            view.HostButton.style.flexShrink = 0;
+            view.HostButton.style.marginRight = new StyleLength(new Length(12, LengthUnit.Pixel));
+            view.HostButton.style.marginBottom = new StyleLength(new Length(6, LengthUnit.Pixel));
+
             view.ContinueButton = new Button(() => onContinue?.Invoke());
             StyleButton(view.ContinueButton, new ButtonPalette(
                 new Color(0.16f, 0.53f, 0.36f, 0.98f),
@@ -186,6 +201,7 @@ namespace schrader
             view.ContinueButton.style.marginBottom = new StyleLength(new Length(6, LengthUnit.Pixel));
 
             buttonRow.Add(view.DiscordButton);
+            buttonRow.Add(view.HostButton);
             buttonRow.Add(view.ContinueButton);
 
             panel.Add(hero);
@@ -335,6 +351,7 @@ namespace schrader
             rightColumn.Add(CreateCommandCard("/ff", "Start or vote on a team forfeit."));
             rightColumn.Add(CreateCommandCard("/mmr", "Show your current MMR."));
             rightColumn.Add(CreateCommandCard("/discord", "Open the Discord invite in your browser."));
+            rightColumn.Add(CreateCommandCard("/host", "Open the dedicated hosting page in your browser."));
 
             grid.Add(leftColumn);
             grid.Add(rightColumn);

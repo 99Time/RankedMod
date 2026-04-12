@@ -68,6 +68,7 @@ namespace schrader
         private static string lastApprovalRenderSignature;
         private static string lastDraftRenderSignature;
         private static string lastPostMatchRenderSignature;
+        private static string lastDismissedPostMatchSignature;
         private static string lastOverlayTickSignature;
         private static string lastCursorDebugSignature;
         private static OverlayUiState currentUiState = OverlayUiState.None;
@@ -221,7 +222,9 @@ namespace schrader
                 OnPickPlayerClicked,
                 OnAcceptLateJoinerClicked,
                 OnWelcomeDiscordClicked,
+                OnWelcomeHostClicked,
                 OnWelcomeContinueClicked,
+                OnPostMatchHostClicked,
                 OnPostMatchContinueClicked,
                 OnPostMatchCloseClicked);
 
@@ -324,6 +327,7 @@ namespace schrader
             lastApprovalRenderSignature = null;
             lastDraftRenderSignature = null;
             lastPostMatchRenderSignature = null;
+            lastDismissedPostMatchSignature = null;
             postMatchDismissed = false;
             welcomePendingAcknowledgement = false;
             currentStateEnteredAt = -1f;
@@ -362,7 +366,9 @@ namespace schrader
                 messagingManager.RegisterNamedMessageHandler(RankedOverlayChannels.DraftStateExtended, OnDraftExtendedStateReceived);
                 messagingManager.RegisterNamedMessageHandler(RankedOverlayChannels.MatchResult, OnMatchResultReceived);
                 messagingManager.RegisterNamedMessageHandler(RankedOverlayChannels.ScoreboardStars, ScoreboardStarClientState.OnScoreboardStarsReceived);
+                messagingManager.RegisterNamedMessageHandler(RankedOverlayChannels.ScoreboardBadges, ScoreboardBadgeClientState.OnScoreboardBadgesReceived);
                 messagingManager.RegisterNamedMessageHandler(RankedOverlayChannels.DiscordInviteOpen, OnDiscordInviteOpenReceived);
+                messagingManager.RegisterNamedMessageHandler(RankedOverlayChannels.ExternalUrlOpen, OnExternalUrlOpenReceived);
                 currentMessagingManager = messagingManager;
                 handlersRegistered = true;
             }
@@ -382,7 +388,9 @@ namespace schrader
                 try { currentMessagingManager.UnregisterNamedMessageHandler(RankedOverlayChannels.DraftStateExtended); } catch { }
                 try { currentMessagingManager.UnregisterNamedMessageHandler(RankedOverlayChannels.MatchResult); } catch { }
                 try { currentMessagingManager.UnregisterNamedMessageHandler(RankedOverlayChannels.ScoreboardStars); } catch { }
+                try { currentMessagingManager.UnregisterNamedMessageHandler(RankedOverlayChannels.ScoreboardBadges); } catch { }
                 try { currentMessagingManager.UnregisterNamedMessageHandler(RankedOverlayChannels.DiscordInviteOpen); } catch { }
+                try { currentMessagingManager.UnregisterNamedMessageHandler(RankedOverlayChannels.ExternalUrlOpen); } catch { }
             }
 
             currentMessagingManager = null;
@@ -541,6 +549,16 @@ namespace schrader
             try
             {
                 var incomingState = RankedOverlayNetcode.ReadJson<MatchResultMessage>(ref reader) ?? MatchResultMessage.Hidden();
+                var incomingSignature = BuildMatchResultSignature(incomingState);
+                if (incomingState.IsVisible
+                    && postMatchDismissed
+                    && !string.IsNullOrWhiteSpace(lastDismissedPostMatchSignature)
+                    && string.Equals(incomingSignature, lastDismissedPostMatchSignature, StringComparison.Ordinal))
+                {
+                    DraftUIPlugin.Log("[CLIENT] Ignoring stale visible post-match rebroadcast after local dismiss.");
+                    return;
+                }
+
                 currentMatchResultState = incomingState;
 
                 if (incomingState.IsVisible)
@@ -549,6 +567,7 @@ namespace schrader
                     lastVisibleMatchResultReceivedAt = Time.unscaledTime;
                     hasLoggedPostMatchFallback = false;
                     postMatchDismissed = false;
+                    lastDismissedPostMatchSignature = null;
                     welcomePendingAcknowledgement = false;
                     welcomeRequestedAt = -1f;
                     hasLoggedWelcomeFallback = false;
@@ -559,6 +578,7 @@ namespace schrader
                     lastVisibleMatchResultReceivedAt = -1f;
                     hasLoggedPostMatchFallback = false;
                     postMatchDismissed = true;
+                    lastDismissedPostMatchSignature = null;
                     DraftUIPlugin.Log($"[CLIENT] [POST_MATCH][DEBUG] Hidden post-match payload received. Clearing post-match lock. currentUi={currentUiState}");
                 }
 
@@ -596,6 +616,19 @@ namespace schrader
             catch (Exception ex)
             {
                 DraftUIPlugin.LogError($"Failed to receive Discord invite request: {ex}");
+            }
+        }
+
+        private static void OnExternalUrlOpenReceived(ulong senderClientId, FastBufferReader reader)
+        {
+            try
+            {
+                var message = RankedOverlayNetcode.ReadJson<OpenExternalUrlMessage>(ref reader) ?? new OpenExternalUrlMessage();
+                OpenExternalUrl(message.Url, Constants.SPEEDHOSTING_PUCK_URL, "Server command");
+            }
+            catch (Exception ex)
+            {
+                DraftUIPlugin.LogError($"Failed to receive external URL request: {ex}");
             }
         }
 
@@ -1610,7 +1643,12 @@ namespace schrader
 
         private static void OnWelcomeDiscordClicked()
         {
-            OpenDiscordInvite(Constants.DISCORD_INVITE_URL, "Welcome Discord button");
+            OpenExternalUrl(Constants.DISCORD_INVITE_URL, Constants.DISCORD_INVITE_URL, "Welcome Discord button");
+        }
+
+        private static void OnWelcomeHostClicked()
+        {
+            OpenExternalUrl(Constants.BuildPuckLandingUrl(Constants.HOST_SOURCE_WELCOME), Constants.SPEEDHOSTING_PUCK_URL, "Welcome Host button");
         }
 
         private static void OnWelcomeContinueClicked()
@@ -1620,21 +1658,31 @@ namespace schrader
 
         private static void OpenDiscordInvite(string url, string sourceLabel)
         {
+            OpenExternalUrl(url, Constants.DISCORD_INVITE_URL, sourceLabel);
+        }
+
+        private static void OpenExternalUrl(string url, string fallbackUrl, string sourceLabel)
+        {
             try
             {
-                var inviteUrl = string.IsNullOrWhiteSpace(url) ? Constants.DISCORD_INVITE_URL : url;
-                Application.OpenURL(inviteUrl);
-                DraftUIPlugin.Log($"Discord invite opened via {sourceLabel}: {inviteUrl}");
+                var targetUrl = string.IsNullOrWhiteSpace(url) ? fallbackUrl : url;
+                Application.OpenURL(targetUrl);
+                DraftUIPlugin.Log($"External URL opened via {sourceLabel}: {targetUrl}");
             }
             catch (Exception ex)
             {
-                DraftUIPlugin.LogError($"Failed to open Discord invite from {sourceLabel}: {ex}");
+                DraftUIPlugin.LogError($"Failed to open external URL from {sourceLabel}: {ex}");
             }
         }
 
         private static void OnPostMatchContinueClicked()
         {
             DismissPostMatch("Post-match UI Continued");
+        }
+
+        private static void OnPostMatchHostClicked()
+        {
+            OpenExternalUrl(Constants.BuildPuckLandingUrl(Constants.HOST_SOURCE_POSTMATCH), Constants.SPEEDHOSTING_PUCK_URL, "Post-match Host button");
         }
 
         private static void OnPostMatchCloseClicked()
@@ -1837,6 +1885,9 @@ namespace schrader
 
         private static void DismissPostMatch(string actionLabel)
         {
+            lastDismissedPostMatchSignature = BuildMatchResultSignature(currentMatchResultState != null && currentMatchResultState.IsVisible
+                ? currentMatchResultState
+                : cachedMatchResultState);
             SendPostMatchDismiss();
             currentMatchResultState = MatchResultMessage.Hidden();
             cachedMatchResultState = MatchResultMessage.Hidden();
@@ -1847,6 +1898,35 @@ namespace schrader
             ApplyUiState(OverlayUiState.None, forceRefresh: true);
             RestoreSuppressedGameplayUi();
             RefreshUi(forceRefresh: true);
+        }
+
+        private static string BuildMatchResultSignature(MatchResultMessage state)
+        {
+            if (state == null)
+            {
+                return string.Empty;
+            }
+
+            var playerSignature = string.Join("|", (state.Players ?? Array.Empty<MatchResultPlayerMessage>())
+                .Select(player => string.Join("~",
+                    player?.Id ?? string.Empty,
+                    player?.Username ?? string.Empty,
+                    player?.IsSharedGoalie ?? false,
+                    player?.ExcludedFromMmr ?? false,
+                    player?.Team ?? TeamResult.Unknown,
+                    player?.Goals ?? 0,
+                    player?.Assists ?? 0,
+                    player?.Saves ?? 0,
+                    player?.Shots ?? 0,
+                    player?.MmrBefore ?? 0,
+                    player?.MmrAfter ?? 0,
+                    player?.MmrDelta ?? 0,
+                    player?.IsMVP ?? false)));
+
+            return string.Join("|",
+                state.IsVisible,
+                state.WinningTeam,
+                playerSignature);
         }
 
         private static void DismissWelcomeScreen(string actionLabel)

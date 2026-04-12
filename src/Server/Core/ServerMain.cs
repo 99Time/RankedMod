@@ -30,10 +30,11 @@ namespace schrader
                 Debug.Log($"[{Constants.MOD_NAME}] [JOIN][SERVER] Synchronize complete received for client {clientId}.");
                 try
                 {
-                    UIChat.Instance.Server_SendSystemChatMessage("<color=#00ff00>Welcome to SpeedRankeds</color>! Use <b>/commands</b> to display available server chat commands.", clientId);
+                    UIChat.Instance.Server_SendSystemChatMessage($"<color=#00ff00>Welcome to SpeedRankeds</color>! Use <b>/commands</b> to display available server chat commands. <color=#66ccff>Host your own PUCK server:</color> <b>{Constants.BuildPuckLandingUrl(Constants.HOST_SOURCE_CHAT)}</b> <color=#9dc4de>(or use <b>/host</b>)</color>", clientId);
                 }
                 catch { }
                 try { RankedOverlayNetwork.ResyncClient(clientId); } catch { }
+                try { Server.RankedSystem.HandleBackendPlayerSynchronized(clientId); } catch { }
                 return false;
             }
         }
@@ -71,12 +72,13 @@ namespace schrader
                     }
 
                     var starPrefix = Server.RankedSystem.BuildChatStarPrefix(player);
-                    if (string.IsNullOrEmpty(starPrefix) || string.IsNullOrEmpty(__result))
+                    var backendPrefix = Server.RankedSystem.BuildBackendChatPrefix(player, player != null ? player.OwnerClientId : 0UL);
+                    if (string.IsNullOrEmpty(__result))
                     {
                         return;
                     }
 
-                    __result = starPrefix + __result;
+                    __result = (starPrefix ?? string.Empty) + (backendPrefix ?? string.Empty) + __result;
                 }
                 catch (Exception ex)
                 {
@@ -182,6 +184,26 @@ namespace schrader
                         catch (Exception ex)
                         {
                             Debug.LogError($"[{Constants.MOD_NAME}] /discord failed: {ex.Message}");
+                        }
+
+                        return false;
+                    }
+
+                    if (trimmed.Equals("/host", StringComparison.OrdinalIgnoreCase))
+                    {
+                        try
+                        {
+                            UIChat.Instance.Server_SendSystemChatMessage("<size=14><color=#66ccff>Opening the hosting page in your browser...</color></size>", clientId);
+                        }
+                        catch { }
+
+                        try
+                        {
+                            RankedOverlayNetwork.PublishExternalUrlOpenToClient(clientId, Constants.BuildPuckLandingUrl(Constants.HOST_SOURCE_HOSTCOMMAND));
+                        }
+                        catch (Exception ex)
+                        {
+                            Debug.LogError($"[{Constants.MOD_NAME}] /host failed: {ex.Message}");
                         }
 
                         return false;
@@ -431,6 +453,12 @@ namespace schrader
 
                     if (!trimmed.StartsWith("/", StringComparison.Ordinal))
                     {
+                        if (Server.RankedSystem.IsBackendMuted(player, clientId, out var muteReason))
+                        {
+                            SendSystemChatToClient($"<size=14><color=#ff6666>{muteReason}</color></size>", clientId);
+                            return false;
+                        }
+
                         try
                         {
                             var starPrefix = Server.RankedSystem.BuildChatStarPrefix(player);
@@ -532,6 +560,20 @@ namespace schrader
                     if (cmd.Equals("/cs", StringComparison.OrdinalIgnoreCase))
                     {
                         HandleServerDespawnPucksCommand(clientId);
+                        return false;
+                    }
+
+                    if (cmd.Equals("/host", StringComparison.OrdinalIgnoreCase))
+                    {
+                        try
+                        {
+                            RankedOverlayNetwork.PublishExternalUrlOpenToClient(clientId, Constants.BuildPuckLandingUrl(Constants.HOST_SOURCE_HOSTCOMMAND));
+                        }
+                        catch (Exception ex)
+                        {
+                            Debug.LogError($"[{Constants.MOD_NAME}] /host failed in chat command event: {ex.Message}");
+                        }
+
                         return false;
                     }
 
@@ -1122,6 +1164,7 @@ namespace schrader
             SendCommandHelpLine(clientId, "<size=13>/ff</size> <size=12>- Start or vote on a forfeit for your team.</size>");
             SendCommandHelpLine(clientId, "<size=13>/mmr</size> <size=12>- Show your current MMR.</size>");
             SendCommandHelpLine(clientId, "<size=13>/discord</size> <size=12>- Open the Discord invite in your browser.</size>");
+            SendCommandHelpLine(clientId, "<size=13>/host</size> <size=12>- Open the dedicated SpeedHosting PUCK page in your browser.</size>");
             SendCommandHelpLine(clientId, "<size=13>/cs</size> <size=12>- Despawn all pucks on the map.</size>");
 
 

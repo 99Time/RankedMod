@@ -554,6 +554,7 @@ namespace schrader.Server
                     {
                         Debug.LogWarning($"[{Constants.MOD_NAME}] [DISCORD] Skipped match result webhook because the server name could not be resolved.");
                     }
+                    ReportMatchResultToBackend(matchResult);
                     Debug.Log($"[{Constants.MOD_NAME}] [POSTMATCH] Result payload sent.");
                     SendSystemChatToAll("<size=14><color=#66ccff>Match complete</color> post-match results are now available.</size>");
                 }

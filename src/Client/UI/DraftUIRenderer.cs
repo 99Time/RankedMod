@@ -69,7 +69,7 @@ namespace schrader
             internal PostMatchUIRenderer.View PostMatch;
         }
 
-        public static void CreateUI(UIHUD hud, VisualElement rootVisualElement, out View view, Action onVoteAccepted, Action onVoteRejected, Action onApprovalAccepted, Action onApprovalRejected, Action<string> onPickPlayer, Action<string> onAcceptLateJoiner, Action onWelcomeDiscordOpen, Action onWelcomeContinue, Action onPostMatchContinue, Action onPostMatchClose)
+        public static void CreateUI(UIHUD hud, VisualElement rootVisualElement, out View view, Action onVoteAccepted, Action onVoteRejected, Action onApprovalAccepted, Action onApprovalRejected, Action<string> onPickPlayer, Action<string> onAcceptLateJoiner, Action onWelcomeDiscordOpen, Action onWelcomeHostOpen, Action onWelcomeContinue, Action onPostMatchHostOpen, Action onPostMatchContinue, Action onPostMatchClose)
         {
             view = null;
 
@@ -148,8 +148,8 @@ namespace schrader
             BuildVotingUI(view, onVoteAccepted, onVoteRejected);
             BuildApprovalUI(view, onApprovalAccepted, onApprovalRejected);
             BuildDraftUI(view);
-            WelcomeUIRenderer.BuildUI(view, onWelcomeDiscordOpen, onWelcomeContinue);
-            PostMatchUIRenderer.BuildUI(view, onPostMatchContinue, onPostMatchClose);
+            WelcomeUIRenderer.BuildUI(view, onWelcomeDiscordOpen, onWelcomeHostOpen, onWelcomeContinue);
+            PostMatchUIRenderer.BuildUI(view, onPostMatchHostOpen, onPostMatchContinue, onPostMatchClose);
 
             DraftUIPlugin.Log("UI BUILD COMPLETE");
         }
