@@ -15,6 +15,7 @@ namespace schrader
         private const string OwnerSteamId = "76561199046098825";
         private static GameObject updaterGo;
         private static RankedSystemUpdater updaterInstance;
+        private static bool serverInstanceRankedActive = true;
         private const float ManualPuckSpawnCooldownSeconds = 4.0f;
         private const int ManualPuckSpawnHardCap = 30;
         private static readonly Dictionary<string, float> manualPuckSpawnTimes = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
@@ -970,6 +971,13 @@ namespace schrader
         {
             Debug.Log($"[{Constants.MOD_NAME}] SERVER INIT");
 
+            serverInstanceRankedActive = Server.RankedServerInstanceActivation.ShouldEnableForCurrentServerInstance();
+            if (!serverInstanceRankedActive)
+            {
+                Debug.Log($"[{Constants.MOD_NAME}] SERVER INIT skipped. RankedMod inactive for this dedicated server instance.");
+                return;
+            }
+
             try
             {
                 LoadMmr();
@@ -1109,7 +1117,7 @@ namespace schrader
             {
                 Debug.LogError($"[{Constants.MOD_NAME}] Disabling...");
 
-                if (Application.isBatchMode)
+                if (Application.isBatchMode && serverInstanceRankedActive)
                 {
                     PublishServerStatusLifecycle("shutdown", waitForCompletion: true);
                 }
