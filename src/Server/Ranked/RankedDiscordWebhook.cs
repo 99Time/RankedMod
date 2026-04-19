@@ -143,6 +143,12 @@ namespace schrader.Server
 
         private static bool TryQueueMatchResultWebhookFallback(MatchResultMessage matchResult, string serverName)
         {
+            if (IsPublicServerMode(GetBackendConfig()))
+            {
+                Debug.Log($"[{Constants.MOD_NAME}] [DISCORD] Match result webhook skipped because serverMode=public.");
+                return false;
+            }
+
             if (!MatchResultWebhookEnabled)
             {
                 Debug.Log($"[{Constants.MOD_NAME}] [DISCORD] Match result webhook skipped. mode=disabled backendPrimary=true fallbackUsed=false unsupportedPublicStatsRemoved=true");

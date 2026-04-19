@@ -74,6 +74,38 @@ namespace schrader
             return false;
         }
 
+        internal static bool TryGetBadge(string playerId, ulong clientId, out string badgeText, out string colorHex)
+        {
+            badgeText = null;
+            colorHex = null;
+
+            var normalizedPlayerId = NormalizePlayerId(playerId);
+            lock (sync)
+            {
+                if (!string.IsNullOrWhiteSpace(normalizedPlayerId)
+                    && badgeByPlayerId.TryGetValue(normalizedPlayerId, out var playerEntry)
+                    && playerEntry != null
+                    && !string.IsNullOrWhiteSpace(playerEntry.BadgeText))
+                {
+                    badgeText = playerEntry.BadgeText;
+                    colorHex = playerEntry.ColorHex;
+                    return true;
+                }
+
+                if (clientId != 0
+                    && badgeByClientId.TryGetValue(clientId, out var clientEntry)
+                    && clientEntry != null
+                    && !string.IsNullOrWhiteSpace(clientEntry.BadgeText))
+                {
+                    badgeText = clientEntry.BadgeText;
+                    colorHex = clientEntry.ColorHex;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         private static void ApplyState(ScoreboardBadgeStateMessage state)
         {
             var appliedEntries = 0;

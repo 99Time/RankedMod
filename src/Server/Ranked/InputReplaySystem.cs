@@ -335,7 +335,7 @@ namespace schrader.Server
             {
                 if (!TryResolveReplaySourcePlayer(player, clientId, out var resolvedPlayer, out var playerInput))
                 {
-                    SendSystemChatToClient("<size=14><color=#ff6666>Record</color> player input source not found.</size>", clientId);
+                    SendSystemChatToClient(ChatStyle.Message(ChatStyle.RecordModule, "Player input source not found.", ChatTone.Error), clientId);
                     return;
                 }
 
@@ -343,7 +343,7 @@ namespace schrader.Server
                 {
                     if (activeRecordingSession != null)
                     {
-                        SendSystemChatToClient("<size=14><color=#ffcc66>Record</color> a recording is already active.</size>", clientId);
+                        SendSystemChatToClient(ChatStyle.Message(ChatStyle.RecordModule, "A recording is already active.", ChatTone.Warning), clientId);
                         return;
                     }
 
@@ -360,7 +360,7 @@ namespace schrader.Server
                 }
 
                 Debug.Log($"[{Constants.MOD_NAME}] Record started for client {clientId} at tick rate {playerInput.TickRate}.");
-                SendSystemChatToClient("<size=14><color=#00ff00>Record</color> started.</size>", clientId);
+                SendSystemChatToClient(ChatStyle.Message(ChatStyle.RecordModule, "Recording started.", ChatTone.Success), clientId);
                 return;
             }
 
@@ -369,7 +369,7 @@ namespace schrader.Server
             {
                 if (activeRecordingSession == null)
                 {
-                    SendSystemChatToClient("<size=14><color=#ffcc66>Record</color> there is no active recording.</size>", clientId);
+                    SendSystemChatToClient(ChatStyle.Message(ChatStyle.RecordModule, "There is no active recording.", ChatTone.Warning), clientId);
                     return;
                 }
 
@@ -388,11 +388,11 @@ namespace schrader.Server
 
             if (TrySaveRecordingToBotMemory(completedSession, out var savedFilePath, out var saveFailureReason))
             {
-                SendSystemChatToClient($"<size=14><color=#00ff00>Record</color> stopped with <b>{completedSession.Frames.Count}</b> frames. Saved to <b>{Path.GetFileName(savedFilePath)}</b>.</size>", clientId);
+                SendSystemChatToClient(ChatStyle.Message(ChatStyle.RecordModule, $"Recording stopped with {ChatStyle.Emphasis(completedSession.Frames.Count.ToString())} frames. Saved to {ChatStyle.Emphasis(Path.GetFileName(savedFilePath))}.", ChatTone.Success), clientId);
                 return;
             }
 
-            SendSystemChatToClient($"<size=14><color=#ff6666>Record</color> stopped with <b>{completedSession.Frames?.Count ?? 0}</b> frames, but BotMemory save failed: {saveFailureReason}.</size>", clientId);
+            SendSystemChatToClient(ChatStyle.Message(ChatStyle.RecordModule, $"Recording stopped with {ChatStyle.Emphasis((completedSession.Frames?.Count ?? 0).ToString())} frames, but BotMemory save failed: {ChatStyle.Safe(saveFailureReason)}.", ChatTone.Error), clientId);
         }
 
         private static void HandleReplayCommand(object player, ulong clientId, string selector)
@@ -400,7 +400,7 @@ namespace schrader.Server
             if (!AreSyntheticPlayersAllowed())
             {
                 StopReplay(null, 0);
-                SendSystemChatToClient("<size=14><color=#ff6666>Replay</color> replay bots are disabled on this server.</size>", clientId);
+                SendSystemChatToClient(ChatStyle.Message(ChatStyle.ReplayModule, "Replay bots are disabled on this server.", ChatTone.Error), clientId);
                 return;
             }
 
@@ -420,7 +420,7 @@ namespace schrader.Server
                 var session = ResolveReplaySession(selector);
                 if (session == null || GetRecordedFrameCount(session) <= 0)
                 {
-                    SendSystemChatToClient("<size=14><color=#ff6666>Replay</color> there is no recorded input to replay.</size>", clientId);
+                    SendSystemChatToClient(ChatStyle.Message(ChatStyle.ReplayModule, "There is no recorded input to replay.", ChatTone.Error), clientId);
                     return;
                 }
 
@@ -435,13 +435,13 @@ namespace schrader.Server
 
             if (!HasReplayPatterns(requestedType, pinnedRecordingName))
             {
-                SendSystemChatToClient("<size=14><color=#ff6666>Replay</color> there is no matching behavior recording available.</size>", clientId);
+                SendSystemChatToClient(ChatStyle.Message(ChatStyle.ReplayModule, "There is no matching behavior recording available.", ChatTone.Error), clientId);
                 return;
             }
 
             if (!TryResolveReplayBot(clientId, out var botId, out var controller))
             {
-                SendSystemChatToClient("<size=14><color=#ff6666>Replay</color> no replay bot is available.</size>", clientId);
+                SendSystemChatToClient(ChatStyle.Message(ChatStyle.ReplayModule, "No replay bot is available.", ChatTone.Error), clientId);
                 return;
             }
 
@@ -466,7 +466,7 @@ namespace schrader.Server
             }
 
             Debug.Log($"[{Constants.MOD_NAME}] Replay behavior mode started using {selectionDescription}.");
-            SendSystemChatToClient($"<size=14><color=#00ff00>Replay</color> behavior mode started using <b>{selectionDescription}</b>.</size>", clientId);
+            SendSystemChatToClient(ChatStyle.Message(ChatStyle.ReplayModule, $"Behavior mode started using {ChatStyle.Emphasis(selectionDescription)}.", ChatTone.Success), clientId);
         }
 
         private static void HandleReplayListCommand(ulong clientId)
@@ -492,11 +492,11 @@ namespace schrader.Server
 
             if (names.Count == 0)
             {
-                SendSystemChatToClient("<size=14><color=#ffcc66>Replay</color> there are no saved recordings.</size>", clientId);
+                SendSystemChatToClient(ChatStyle.Message(ChatStyle.ReplayModule, "There are no saved recordings.", ChatTone.Warning), clientId);
                 return;
             }
 
-            SendSystemChatToClient($"<size=14><b>BotMemory</b>: {string.Join(", ", names)}</size>", clientId);
+            SendSystemChatToClient(ChatStyle.Message(ChatStyle.ReplayModule, $"Saved recordings: {ChatStyle.Safe(string.Join(", ", names))}.", ChatTone.Info), clientId);
         }
 
         private static void UpdateRecording()
@@ -517,7 +517,7 @@ namespace schrader.Server
                     lastRecordedSession = GetRecordedFrameCount(session) > 0 ? session : lastRecordedSession;
                 }
 
-                SendSystemChatToClient("<size=14><color=#ffcc66>Record</color> stopped because the source player is no longer available.</size>", session.ClientId);
+                SendSystemChatToClient(ChatStyle.Message(ChatStyle.RecordModule, "Recording stopped because the source player is no longer available.", ChatTone.Warning), session.ClientId);
                 return;
             }
 

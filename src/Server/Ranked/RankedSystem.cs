@@ -1598,7 +1598,7 @@ namespace schrader.Server
 
                 Debug.Log($"[{Constants.MOD_NAME}] Ranked watchdog resetting stale ranked state. phase={lastGamePhaseName ?? "unknown"}");
                 ResetRankedState(false, false);
-                SendSystemChatToAll("<size=14><color=#ffcc66>Ranked</color> state was cleared because the match ended outside the normal flow.</size>");
+                SendSystemChatToAll(ChatStyle.Message(ChatStyle.RankedModule, "State was cleared because the match ended outside the normal flow.", ChatTone.Warning));
             }
             catch { }
         }
@@ -2131,55 +2131,55 @@ namespace schrader.Server
                 {
                     if (!rankedActive || draftActive)
                     {
-                        SendSystemChatToClient("<size=14><color=#ff6666>Shared Goalie</color> can only be used during an active ranked match.</size>", clientId);
+                        SendSystemChatToClient(ChatStyle.Message(ChatStyle.SharedGoalieModule, "Can only be used during an active ranked match.", ChatTone.Error), clientId);
                         return;
                     }
 
                     if (rankedVoteActive)
                     {
-                        SendSystemChatToClient("<size=14><color=#ff6666>Shared Goalie</color> wait for the ranked vote to finish first.</size>", clientId);
+                        SendSystemChatToClient(ChatStyle.Message(ChatStyle.SharedGoalieModule, "Wait for the ranked ready vote to finish first.", ChatTone.Error), clientId);
                         return;
                     }
 
                     if (singleGoalieVoteActive)
                     {
-                        SendSystemChatToClient("<size=14><color=#ffcc66>Shared Goalie</color> vote already in progress.</size>", clientId);
+                        SendSystemChatToClient(ChatStyle.Message(ChatStyle.SharedGoalieModule, "A vote is already in progress.", ChatTone.Warning), clientId);
                         return;
                     }
 
                     if (Time.unscaledTime - lastSingleGoalieVoteTime < singleGoalieVoteCooldown)
                     {
-                        SendSystemChatToClient("<size=14><color=#ff6666>Shared Goalie</color> vote is on cooldown.</size>", clientId);
+                        SendSystemChatToClient(ChatStyle.Message(ChatStyle.SharedGoalieModule, "The vote is on cooldown.", ChatTone.Error), clientId);
                         return;
                     }
 
                     if (!TryBuildConnectedPlayerSnapshot(player, out var initiator) || initiator == null)
                     {
-                        SendSystemChatToClient("<size=14><color=#ff6666>Shared Goalie</color> could not resolve the requesting player.</size>", clientId);
+                        SendSystemChatToClient(ChatStyle.Message(ChatStyle.SharedGoalieModule, "Could not resolve the requesting player.", ChatTone.Error), clientId);
                         return;
                     }
 
                     if (!TryIsGoalie(player, out var initiatorIsGoalie) || !initiatorIsGoalie)
                     {
-                        SendSystemChatToClient("<size=14><color=#ff6666>Shared Goalie</color> only the active goalie can start this vote.</size>", clientId);
+                        SendSystemChatToClient(ChatStyle.Message(ChatStyle.SharedGoalieModule, "Only the active goalie can start this vote.", ChatTone.Error), clientId);
                         return;
                     }
 
                     if (!TryGetSingleGoalieCandidate(out var goalieCandidate, out var candidateReason))
                     {
-                        SendSystemChatToClient($"<size=14><color=#ff6666>Shared Goalie</color> cannot start: {candidateReason}</size>", clientId);
+                        SendSystemChatToClient(ChatStyle.Message(ChatStyle.SharedGoalieModule, $"Cannot start: {ChatStyle.Safe(candidateReason)}.", ChatTone.Error), clientId);
                         return;
                     }
 
                     if (!IsSameParticipantIdentity(goalieCandidate, initiator))
                     {
-                        SendSystemChatToClient("<size=14><color=#ff6666>Shared Goalie</color> only the lone active goalie can start this vote.</size>", clientId);
+                        SendSystemChatToClient(ChatStyle.Message(ChatStyle.SharedGoalieModule, "Only the lone active goalie can start this vote.", ChatTone.Error), clientId);
                         return;
                     }
 
                     if (!TryGetSingleGoalieVoteEligiblePlayers(out var eligible, out var eligibleReason))
                     {
-                        SendSystemChatToClient($"<size=14><color=#ff6666>Shared Goalie</color> cannot start: {eligibleReason}</size>", clientId);
+                        SendSystemChatToClient(ChatStyle.Message(ChatStyle.SharedGoalieModule, $"Cannot start: {ChatStyle.Safe(eligibleReason)}.", ChatTone.Error), clientId);
                         return;
                     }
 
@@ -2200,7 +2200,7 @@ namespace schrader.Server
                         .ToList();
 
                     var voteAction = disableVote ? "disable" : "enable";
-                    SendSystemChatToAll($"<size=14><color=#00ff00>Shared Goalie {voteAction} vote started</color> by {singleGoalieVoteStartedByName}. Type <b>/y</b> to accept or <b>/n</b> to reject. ({Mathf.CeilToInt(singleGoalieVoteDuration)}s) The goalie starter vote counts automatically.</size>");
+                    SendSystemChatToAll(ChatStyle.Message(ChatStyle.SharedGoalieModule, $"{ChatStyle.Safe(voteAction)} vote started by {ChatStyle.Player(singleGoalieVoteStartedByName)}. Use the overlay or {ChatStyle.Command("/y")} and {ChatStyle.Command("/n")} to answer. {ChatStyle.Emphasis(Mathf.CeilToInt(singleGoalieVoteDuration).ToString() + "s")} remaining. The starter vote counts automatically.", ChatTone.Success));
 
                     CountSnapshotVotes(singleGoalieVoteEligible, singleGoalieVotes, out var total, out var yes, out var no);
                     var requiredYes = total > 0 ? ((total / 2) + 1) : 1;
@@ -2223,14 +2223,14 @@ namespace schrader.Server
                 {
                     if (!singleGoalieVoteActive)
                     {
-                        SendSystemChatToClient("<size=14><color=#ffcc66>Shared Goalie</color> no vote is currently active.</size>", clientId);
+                        SendSystemChatToClient(ChatStyle.Message(ChatStyle.SharedGoalieModule, "No vote is currently active.", ChatTone.Warning), clientId);
                         return;
                     }
 
                     var eligible = ResolveCurrentSingleGoalieVoteEligibleParticipants();
                     if (!IsClientInSnapshot(eligible, clientId))
                     {
-                        SendSystemChatToClient("<size=14><color=#ff6666>Shared Goalie</color> you are not eligible to vote in this lobby.</size>", clientId);
+                        SendSystemChatToClient(ChatStyle.Message(ChatStyle.SharedGoalieModule, "You are not eligible to vote in this lobby.", ChatTone.Error), clientId);
                         return;
                     }
 
@@ -2277,9 +2277,7 @@ namespace schrader.Server
 
                 if (!accepted)
                 {
-                    SendSystemChatToAll(disableVote
-                        ? "<size=14><color=#ff6666>Shared Goalie</color> disable vote failed.</size>"
-                        : "<size=14><color=#ff6666>Shared Goalie</color> enable vote failed.</size>");
+                    SendSystemChatToAll(ChatStyle.Message(ChatStyle.SharedGoalieModule, disableVote ? "Disable vote failed." : "Enable vote failed.", ChatTone.Error));
                     return;
                 }
 
@@ -2291,13 +2289,13 @@ namespace schrader.Server
                     singleGoaliePlayerClientId = 0;
                     singleGoaliePlayerName = null;
                     singleGoalieAssignedTeam = TeamResult.Unknown;
-                    SendSystemChatToAll($"<size=14><color=#ff6666>Shared Goalie</color> disabled for <b>{goalieName}</b> by vote.</size>");
+                    SendSystemChatToAll(ChatStyle.Message(ChatStyle.SharedGoalieModule, $"Disabled for {ChatStyle.Player(goalieName)} by vote.", ChatTone.Error));
                     return;
                 }
 
                 if (!TryGetSingleGoalieCandidate(out var goalieCandidate, out var reason))
                 {
-                    SendSystemChatToAll($"<size=14><color=#ff6666>Shared Goalie</color> vote passed, but activation failed: {reason}</size>");
+                    SendSystemChatToAll(ChatStyle.Message(ChatStyle.SharedGoalieModule, $"Vote passed, but activation failed: {ChatStyle.Safe(reason)}.", ChatTone.Error));
                     return;
                 }
 
@@ -2307,7 +2305,7 @@ namespace schrader.Server
                 singleGoaliePlayerName = goalieCandidate.displayName ?? "Goalie";
                 singleGoalieAssignedTeam = goalieCandidate.team;
 
-                SendSystemChatToAll($"<size=14><color=#00ff00>Shared Goalie</color> enabled for <b>{singleGoaliePlayerName}</b>. This player will appear as <b>SG</b> and will not gain or lose MMR.</size>");
+                SendSystemChatToAll(ChatStyle.Message(ChatStyle.SharedGoalieModule, $"Enabled for {ChatStyle.Player(singleGoaliePlayerName)}. This player will appear as {ChatStyle.Emphasis("SG")} and will not gain or lose MMR.", ChatTone.Success));
             }
             catch { }
         }
@@ -2328,7 +2326,7 @@ namespace schrader.Server
             }
 
             var voteAction = disableVote ? "disable vote" : "enable vote";
-            SendSystemChatToAll($"<size=14><color=#ff6666>Shared Goalie</color> {voteAction} cancelled: {reason}</size>");
+            SendSystemChatToAll(ChatStyle.Message(ChatStyle.SharedGoalieModule, $"{ChatStyle.Safe(voteAction)} cancelled: {ChatStyle.Safe(reason)}.", ChatTone.Error));
         }
 
         private static void DisableSingleGoalie(string reason)
@@ -2344,7 +2342,7 @@ namespace schrader.Server
             singleGoaliePlayerName = null;
             singleGoalieAssignedTeam = TeamResult.Unknown;
 
-            SendSystemChatToAll($"<size=14><color=#ff6666>Shared Goalie</color> disabled: {reason}</size>");
+            SendSystemChatToAll(ChatStyle.Message(ChatStyle.SharedGoalieModule, $"Disabled: {ChatStyle.Safe(reason)}.", ChatTone.Error));
         }
 
         private static bool TryGetSingleGoalieVoteEligiblePlayers(out List<RankedParticipant> eligible, out string reason)
@@ -2908,15 +2906,15 @@ namespace schrader.Server
                         var connectedClientCount = NetworkManager.Singleton?.ConnectedClientsIds?.Count ?? 0;
                         Debug.Log($"[{Constants.MOD_NAME}] [VOTE][DEBUG] Vote start command received. clientId={clientId} controlledTest={controlledTestModeEnabled} rankedActive={rankedActive} rankedVoteActive={rankedVoteActive} connectedClients={connectedClientCount}");
 
-                    if (rankedActive) { SendSystemChatToClient("<size=14><color=#ffcc66>Ranked</color> already active.</size>", clientId); return; }
-                    if (singleGoalieVoteActive) { SendSystemChatToClient("<size=14><color=#ffcc66>Ranked</color> wait for the shared-goalie vote to finish first.</size>", clientId); return; }
-                    if (rankedVoteActive) { SendSystemChatToClient("<size=14><color=#ffcc66>Ranked</color> vote already in progress.</size>", clientId); return; }
-                    if (Time.unscaledTime - lastRankedVoteTime < rankedVoteCooldown) { SendSystemChatToClient("<size=14><color=#ff6666>Ranked</color> vote is on cooldown.</size>", clientId); return; }
+                    if (rankedActive) { SendSystemChatToClient(ChatStyle.Message(ChatStyle.RankedModule, "Ranked is already active.", ChatTone.Warning), clientId); return; }
+                    if (singleGoalieVoteActive) { SendSystemChatToClient(ChatStyle.Message(ChatStyle.RankedModule, "Wait for the shared-goalie vote to finish first.", ChatTone.Warning), clientId); return; }
+                    if (rankedVoteActive) { SendSystemChatToClient(ChatStyle.Message(ChatStyle.RankedModule, "A ready vote is already in progress.", ChatTone.Warning), clientId); return; }
+                    if (Time.unscaledTime - lastRankedVoteTime < rankedVoteCooldown) { SendSystemChatToClient(ChatStyle.Message(ChatStyle.RankedModule, "The ready vote is on cooldown.", ChatTone.Error), clientId); return; }
 
                     if (!TryGetEligiblePlayersForStart(player, clientId, out var eligible, out var reason))
                     {
                             Debug.Log($"[{Constants.MOD_NAME}] [VOTE][DEBUG] Vote start rejected. clientId={clientId} controlledTest={controlledTestModeEnabled} reason={reason}");
-                        SendSystemChatToClient($"<size=14><color=#ff6666>Ranked</color> cannot start: {reason}</size>", clientId);
+                        SendSystemChatToClient(ChatStyle.Message(ChatStyle.RankedModule, $"Cannot start: {ChatStyle.Safe(reason)}.", ChatTone.Error), clientId);
                         return;
                     }
 
@@ -2945,9 +2943,9 @@ namespace schrader.Server
 
                     var pname = rankedVoteStartedByName;
                     var controlledTestSuffix = controlledTestModeEnabled
-                        ? " Test mode active: bots auto-accept after your /y vote."
+                        ? $" Test mode active: bots auto-accept after your {ChatStyle.Command("/y")} vote."
                         : string.Empty;
-                    SendSystemChatToAll($"<size=14><color=#00ff00>Ranked vote started</color> by {pname}. Type <b>/y</b> to accept or <b>/n</b> to reject. ({Mathf.CeilToInt(rankedVoteDuration)}s){controlledTestSuffix}</size>");
+                    SendSystemChatToAll(ChatStyle.Message(ChatStyle.RankedModule, $"Ready vote started by {ChatStyle.Player(pname)}. Use the overlay or {ChatStyle.Command("/y")} and {ChatStyle.Command("/n")} to answer. {ChatStyle.Emphasis(Mathf.CeilToInt(rankedVoteDuration).ToString() + "s")} remaining.{controlledTestSuffix}", ChatTone.Success));
                     Debug.Log($"[{Constants.MOD_NAME}] [VOTE] Vote started. by={pname} clientId={clientId} eligible={(lastVoteEligible?.Count ?? 0)} controlledTest={controlledTestModeEnabled} connectedClients={connectedClientCount} teams={string.Join(",", (lastVoteEligible ?? new List<RankedParticipant>()).Where(participant => participant != null).Select(participant => $"{participant.displayName}:{participant.team}:{participant.clientId}"))}");
                     PublishVoteOverlayState();
                 }
@@ -2991,7 +2989,7 @@ namespace schrader.Server
 
                 if (!TryStartCaptainDraft(eligible, forcedByAdmin))
                 {
-                    SendSystemChatToAll("<size=14><color=#ff6666>Ranked</color> draft could not be started.</size>");
+                    SendSystemChatToAll(ChatStyle.Message(ChatStyle.RankedModule, "The captain draft could not be started.", ChatTone.Error));
                     ResetRankedState(true, true);
                     return false;
                 }
@@ -3017,14 +3015,14 @@ namespace schrader.Server
                 {
                     if (!rankedVoteActive)
                     {
-                        SendSystemChatToClient("<size=14><color=#ffcc66>Ranked</color> no vote is currently active.</size>", clientId);
+                        SendSystemChatToClient(ChatStyle.Message(ChatStyle.RankedModule, "No ready vote is currently active.", ChatTone.Warning), clientId);
                         return;
                     }
 
                     var eligible = ResolveCurrentVoteEligibleParticipants();
                     if (!IsClientInSnapshot(eligible, clientId))
                     {
-                        SendSystemChatToClient("<size=14><color=#ff6666>Ranked</color> you are not eligible to vote in this lobby.</size>", clientId);
+                        SendSystemChatToClient(ChatStyle.Message(ChatStyle.RankedModule, "You are not eligible to vote in this lobby.", ChatTone.Error), clientId);
                         return;
                     }
 
@@ -3085,13 +3083,13 @@ namespace schrader.Server
                 {
                     if (!StartRankedFromEligible(eligible, false))
                     {
-                        SendSystemChatToAll("<size=14><color=#ff6666>Ranked</color> vote passed, but the captain draft could not be started.</size>");
+                        SendSystemChatToAll(ChatStyle.Message(ChatStyle.RankedModule, "Vote passed, but the captain draft could not be started.", ChatTone.Error));
                     }
 
                     return;
                 }
 
-                SendSystemChatToAll("<size=14><color=#ff6666>Ranked</color> vote failed.</size>");
+                SendSystemChatToAll(ChatStyle.Message(ChatStyle.RankedModule, "Vote failed.", ChatTone.Error));
             }
             catch { }
         }
@@ -3821,14 +3819,14 @@ namespace schrader.Server
                 var testMode = schrader.DraftStateBridge.IsTestModeEnabled();
                 SendSystemChatToClient(visible
                     ? (testMode
-                        ? "<size=14><color=#00ff00>Draft UI</color> shown in test mode.</size>"
-                        : "<size=14><color=#00ff00>Draft UI</color> shown.</size>")
-                    : "<size=14><color=#ffcc66>Draft UI</color> hidden.</size>", clientId);
+                        ? ChatStyle.Message(ChatStyle.DraftUiModule, "Shown in test mode.", ChatTone.Success)
+                        : ChatStyle.Message(ChatStyle.DraftUiModule, "Shown.", ChatTone.Success))
+                    : ChatStyle.Message(ChatStyle.DraftUiModule, "Hidden.", ChatTone.Warning), clientId);
             }
             catch (Exception ex)
             {
                 Debug.LogError($"[{Constants.MOD_NAME}] HandleDraftUiCommand failed: {ex.Message}");
-                SendSystemChatToClient("<size=14><color=#ff6666>Draft UI</color> command failed.</size>", clientId);
+                SendSystemChatToClient(ChatStyle.Message(ChatStyle.DraftUiModule, "Command failed.", ChatTone.Error), clientId);
             }
         }
 
@@ -3838,27 +3836,27 @@ namespace schrader.Server
             {
                 if (!TryIsAdminInternal(player, clientId))
                 {
-                    SendSystemChatToClient("<size=14><color=#ff6666>Dummy</color> permission denied.</size>", clientId);
+                    SendSystemChatToClient(ChatStyle.Message(ChatStyle.DummyModule, "Permission denied.", ChatTone.Error), clientId);
                     return;
                 }
 
                 if (!int.TryParse(rawCount, out var count) || count <= 0)
                 {
-                    SendSystemChatToClient("<size=14>Usage: /dummy <count></size>", clientId);
+                    SendSystemChatToClient(ChatStyle.Usage("/dummy <count>"), clientId);
                     return;
                 }
 
                 var created = CreateDummyParticipants(count, rankedActive);
                 if (created.Count == 0)
                 {
-                    SendSystemChatToClient("<size=14><color=#ff6666>Dummy</color> no dummies were created.</size>", clientId);
+                    SendSystemChatToClient(ChatStyle.Message(ChatStyle.DummyModule, "No dummies were created.", ChatTone.Error), clientId);
                     return;
                 }
 
                 if (!rankedActive)
                 {
-                    SendSystemChatToAll($"<size=14><color=#ffcc66>Dummy</color> queued {created.Count} logical dummies for the next draft: {string.Join(", ", created.Select(p => p.displayName))}</size>");
-                    SendSystemChatToAll("<size=13><color=#ffcc66>Dummy</color> these players only exist inside RankedSystem and never spawn as real players.</size>");
+                    SendSystemChatToAll(ChatStyle.Message(ChatStyle.DummyModule, $"Queued {ChatStyle.Emphasis(created.Count.ToString())} logical dummies for the next draft: {ChatStyle.Safe(string.Join(", ", created.Select(p => p.displayName)))}.", ChatTone.Warning));
+                    SendSystemChatToAll(ChatStyle.Message(ChatStyle.DummyModule, "These players only exist inside RankedSystem and never spawn as real players.", ChatTone.Info, 13));
                     return;
                 }
 
@@ -3872,13 +3870,13 @@ namespace schrader.Server
                     MergeOrReplaceParticipant(participant, TeamResult.Unknown);
                 }
 
-                SendSystemChatToAll($"<size=14><color=#ffcc66>Dummy</color> created {created.Count} logical late joiners: {string.Join(", ", created.Select(p => p.displayName))}</size>");
-                SendSystemChatToAll("<size=13><color=#ffcc66>Dummy</color> captains can accept them like any other late joiner, but they will not enter network gameplay.</size>");
+                SendSystemChatToAll(ChatStyle.Message(ChatStyle.DummyModule, $"Created {ChatStyle.Emphasis(created.Count.ToString())} logical late joiners: {ChatStyle.Safe(string.Join(", ", created.Select(p => p.displayName)))}.", ChatTone.Warning));
+                SendSystemChatToAll(ChatStyle.Message(ChatStyle.DummyModule, "Captains can accept them like any other late joiner, but they will not enter network gameplay.", ChatTone.Info, 13));
             }
             catch (Exception ex)
             {
                 Debug.LogError($"[{Constants.MOD_NAME}] HandleDummyCommand failed: {ex.Message}");
-                SendSystemChatToClient("<size=14><color=#ff6666>Dummy</color> command failed.</size>", clientId);
+                SendSystemChatToClient(ChatStyle.Message(ChatStyle.DummyModule, "Command failed.", ChatTone.Error), clientId);
             }
         }
 
@@ -4104,7 +4102,7 @@ namespace schrader.Server
                 {
                     if (actorClientId != 0)
                     {
-                        SendSystemChatToClient("<size=13><color=#ff6666>Draft UI</color> could not resolve the clicked player from the scoreboard event.</size>", actorClientId);
+                        SendSystemChatToClient(ChatStyle.Message(ChatStyle.DraftUiModule, "Could not resolve the clicked player from the scoreboard event.", ChatTone.Error, 13), actorClientId);
                     }
                     return false;
                 }
@@ -4126,7 +4124,7 @@ namespace schrader.Server
 
                 if (actorClientId != 0)
                 {
-                    SendSystemChatToClient("<size=13><color=#ffcc66>Draft UI</color> clicked player is not available for a draft action.</size>", actorClientId);
+                    SendSystemChatToClient(ChatStyle.Message(ChatStyle.DraftUiModule, "Clicked player is not available for a draft action.", ChatTone.Warning, 13), actorClientId);
                 }
                 return false;
             }
@@ -5196,12 +5194,12 @@ namespace schrader.Server
             {
                 if (!rankedActive)
                 {
-                    SendSystemChatToClient("<size=14><color=#ff6666>Ranked</color> /ff is only available in active ranked matches.</size>", clientId);
+                    SendSystemChatToClient(ChatStyle.Message(ChatStyle.ForfeitModule, $"{ChatStyle.Command("/ff")} is only available in active ranked matches.", ChatTone.Error), clientId);
                     return;
                 }
                 if (draftActive)
                 {
-                    SendSystemChatToClient("<size=14><color=#ffcc66>Ranked</color> /ff is disabled while the captain draft is in progress.</size>", clientId);
+                    SendSystemChatToClient(ChatStyle.Message(ChatStyle.ForfeitModule, $"{ChatStyle.Command("/ff")} is disabled while the captain draft is in progress.", ChatTone.Warning), clientId);
                     return;
                 }
                 if (player == null) return;
@@ -5214,7 +5212,7 @@ namespace schrader.Server
                         var snapshot = CaptureForfeitEligibleParticipants(team);
                         if (snapshot == null || snapshot.Count == 0 || !IsClientInSnapshot(snapshot, clientId))
                         {
-                            SendSystemChatToClient("<size=13><color=#ff6666>Forfeit</color> no eligible teammates were found for this vote.</size>", clientId);
+                            SendSystemChatToClient(ChatStyle.Message(ChatStyle.ForfeitModule, "No eligible teammates were found for this vote.", ChatTone.Error, 13), clientId);
                             return;
                         }
 
@@ -5227,12 +5225,12 @@ namespace schrader.Server
                     }
                     else if (forfeitTeam != TeamResult.Unknown && team != forfeitTeam)
                     {
-                        SendSystemChatToClient("<size=13>Only the team that started the forfeit can vote.</size>", clientId);
+                        SendSystemChatToClient(ChatStyle.Message(ChatStyle.ForfeitModule, "Only the team that started the forfeit can vote.", ChatTone.Warning, 13), clientId);
                         return;
                     }
                     else
                     {
-                        SendSystemChatToClient("<size=13>/ff is already active. Use /y or /n to vote.</size>", clientId);
+                        SendSystemChatToClient(ChatStyle.Message(ChatStyle.ForfeitModule, $"{ChatStyle.Command("/ff")} is already active. Use the overlay or {ChatStyle.Command("/y")} and {ChatStyle.Command("/n")} to vote.", ChatTone.Warning, 13), clientId);
                         return;
                     }
 
@@ -5242,7 +5240,7 @@ namespace schrader.Server
                 }
 
                 var pname = TryGetPlayerName(player) ?? $"Player {clientId}";
-                SendSystemChatToAll($"<size=14><color=#ffcc66>Forfeit</color> vote started by {pname}. Their vote was counted as <b>yes</b>. Use <b>/y</b> or <b>/n</b>. ({Mathf.CeilToInt(forfeitDuration)}s)</size>");
+                SendSystemChatToAll(ChatStyle.Message(ChatStyle.ForfeitModule, $"Vote started by {ChatStyle.Player(pname)}. Their vote was counted as {ChatStyle.Emphasis("yes")}. Use the overlay or {ChatStyle.Command("/y")} and {ChatStyle.Command("/n")} to answer. {ChatStyle.Emphasis(Mathf.CeilToInt(forfeitDuration).ToString() + "s")} remaining.", ChatTone.Warning));
                 BroadcastForfeitVoteCount(team);
                 TryFinalizeForfeitIfAllVoted(team);
             }
@@ -5256,7 +5254,7 @@ namespace schrader.Server
                 if (!rankedActive) return;
                 if (!forfeitActive)
                 {
-                    SendSystemChatToClient("<size=13>No forfeit vote in progress.</size>", clientId);
+                    SendSystemChatToClient(ChatStyle.Message(ChatStyle.ForfeitModule, "No forfeit vote is in progress.", ChatTone.Warning, 13), clientId);
                     return;
                 }
                 if (player == null) return;
@@ -5264,21 +5262,21 @@ namespace schrader.Server
 
                 if (forfeitTeam != TeamResult.Unknown && team != forfeitTeam)
                 {
-                    SendSystemChatToClient("<size=13>Only the team that started the forfeit can vote.</size>", clientId);
+                    SendSystemChatToClient(ChatStyle.Message(ChatStyle.ForfeitModule, "Only the team that started the forfeit can vote.", ChatTone.Warning, 13), clientId);
                     return;
                 }
 
                 var snapshot = ResolveCurrentForfeitEligibleParticipants();
                 if (snapshot == null || snapshot.Count == 0)
                 {
-                    SendSystemChatToClient("<size=13><color=#ff6666>Forfeit</color> vote snapshot is unavailable.</size>", clientId);
+                    SendSystemChatToClient(ChatStyle.Message(ChatStyle.ForfeitModule, "Vote snapshot is unavailable.", ChatTone.Error, 13), clientId);
                     ClearForfeitVoteState();
                     return;
                 }
 
                 if (!IsClientInSnapshot(snapshot, clientId))
                 {
-                    SendSystemChatToClient("<size=13><color=#ff6666>Forfeit</color> you are not part of this forfeit vote.</size>", clientId);
+                    SendSystemChatToClient(ChatStyle.Message(ChatStyle.ForfeitModule, "You are not part of this forfeit vote.", ChatTone.Error, 13), clientId);
                     return;
                 }
 
@@ -5288,7 +5286,7 @@ namespace schrader.Server
                     if (!forfeitNoVotes.TryGetValue(team, out var noSet)) { noSet = new HashSet<ulong>(); forfeitNoVotes[team] = noSet; }
                     if (yesSet.Contains(clientId) || noSet.Contains(clientId))
                     {
-                        SendSystemChatToClient("<size=13>You already voted for /ff.</size>", clientId);
+                        SendSystemChatToClient(ChatStyle.Message(ChatStyle.ForfeitModule, $"You already voted for {ChatStyle.Command("/ff")}.", ChatTone.Warning, 13), clientId);
                         return;
                     }
 
@@ -5297,7 +5295,7 @@ namespace schrader.Server
 
                 var pname = TryGetPlayerName(player) ?? $"Player {clientId}";
                 var voteText = accept ? "yes" : "no";
-                SendSystemChatToAll($"<size=14>{pname} voted {voteText} for /ff.</size>");
+                SendSystemChatToAll(ChatStyle.Message(ChatStyle.ForfeitModule, $"{ChatStyle.Player(pname)} voted {ChatStyle.Emphasis(voteText)} for {ChatStyle.Command("/ff")}.", ChatTone.Info));
                 BroadcastForfeitVoteCount(team);
                 TryFinalizeForfeitIfAllVoted(team);
             }
@@ -5337,7 +5335,7 @@ namespace schrader.Server
             }
                 if (team == TeamResult.Unknown)
                 {
-                    SendSystemChatToClient("<size=14><color=#ff6666>Ranked</color> cannot determine your team for /ff.</size>", clientId);
+                    SendSystemChatToClient(ChatStyle.Message(ChatStyle.ForfeitModule, $"Cannot determine your team for {ChatStyle.Command("/ff")}.", ChatTone.Error), clientId);
                     return false;
                 }
             return true;
@@ -5348,12 +5346,12 @@ namespace schrader.Server
             var snapshot = ResolveCurrentForfeitEligibleParticipants();
             if (snapshot == null || snapshot.Count == 0)
             {
-                SendSystemChatToAll("<size=14><color=#ffcc66>Forfeit</color> vote: snapshot unavailable.</size>");
+                SendSystemChatToAll(ChatStyle.Message(ChatStyle.ForfeitModule, "Vote status unavailable because the snapshot is missing.", ChatTone.Warning));
                 return;
             }
 
             CountForfeitVotes(team, snapshot, out var total, out var yesVotes, out var noVotes);
-            SendSystemChatToAll($"<size=14><color=#ffcc66>Forfeit</color> vote: {yesVotes} yes / {noVotes} no (total {yesVotes + noVotes}/{Math.Max(1, total)})</size>");
+            SendSystemChatToAll(ChatStyle.Message(ChatStyle.ForfeitModule, $"Vote status: {ChatStyle.Emphasis(yesVotes.ToString())} yes / {ChatStyle.Emphasis(noVotes.ToString())} no ({ChatStyle.Emphasis((yesVotes + noVotes).ToString())}/{ChatStyle.Emphasis(Math.Max(1, total).ToString())}).", ChatTone.Info));
         }
 
         private static void TryFinalizeForfeitIfAllVoted(TeamResult team)
@@ -5377,7 +5375,7 @@ namespace schrader.Server
             {
                 var winner = team == TeamResult.Red ? TeamResult.Blue : TeamResult.Red;
                 ClearForfeitVoteState();
-                SendSystemChatToAll($"<size=14><color=#ff6666>Forfeit</color> vote passed. {winner} wins the match.</size>");
+                SendSystemChatToAll(ChatStyle.Message(ChatStyle.ForfeitModule, $"Vote passed. {ChatStyle.Team(winner)} wins the match.", ChatTone.Error));
                 EndMatch(winner, requestRuntimeEnd: true, forceRequestedWinner: true);
                 return;
             }
@@ -5385,7 +5383,7 @@ namespace schrader.Server
             if (yesVotes + noVotes < total && noVotes <= total - requiredYes) return;
 
             ClearForfeitVoteState();
-            SendSystemChatToAll("<size=14><color=#ff6666>Forfeit</color> vote failed.</size>");
+            SendSystemChatToAll(ChatStyle.Message(ChatStyle.ForfeitModule, "Vote failed.", ChatTone.Error));
         }
 
         private static void ProcessForfeitVotes()
@@ -5409,15 +5407,15 @@ namespace schrader.Server
                 {
                     var winner = team == TeamResult.Red ? TeamResult.Blue : TeamResult.Red;
                     ClearForfeitVoteState();
-                    SendSystemChatToAll($"<size=14><color=#ff6666>Forfeit</color> vote passed. {winner} wins the match.</size>");
+                    SendSystemChatToAll(ChatStyle.Message(ChatStyle.ForfeitModule, $"Vote passed. {ChatStyle.Team(winner)} wins the match.", ChatTone.Error));
                     EndMatch(winner, requestRuntimeEnd: true, forceRequestedWinner: true);
                     return;
                 }
 
                 ClearForfeitVoteState();
                 SendSystemChatToAll(total > 0 && yesVotes + noVotes < total
-                    ? "<size=14><color=#ff6666>Forfeit</color> vote timed out.</size>"
-                    : "<size=14><color=#ff6666>Forfeit</color> vote failed.</size>");
+                    ? ChatStyle.Message(ChatStyle.ForfeitModule, "Vote timed out.", ChatTone.Error)
+                    : ChatStyle.Message(ChatStyle.ForfeitModule, "Vote failed.", ChatTone.Error));
             }
             catch { }
         }
@@ -6428,7 +6426,7 @@ namespace schrader.Server
             catch (Exception ex)
             {
                 Debug.LogError($"[{Constants.MOD_NAME}] HandleDraftPick failed: {ex.Message}");
-                SendSystemChatToClient("<size=14><color=#ff6666>Draft</color> /pick failed.</size>", clientId);
+                SendSystemChatToClient(ChatStyle.Message(ChatStyle.DraftModule, $"{ChatStyle.Command("/pick")} failed.", ChatTone.Error), clientId);
             }
         }
 
@@ -6438,14 +6436,14 @@ namespace schrader.Server
             {
                 if (!rankedActive)
                 {
-                    SendSystemChatToClient("<size=14><color=#ffcc66>Draft</color> there is no active ranked.</size>", clientId);
+                    SendSystemChatToClient(ChatStyle.Message(ChatStyle.DraftModule, "There is no active ranked session.", ChatTone.Warning), clientId);
                     return;
                 }
 
                 var actorKey = ResolvePlayerObjectKey(player, clientId) ?? $"clientId:{clientId}";
                 if (string.IsNullOrEmpty(actorKey))
                 {
-                    SendSystemChatToClient("<size=14><color=#ff6666>Draft</color> could not identify your player.</size>", clientId);
+                    SendSystemChatToClient(ChatStyle.Message(ChatStyle.DraftModule, "Could not identify your player.", ChatTone.Error), clientId);
                     return;
                 }
 
@@ -6455,7 +6453,7 @@ namespace schrader.Server
                 {
                     if (!CanUseSoloDummyCaptainProxy(player, clientId) || !TryGetCurrentCaptainTeam(out captainTeam))
                     {
-                        SendSystemChatToClient("<size=14><color=#ff6666>Draft</color> only captains can use /accept.</size>", clientId);
+                        SendSystemChatToClient(ChatStyle.Message(ChatStyle.DraftModule, $"Only captains can use {ChatStyle.Command("/accept <player>")}.", ChatTone.Error), clientId);
                         return;
                     }
                     usingSoloDummyProxy = true;
@@ -6463,7 +6461,7 @@ namespace schrader.Server
 
                 if (string.IsNullOrWhiteSpace(rawTarget))
                 {
-                    SendSystemChatToClient("<size=14>Usage: /accept <player></size>", clientId);
+                    SendSystemChatToClient(ChatStyle.Usage("/accept <player>"), clientId);
                     return;
                 }
 
@@ -6475,20 +6473,20 @@ namespace schrader.Server
 
                 if (!pendingPlayers.Any())
                 {
-                    SendSystemChatToClient("<size=14><color=#ffcc66>Draft</color> there are no pending late joiners.</size>", clientId);
+                    SendSystemChatToClient(ChatStyle.Message(ChatStyle.DraftModule, "There are no pending late joiners.", ChatTone.Warning), clientId);
                     return;
                 }
 
                 if (!TryResolveParticipantFromCommand(rawTarget, pendingPlayers, out var acceptedParticipant))
                 {
-                    SendSystemChatToClient("<size=14><color=#ff6666>Draft</color> pending player not found.</size>", clientId);
+                    SendSystemChatToClient(ChatStyle.Message(ChatStyle.DraftModule, "Pending player not found.", ChatTone.Error), clientId);
                     return;
                 }
 
                 var acceptedKey = ResolveParticipantIdToKey(acceptedParticipant);
                 if (string.IsNullOrEmpty(acceptedKey))
                 {
-                    SendSystemChatToClient("<size=14><color=#ff6666>Draft</color> could not identify that player.</size>", clientId);
+                    SendSystemChatToClient(ChatStyle.Message(ChatStyle.DraftModule, "Could not identify that player.", ChatTone.Error), clientId);
                     return;
                 }
 
@@ -6496,7 +6494,7 @@ namespace schrader.Server
                 {
                     if (!pendingLateJoiners.Remove(acceptedKey))
                     {
-                        SendSystemChatToClient("<size=14><color=#ff6666>Draft</color> that player is no longer pending.</size>", clientId);
+                        SendSystemChatToClient(ChatStyle.Message(ChatStyle.DraftModule, "That player is no longer pending.", ChatTone.Error), clientId);
                         return;
                     }
 
@@ -6508,12 +6506,12 @@ namespace schrader.Server
                 ForceApplyDraftTeam(acceptedKey, captainTeam);
                 PublishDraftOverlayState();
                 var acceptingCaptainName = usingSoloDummyProxy ? GetCaptainDisplayNameByKey(string.Equals(captainTeam, TeamResult.Red) ? redCaptainId : blueCaptainId) : GetCaptainDisplayNameByKey(actorKey);
-                SendSystemChatToAll($"<size=14><color=#ffcc66>Draft</color> {acceptingCaptainName ?? "Captain"} accepted late joiner <b>{acceptedParticipant.displayName}</b> for {FormatTeamLabel(captainTeam)}.</size>");
+                SendSystemChatToAll(ChatStyle.Message(ChatStyle.DraftModule, $"{ChatStyle.Player(acceptingCaptainName ?? "Captain")} accepted late joiner {ChatStyle.Player(acceptedParticipant.displayName)} for {ChatStyle.Team(captainTeam)}.", ChatTone.Info));
             }
             catch (Exception ex)
             {
                 Debug.LogError($"[{Constants.MOD_NAME}] HandleLateJoinAcceptance failed: {ex.Message}");
-                SendSystemChatToClient("<size=14><color=#ff6666>Draft</color> /accept failed.</size>", clientId);
+                SendSystemChatToClient(ChatStyle.Message(ChatStyle.DraftModule, $"{ChatStyle.Command("/accept")} failed.", ChatTone.Error), clientId);
             }
         }
 
@@ -6580,7 +6578,7 @@ namespace schrader.Server
             PublishDraftOverlayState();
             SendSystemChatToAll(completionPanelMessage);
             SendDraftTeamSummary();
-            SendSystemChatToAll("<size=14><color=#00ff00>Ranked match started.</color></size>");
+            SendSystemChatToAll(ChatStyle.Message(ChatStyle.RankedModule, "Ranked match started.", ChatTone.Success));
             TryStartMatch();
         }
 
@@ -6631,7 +6629,7 @@ namespace schrader.Server
 
                 if (!rankedActive)
                 {
-                    SendSystemChatToClient("<size=14><color=#ffcc66>Draft</color> there is no active ranked.</size>", clientId);
+                    SendSystemChatToClient(ChatStyle.Message(ChatStyle.DraftModule, "There is no active ranked match.", ChatTone.Warning), clientId);
                     return;
                 }
 
@@ -7315,23 +7313,23 @@ namespace schrader.Server
                     }
 
                     var statusLine = completed
-                        ? "<color=#55dd88>Status:</color> Draft Complete"
-                        : $"<color=#55dd88>Status:</color> Draft Active | <color=#ffef9a>Turn:</color> {turnName}";
+                        ? "<color=#55dd88>Status:</color> Draft complete"
+                        : $"<color=#55dd88>Status:</color> Draft active | <color=#ffef9a>Turn:</color> {ChatStyle.Safe(turnName)}";
 
                     var availableLine = includeAvailablePlayers
-                        ? $"<color=#ffef9a>Available:</color> {availableSummary}"
+                        ? $"<color=#ffef9a>Available:</color> {ChatStyle.Safe(availableSummary)}"
                         : $"<color=#ffef9a>Available Count:</color> {draftAvailablePlayerIds.Count}";
 
                     var pendingLine = $"<color=#ffef9a>Late Joiners:</color> {pendingCount}";
                     var guidanceLine = completed
-                        ? "<size=12><color=#dddddd>Match is ready to start.</color></size>"
-                        : "<size=12><color=#dddddd>Use /pick player. Scoreboard click remains available where supported.</color></size>";
+                        ? "<size=12><color=#dddddd>The match is ready to start.</color></size>"
+                        : $"<size=12><color=#dddddd>Use the overlay first. Captains can fall back to {ChatStyle.Command("/pick <player>")} or scoreboard click where supported.</color></size>";
 
                     return
-                        "<size=15><b><color=#f2f2f2>RANKED DRAFT</color></b></size>\n"
+                        "<size=15><b><color=#f2f2f2>RANKED DRAFT SNAPSHOT</color></b></size>\n"
                         + "<size=13><color=#bbbbbb>------------------------------</color></size>\n"
-                        + $"<size=13><color=#ff6666>RED Captain:</color> <b>{redCaptainName}</b></size>\n"
-                        + $"<size=13><color=#66b3ff>BLUE Captain:</color> <b>{blueCaptainName}</b></size>\n"
+                        + $"<size=13><color=#ff6666>RED Captain:</color> <b>{ChatStyle.Safe(redCaptainName)}</b></size>\n"
+                        + $"<size=13><color=#66b3ff>BLUE Captain:</color> <b>{ChatStyle.Safe(blueCaptainName)}</b></size>\n"
                         + $"<size=13>{statusLine}</size>\n"
                         + $"<size=13>{availableLine}</size>\n"
                         + $"<size=13>{pendingLine}</size>\n"
@@ -7341,8 +7339,8 @@ namespace schrader.Server
             catch { }
 
             return completed
-                ? "<size=14><color=#00ff00>Draft complete.</color></size>"
-                : "<size=14><color=#ffcc66>Draft</color> active.</size>";
+                ? ChatStyle.Message(ChatStyle.DraftModule, "Draft complete.", ChatTone.Success)
+                : ChatStyle.Message(ChatStyle.DraftModule, "Draft active.", ChatTone.Info);
         }
 
             #if false
@@ -8723,13 +8721,13 @@ namespace schrader.Server
             {
                 if (draftActive)
                 {
-                    SendSystemChatToAll("<size=14><color=#ffcc66>Ranked</color> waiting for draft completion before starting the match.</size>");
+                    SendSystemChatToAll(ChatStyle.Message(ChatStyle.RankedModule, "Waiting for the captain draft to finish before starting the match.", ChatTone.Warning));
                     return false;
                 }
 
                 if (TryStartRankedMatchWithoutWarmup())
                 {
-                    SendSystemChatToAll("<size=14><color=#00ff00>Ranked</color> match auto-started.</size>");
+                    SendSystemChatToAll(ChatStyle.Message(ChatStyle.RankedModule, "Match auto-started.", ChatTone.Success));
                     return true;
                 }
 
@@ -8753,9 +8751,9 @@ namespace schrader.Server
                                 var ps = m.GetParameters();
                                 try
                                 {
-                                    if (ps.Length == 0) { m.Invoke(null, null); SendSystemChatToAll("<size=14><color=#00ff00>Ranked</color> match auto-started.</size>"); return true; }
+                                    if (ps.Length == 0) { m.Invoke(null, null); SendSystemChatToAll(ChatStyle.Message(ChatStyle.RankedModule, "Match auto-started.", ChatTone.Success)); return true; }
                                     var args = BuildDefaultArgs(ps);
-                                    if (args != null) { m.Invoke(null, args); SendSystemChatToAll("<size=14><color=#00ff00>Ranked</color> match auto-started.</size>"); return true; }
+                                    if (args != null) { m.Invoke(null, args); SendSystemChatToAll(ChatStyle.Message(ChatStyle.RankedModule, "Match auto-started.", ChatTone.Success)); return true; }
                                 }
                                 catch { }
                             }
@@ -8773,9 +8771,9 @@ namespace schrader.Server
                                     var ps = m.GetParameters();
                                     try
                                     {
-                                        if (ps.Length == 0) { m.Invoke(inst, null); SendSystemChatToAll("<size=14><color=#00ff00>Ranked</color> match auto-started.</size>"); return true; }
+                                        if (ps.Length == 0) { m.Invoke(inst, null); SendSystemChatToAll(ChatStyle.Message(ChatStyle.RankedModule, "Match auto-started.", ChatTone.Success)); return true; }
                                         var args = BuildDefaultArgs(ps);
-                                        if (args != null) { m.Invoke(inst, args); SendSystemChatToAll("<size=14><color=#00ff00>Ranked</color> match auto-started.</size>"); return true; }
+                                        if (args != null) { m.Invoke(inst, args); SendSystemChatToAll(ChatStyle.Message(ChatStyle.RankedModule, "Match auto-started.", ChatTone.Success)); return true; }
                                     }
                                     catch { }
                                 }
@@ -8784,7 +8782,7 @@ namespace schrader.Server
                     }
                 }
 
-                SendSystemChatToAll("<size=14><color=#ffcc66>Ranked</color> accepted, but could not auto-start a match. Start the match manually.</size>");
+                SendSystemChatToAll(ChatStyle.Message(ChatStyle.RankedModule, "Accepted, but the match could not auto-start. Start it manually.", ChatTone.Warning));
             }
             catch (Exception ex) { Debug.LogError($"[{Constants.MOD_NAME}] TryStartMatch failed: {ex.Message}"); }
             return false;
@@ -9084,7 +9082,7 @@ namespace schrader.Server
             {
                 if (!StartRankedFromEligible(participants, true))
                 {
-                    SendSystemChatToAll("<size=14><color=#ff6666>Ranked</color> admin start failed: could not initialize the captain draft.</size>");
+                    SendSystemChatToAll(ChatStyle.Message(ChatStyle.RankedModule, "Admin start failed: could not initialize the captain draft.", ChatTone.Error));
                 }
             }
             catch { }
@@ -9096,7 +9094,7 @@ namespace schrader.Server
             try
             {
                 ResetRankedState(false, false);
-                SendSystemChatToAll("<size=14><color=#ff6666>Ranked</color> forcibly ended by admin.</size>");
+                SendSystemChatToAll(ChatStyle.Message(ChatStyle.AdminModule, "Ranked was forcibly ended by admin.", ChatTone.Error));
             }
             catch { }
         }

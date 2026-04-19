@@ -47,37 +47,34 @@ namespace schrader
             panel.style.display = DisplayStyle.None;
             panel.style.flexDirection = FlexDirection.Column;
             panel.style.width = new StyleLength(new Length(100, LengthUnit.Percent));
-            panel.style.maxWidth = 940;
+            panel.style.maxWidth = 1024;
             panel.style.alignSelf = Align.Center;
-            panel.style.paddingTop = new StyleLength(new Length(14, LengthUnit.Pixel));
-            panel.style.paddingBottom = new StyleLength(new Length(14, LengthUnit.Pixel));
-            panel.style.paddingLeft = new StyleLength(new Length(16, LengthUnit.Pixel));
-            panel.style.paddingRight = new StyleLength(new Length(16, LengthUnit.Pixel));
-            panel.style.backgroundColor = new StyleColor(new Color(0.06f, 0.09f, 0.14f, 0.94f));
-            panel.style.borderTopLeftRadius = new StyleLength(new Length(28, LengthUnit.Pixel));
-            panel.style.borderTopRightRadius = new StyleLength(new Length(28, LengthUnit.Pixel));
-            panel.style.borderBottomLeftRadius = new StyleLength(new Length(28, LengthUnit.Pixel));
-            panel.style.borderBottomRightRadius = new StyleLength(new Length(28, LengthUnit.Pixel));
+            panel.style.paddingTop = new StyleLength(new Length(22, LengthUnit.Pixel));
+            panel.style.paddingBottom = new StyleLength(new Length(22, LengthUnit.Pixel));
+            panel.style.paddingLeft = new StyleLength(new Length(24, LengthUnit.Pixel));
+            panel.style.paddingRight = new StyleLength(new Length(24, LengthUnit.Pixel));
+            panel.style.backgroundColor = new StyleColor(new Color(0.05f, 0.08f, 0.12f, 0.965f));
+            panel.style.borderTopLeftRadius = new StyleLength(new Length(30, LengthUnit.Pixel));
+            panel.style.borderTopRightRadius = new StyleLength(new Length(30, LengthUnit.Pixel));
+            panel.style.borderBottomLeftRadius = new StyleLength(new Length(30, LengthUnit.Pixel));
+            panel.style.borderBottomRightRadius = new StyleLength(new Length(30, LengthUnit.Pixel));
             panel.style.borderTopWidth = 1;
             panel.style.borderRightWidth = 1;
             panel.style.borderBottomWidth = 1;
             panel.style.borderLeftWidth = 1;
-            panel.style.borderTopColor = new StyleColor(new Color(1f, 1f, 1f, 0.16f));
-            panel.style.borderRightColor = new StyleColor(new Color(1f, 1f, 1f, 0.08f));
-            panel.style.borderBottomColor = new StyleColor(new Color(0f, 0f, 0f, 0.36f));
-            panel.style.borderLeftColor = new StyleColor(new Color(1f, 1f, 1f, 0.08f));
+            ApplyUniformBorder(panel, new Color(1f, 1f, 1f, 0.07f));
             panel.style.opacity = 0f;
             panel.transform.scale = new Vector3(0.985f, 0.985f, 1f);
             panel.transform.position = new Vector3(0f, 12f, 0f);
 
             var headerChip = new VisualElement();
             headerChip.style.alignSelf = Align.Center;
-            headerChip.style.paddingTop = new StyleLength(new Length(4, LengthUnit.Pixel));
-            headerChip.style.paddingBottom = new StyleLength(new Length(4, LengthUnit.Pixel));
-            headerChip.style.paddingLeft = new StyleLength(new Length(12, LengthUnit.Pixel));
-            headerChip.style.paddingRight = new StyleLength(new Length(12, LengthUnit.Pixel));
-            headerChip.style.marginBottom = new StyleLength(new Length(12, LengthUnit.Pixel));
-            headerChip.style.backgroundColor = new StyleColor(new Color(0.18f, 0.24f, 0.32f, 0.68f));
+            headerChip.style.paddingTop = new StyleLength(new Length(5, LengthUnit.Pixel));
+            headerChip.style.paddingBottom = new StyleLength(new Length(5, LengthUnit.Pixel));
+            headerChip.style.paddingLeft = new StyleLength(new Length(14, LengthUnit.Pixel));
+            headerChip.style.paddingRight = new StyleLength(new Length(14, LengthUnit.Pixel));
+            headerChip.style.marginBottom = new StyleLength(new Length(14, LengthUnit.Pixel));
+            headerChip.style.backgroundColor = new StyleColor(new Color(0.16f, 0.21f, 0.29f, 0.72f));
             headerChip.style.borderTopLeftRadius = new StyleLength(new Length(999, LengthUnit.Pixel));
             headerChip.style.borderTopRightRadius = new StyleLength(new Length(999, LengthUnit.Pixel));
             headerChip.style.borderBottomLeftRadius = new StyleLength(new Length(999, LengthUnit.Pixel));
@@ -86,16 +83,12 @@ namespace schrader
             headerChip.style.borderRightWidth = 1;
             headerChip.style.borderBottomWidth = 1;
             headerChip.style.borderLeftWidth = 1;
-            headerChip.style.borderTopColor = new StyleColor(new Color(1f, 1f, 1f, 0.12f));
-            headerChip.style.borderRightColor = new StyleColor(new Color(1f, 1f, 1f, 0.06f));
-            headerChip.style.borderBottomColor = new StyleColor(new Color(0f, 0f, 0f, 0.28f));
-            headerChip.style.borderLeftColor = new StyleColor(new Color(1f, 1f, 1f, 0.06f));
+            ApplyUniformBorder(headerChip, new Color(1f, 1f, 1f, 0.08f));
             headerChip.Add(CreateLabel("MATCH FINAL", 12, FontStyle.Bold, TextAnchor.MiddleCenter, new Color(0.86f, 0.92f, 0.98f, 1f)));
 
-            view.TitleLabel = CreateLabel("FINAL RESULTS", 28, FontStyle.Bold, TextAnchor.MiddleCenter, new Color(0.98f, 0.99f, 1f, 1f));
-            view.WinnerLabel = CreateLabel("RED TEAM WINS", 15, FontStyle.Bold, TextAnchor.MiddleCenter, new Color(1f, 0.91f, 0.64f, 1f));
-            view.WinnerLabel.style.marginTop = new StyleLength(new Length(6, LengthUnit.Pixel));
-            view.WinnerLabel.style.opacity = 0.92f;
+            view.TitleLabel = CreateLabel("FINAL RESULTS", 34, FontStyle.Bold, TextAnchor.MiddleCenter, new Color(0.98f, 0.99f, 1f, 1f));
+            view.WinnerLabel = CreateLabel("Results Ready", 14, FontStyle.Normal, TextAnchor.MiddleCenter, new Color(0.84f, 0.89f, 0.95f, 0.92f));
+            view.WinnerLabel.style.marginTop = new StyleLength(new Length(8, LengthUnit.Pixel));
 
             var teamsRow = new VisualElement();
             teamsRow.style.display = DisplayStyle.Flex;
@@ -103,7 +96,7 @@ namespace schrader
             teamsRow.style.justifyContent = Justify.Center;
             teamsRow.style.alignItems = Align.Stretch;
             teamsRow.style.flexWrap = Wrap.Wrap;
-            teamsRow.style.marginTop = new StyleLength(new Length(18, LengthUnit.Pixel));
+            teamsRow.style.marginTop = new StyleLength(new Length(26, LengthUnit.Pixel));
 
             view.RedTeam = BuildTeamPanel(teamsRow, TeamResult.Red);
             view.BlueTeam = BuildTeamPanel(teamsRow, TeamResult.Blue);
@@ -114,10 +107,10 @@ namespace schrader
             buttonRow.style.justifyContent = Justify.Center;
             buttonRow.style.alignItems = Align.Center;
             buttonRow.style.flexWrap = Wrap.Wrap;
-            buttonRow.style.marginTop = new StyleLength(new Length(18, LengthUnit.Pixel));
-            buttonRow.style.paddingTop = new StyleLength(new Length(12, LengthUnit.Pixel));
+            buttonRow.style.marginTop = new StyleLength(new Length(22, LengthUnit.Pixel));
+            buttonRow.style.paddingTop = new StyleLength(new Length(16, LengthUnit.Pixel));
             buttonRow.style.borderTopWidth = 1;
-            buttonRow.style.borderTopColor = new StyleColor(new Color(1f, 1f, 1f, 0.08f));
+            buttonRow.style.borderTopColor = new StyleColor(new Color(1f, 1f, 1f, 0.06f));
 
             view.HostButton = new Button(() => onOpenHost?.Invoke())
             {
@@ -128,32 +121,35 @@ namespace schrader
                 new Color(0.20f, 0.52f, 0.92f, 1f),
                 new Color(0.10f, 0.30f, 0.60f, 1f),
                 Color.white));
+            view.HostButton.style.minWidth = 172;
+            view.HostButton.style.marginRight = new StyleLength(new Length(6, LengthUnit.Pixel));
 
             view.ContinueButton = new Button(() => onContinue?.Invoke())
             {
                 text = "Continue"
             };
             StyleButton(view.ContinueButton, new ButtonPalette(
-                new Color(0.16f, 0.53f, 0.36f, 0.98f),
-                new Color(0.23f, 0.66f, 0.44f, 1f),
-                new Color(0.12f, 0.42f, 0.28f, 1f),
+                new Color(0.74f, 0.54f, 0.24f, 0.98f),
+                new Color(0.82f, 0.61f, 0.29f, 1f),
+                new Color(0.60f, 0.42f, 0.18f, 1f),
                 Color.white));
+            view.ContinueButton.style.height = 44;
+            view.ContinueButton.style.minWidth = 208;
 
             view.CloseButton = new Button(() => onClose?.Invoke())
             {
                 text = "Close"
             };
             StyleButton(view.CloseButton, new ButtonPalette(
-                new Color(0.23f, 0.28f, 0.34f, 0.98f),
-                new Color(0.31f, 0.37f, 0.45f, 1f),
-                new Color(0.18f, 0.22f, 0.27f, 1f),
+                new Color(0.19f, 0.23f, 0.29f, 0.98f),
+                new Color(0.25f, 0.30f, 0.38f, 1f),
+                new Color(0.14f, 0.17f, 0.22f, 1f),
                 new Color(0.94f, 0.96f, 0.99f, 1f)));
-            view.ContinueButton.style.marginLeft = new StyleLength(new Length(12, LengthUnit.Pixel));
-            view.CloseButton.style.marginLeft = new StyleLength(new Length(12, LengthUnit.Pixel));
+            view.ContinueButton.style.marginLeft = new StyleLength(new Length(24, LengthUnit.Pixel));
+            view.CloseButton.style.display = DisplayStyle.None;
 
             buttonRow.Add(view.HostButton);
             buttonRow.Add(view.ContinueButton);
-            buttonRow.Add(view.CloseButton);
 
             panel.Add(headerChip);
             panel.Add(view.TitleLabel);
@@ -223,44 +219,50 @@ namespace schrader
             teamPanel.style.flexDirection = FlexDirection.Column;
             teamPanel.style.flexGrow = 1;
             teamPanel.style.flexBasis = new StyleLength(new Length(0, LengthUnit.Pixel));
-            teamPanel.style.minWidth = 308;
-            teamPanel.style.maxWidth = 442;
+            teamPanel.style.minWidth = 318;
+            teamPanel.style.maxWidth = 474;
             teamPanel.style.marginLeft = new StyleLength(new Length(8, LengthUnit.Pixel));
             teamPanel.style.marginRight = new StyleLength(new Length(8, LengthUnit.Pixel));
             teamPanel.style.marginBottom = new StyleLength(new Length(14, LengthUnit.Pixel));
-            teamPanel.style.paddingTop = new StyleLength(new Length(14, LengthUnit.Pixel));
-            teamPanel.style.paddingBottom = new StyleLength(new Length(14, LengthUnit.Pixel));
-            teamPanel.style.paddingLeft = new StyleLength(new Length(14, LengthUnit.Pixel));
-            teamPanel.style.paddingRight = new StyleLength(new Length(14, LengthUnit.Pixel));
-            teamPanel.style.backgroundColor = new StyleColor(TeamPanelColor(team));
-            teamPanel.style.borderTopLeftRadius = new StyleLength(new Length(22, LengthUnit.Pixel));
-            teamPanel.style.borderTopRightRadius = new StyleLength(new Length(22, LengthUnit.Pixel));
-            teamPanel.style.borderBottomLeftRadius = new StyleLength(new Length(22, LengthUnit.Pixel));
-            teamPanel.style.borderBottomRightRadius = new StyleLength(new Length(22, LengthUnit.Pixel));
+            teamPanel.style.paddingTop = new StyleLength(new Length(18, LengthUnit.Pixel));
+            teamPanel.style.paddingBottom = new StyleLength(new Length(18, LengthUnit.Pixel));
+            teamPanel.style.paddingLeft = new StyleLength(new Length(18, LengthUnit.Pixel));
+            teamPanel.style.paddingRight = new StyleLength(new Length(18, LengthUnit.Pixel));
+            teamPanel.style.backgroundColor = new StyleColor(TeamSurfaceColor(team));
+            teamPanel.style.borderTopLeftRadius = new StyleLength(new Length(24, LengthUnit.Pixel));
+            teamPanel.style.borderTopRightRadius = new StyleLength(new Length(24, LengthUnit.Pixel));
+            teamPanel.style.borderBottomLeftRadius = new StyleLength(new Length(24, LengthUnit.Pixel));
+            teamPanel.style.borderBottomRightRadius = new StyleLength(new Length(24, LengthUnit.Pixel));
             teamPanel.style.borderTopWidth = 1;
             teamPanel.style.borderRightWidth = 1;
             teamPanel.style.borderBottomWidth = 1;
             teamPanel.style.borderLeftWidth = 1;
-            teamPanel.style.borderTopColor = new StyleColor(Tint(TeamAccent(team), 1.08f, 0.10f));
-            teamPanel.style.borderRightColor = new StyleColor(Tint(TeamAccent(team), 0.85f, -0.08f));
-            teamPanel.style.borderBottomColor = new StyleColor(new Color(0f, 0f, 0f, 0.32f));
-            teamPanel.style.borderLeftColor = new StyleColor(Tint(TeamAccent(team), 0.85f, -0.08f));
+            ApplyUniformBorder(teamPanel, new Color(1f, 1f, 1f, 0.05f));
             teamView.Panel = teamPanel;
+
+            var accentRail = new VisualElement();
+            accentRail.style.height = 3;
+            accentRail.style.marginBottom = new StyleLength(new Length(14, LengthUnit.Pixel));
+            accentRail.style.backgroundColor = new StyleColor(Tint(TeamAccent(team), 0.96f, -0.04f));
+            accentRail.style.borderTopLeftRadius = new StyleLength(new Length(999, LengthUnit.Pixel));
+            accentRail.style.borderTopRightRadius = new StyleLength(new Length(999, LengthUnit.Pixel));
+            accentRail.style.borderBottomLeftRadius = new StyleLength(new Length(999, LengthUnit.Pixel));
+            accentRail.style.borderBottomRightRadius = new StyleLength(new Length(999, LengthUnit.Pixel));
 
             var titleRow = new VisualElement();
             titleRow.style.display = DisplayStyle.Flex;
             titleRow.style.flexDirection = FlexDirection.Row;
             titleRow.style.justifyContent = Justify.SpaceBetween;
             titleRow.style.alignItems = Align.Center;
-            titleRow.style.marginBottom = new StyleLength(new Length(10, LengthUnit.Pixel));
+            titleRow.style.marginBottom = new StyleLength(new Length(14, LengthUnit.Pixel));
 
             var titleColumn = new VisualElement();
             titleColumn.style.display = DisplayStyle.Flex;
             titleColumn.style.flexDirection = FlexDirection.Column;
 
-            var teamLabel = CreateLabel(FormatTeamName(team), 17, FontStyle.Bold, TextAnchor.MiddleLeft, ReadableTeamColor(team));
-            var teamMeta = CreateLabel("Final MMR and player stats", 11, FontStyle.Normal, TextAnchor.MiddleLeft, new Color(0.86f, 0.90f, 0.96f, 0.72f));
-            teamMeta.style.marginTop = new StyleLength(new Length(2, LengthUnit.Pixel));
+            var teamLabel = CreateLabel(FormatTeamName(team), 18, FontStyle.Bold, TextAnchor.MiddleLeft, ReadableTeamColor(team));
+            var teamMeta = CreateLabel("Featured player and roster", 10, FontStyle.Normal, TextAnchor.MiddleLeft, new Color(0.75f, 0.82f, 0.89f, 0.56f));
+            teamMeta.style.marginTop = new StyleLength(new Length(3, LengthUnit.Pixel));
             titleColumn.Add(teamLabel);
             titleColumn.Add(teamMeta);
 
@@ -270,8 +272,8 @@ namespace schrader
             headerMeta.style.alignItems = Align.FlexEnd;
 
             var statusLabel = CreatePillLabel("TEAM", 10, FontStyle.Bold, TextAnchor.MiddleCenter, new Color(0.94f, 0.97f, 1f, 1f));
-            ApplyPillVisual(statusLabel, new Color(0.24f, 0.29f, 0.37f, 0.95f), new Color(0.94f, 0.97f, 1f, 1f));
-            var summaryLabel = CreateLabel("0 PLAYERS", 10, FontStyle.Bold, TextAnchor.MiddleRight, new Color(0.86f, 0.91f, 0.97f, 0.86f));
+            ApplyPillVisual(statusLabel, new Color(0.16f, 0.20f, 0.27f, 0.92f), new Color(0.92f, 0.95f, 1f, 1f));
+            var summaryLabel = CreateLabel("0 PLAYERS", 10, FontStyle.Bold, TextAnchor.MiddleRight, new Color(0.82f, 0.88f, 0.95f, 0.84f));
             summaryLabel.style.marginTop = new StyleLength(new Length(5, LengthUnit.Pixel));
             headerMeta.Add(statusLabel);
             headerMeta.Add(summaryLabel);
@@ -285,11 +287,11 @@ namespace schrader
             var mvpContainer = new VisualElement();
             mvpContainer.style.display = DisplayStyle.Flex;
             mvpContainer.style.flexDirection = FlexDirection.Column;
-            mvpContainer.style.minHeight = 122;
-            mvpContainer.style.marginBottom = new StyleLength(new Length(12, LengthUnit.Pixel));
+            mvpContainer.style.minHeight = 136;
+            mvpContainer.style.marginBottom = new StyleLength(new Length(16, LengthUnit.Pixel));
             teamView.MvpContainer = mvpContainer;
 
-            var rosterTitle = CreateLabel("TEAM BREAKDOWN", 11, FontStyle.Bold, TextAnchor.MiddleLeft, new Color(0.90f, 0.93f, 0.97f, 0.82f));
+            var rosterTitle = CreateLabel("FULL ROSTER", 11, FontStyle.Bold, TextAnchor.MiddleLeft, new Color(0.88f, 0.92f, 0.97f, 0.82f));
             rosterTitle.style.marginBottom = new StyleLength(new Length(8, LengthUnit.Pixel));
             teamView.RosterLabel = rosterTitle;
 
@@ -298,6 +300,7 @@ namespace schrader
             playersContainer.style.flexDirection = FlexDirection.Column;
             teamView.PlayersContainer = playersContainer;
 
+            teamPanel.Add(accentRail);
             teamPanel.Add(titleRow);
             teamPanel.Add(mvpContainer);
             teamPanel.Add(rosterTitle);
@@ -322,19 +325,19 @@ namespace schrader
             var teamPlayers = SortPlayers(state, team).ToArray();
             var additionalPlayerCount = Mathf.Max(0, teamPlayers.Length - 1);
             teamView.SummaryLabel.text = teamPlayers.Length == 1 ? "1 PLAYER" : $"{teamPlayers.Length} PLAYERS";
-            teamView.RosterLabel.text = additionalPlayerCount > 0 ? $"TEAM BREAKDOWN · {additionalPlayerCount}" : "TEAM BREAKDOWN";
+            teamView.RosterLabel.text = additionalPlayerCount > 0 ? $"FULL ROSTER · {additionalPlayerCount} MORE" : "FULL ROSTER";
 
             if (teamPlayers.Length > 0)
             {
                 var isWinner = state.WinningTeam != TeamResult.Unknown && team == state.WinningTeam;
                 ApplyPillVisual(teamView.StatusLabel,
-                    isWinner ? new Color(0.76f, 0.62f, 0.20f, 0.92f) : Tint(TeamAccent(team), 0.84f, -0.06f),
-                    isWinner ? new Color(0.18f, 0.14f, 0.04f, 1f) : new Color(0.95f, 0.97f, 1f, 1f));
-                teamView.StatusLabel.text = isWinner ? "WINNER" : "TEAM";
+                    isWinner ? new Color(0.74f, 0.56f, 0.23f, 0.92f) : new Color(0.17f, 0.21f, 0.28f, 0.92f),
+                    isWinner ? new Color(0.17f, 0.13f, 0.05f, 1f) : new Color(0.94f, 0.97f, 1f, 1f));
+                teamView.StatusLabel.text = isWinner ? "WINNER" : "LIVE DATA";
             }
             else
             {
-                ApplyPillVisual(teamView.StatusLabel, new Color(0.24f, 0.29f, 0.37f, 0.95f), new Color(0.84f, 0.89f, 0.96f, 0.94f));
+                ApplyPillVisual(teamView.StatusLabel, new Color(0.17f, 0.21f, 0.28f, 0.92f), new Color(0.84f, 0.89f, 0.96f, 0.94f));
                 teamView.StatusLabel.text = "NO DATA";
             }
 
@@ -382,8 +385,6 @@ namespace schrader
 
             return (player.Goals * 5)
                 + (player.Assists * 3)
-                + (player.Saves * 3)
-                + player.Shots
                 + (player.Team == winningTeam ? 2 : 0);
         }
 
@@ -392,27 +393,24 @@ namespace schrader
             var card = new VisualElement();
             card.style.display = DisplayStyle.Flex;
             card.style.flexDirection = FlexDirection.Row;
-            card.style.alignItems = Align.Center;
-            card.style.paddingTop = new StyleLength(new Length(14, LengthUnit.Pixel));
-            card.style.paddingBottom = new StyleLength(new Length(14, LengthUnit.Pixel));
-            card.style.paddingLeft = new StyleLength(new Length(14, LengthUnit.Pixel));
-            card.style.paddingRight = new StyleLength(new Length(14, LengthUnit.Pixel));
-            card.style.backgroundColor = new StyleColor(Tint(TeamPanelColor(team), winningTeam ? 1.14f : 1.06f, 0.12f));
-            card.style.borderTopLeftRadius = new StyleLength(new Length(20, LengthUnit.Pixel));
-            card.style.borderTopRightRadius = new StyleLength(new Length(20, LengthUnit.Pixel));
-            card.style.borderBottomLeftRadius = new StyleLength(new Length(20, LengthUnit.Pixel));
-            card.style.borderBottomRightRadius = new StyleLength(new Length(20, LengthUnit.Pixel));
+            card.style.alignItems = Align.FlexStart;
+            card.style.paddingTop = new StyleLength(new Length(18, LengthUnit.Pixel));
+            card.style.paddingBottom = new StyleLength(new Length(18, LengthUnit.Pixel));
+            card.style.paddingLeft = new StyleLength(new Length(18, LengthUnit.Pixel));
+            card.style.paddingRight = new StyleLength(new Length(18, LengthUnit.Pixel));
+            card.style.backgroundColor = new StyleColor(Tint(TeamSurfaceColor(team), winningTeam ? 1.10f : 1.04f, 0.08f));
+            card.style.borderTopLeftRadius = new StyleLength(new Length(22, LengthUnit.Pixel));
+            card.style.borderTopRightRadius = new StyleLength(new Length(22, LengthUnit.Pixel));
+            card.style.borderBottomLeftRadius = new StyleLength(new Length(22, LengthUnit.Pixel));
+            card.style.borderBottomRightRadius = new StyleLength(new Length(22, LengthUnit.Pixel));
             card.style.borderTopWidth = 1;
             card.style.borderRightWidth = 1;
             card.style.borderBottomWidth = 1;
             card.style.borderLeftWidth = 1;
-            card.style.borderTopColor = new StyleColor(Tint(TeamAccent(team), 1.25f, 0.22f));
-            card.style.borderRightColor = new StyleColor(Tint(TeamAccent(team), 0.95f, 0.04f));
-            card.style.borderBottomColor = new StyleColor(new Color(0f, 0f, 0f, 0.34f));
-            card.style.borderLeftColor = new StyleColor(Tint(TeamAccent(team), 0.95f, 0.04f));
+            ApplyUniformBorder(card, new Color(1f, 1f, 1f, 0.05f));
 
-            var avatar = CreateAvatarFrame(player, 58, team, emphasize: true);
-            avatar.style.marginRight = new StyleLength(new Length(14, LengthUnit.Pixel));
+            var avatar = CreateAvatarFrame(player, 64, team, emphasize: true);
+            avatar.style.marginRight = new StyleLength(new Length(16, LengthUnit.Pixel));
 
             var content = new VisualElement();
             content.style.display = DisplayStyle.Flex;
@@ -425,12 +423,12 @@ namespace schrader
             topRow.style.justifyContent = Justify.SpaceBetween;
             topRow.style.alignItems = Align.Center;
 
-            var badge = CreatePillLabel("♛ MVP", 11, FontStyle.Bold, TextAnchor.MiddleCenter, new Color(0.20f, 0.15f, 0.05f, 1f));
-            ApplyPillVisual(badge, new Color(0.95f, 0.82f, 0.38f, 0.98f), new Color(0.20f, 0.15f, 0.05f, 1f));
-            StartPulseAnimation(badge, 0.92f, 0.06f, 0.025f, 2.5f);
+            var badgeText = player != null && player.IsMVP ? "MVP" : "FEATURED PLAYER";
+            var badge = CreatePillLabel(badgeText, 10, FontStyle.Bold, TextAnchor.MiddleCenter, new Color(0.20f, 0.15f, 0.05f, 1f));
+            ApplyPillVisual(badge, new Color(0.87f, 0.74f, 0.34f, 0.92f), new Color(0.20f, 0.15f, 0.05f, 1f));
 
             var delta = CreatePillLabel(FormatRatingDelta(player), 13, FontStyle.Bold, TextAnchor.MiddleCenter, RatingDeltaColor(player));
-            ApplyPillVisual(delta, Tint(RatingDeltaColor(player), 0.36f, 0.10f), RatingDeltaColor(player));
+            ApplyPillVisual(delta, Tint(RatingDeltaColor(player), 0.28f, 0.08f), RatingDeltaColor(player));
 
             topRow.Add(badge);
             topRow.Add(delta);
@@ -439,37 +437,35 @@ namespace schrader
             nameRow.style.display = DisplayStyle.Flex;
             nameRow.style.flexDirection = FlexDirection.Row;
             nameRow.style.alignItems = Align.Center;
-            nameRow.style.marginTop = new StyleLength(new Length(7, LengthUnit.Pixel));
+            nameRow.style.marginTop = new StyleLength(new Length(10, LengthUnit.Pixel));
 
-            var nameLabel = CreateLabel(player.Username ?? "---", 20, FontStyle.Bold, TextAnchor.MiddleLeft, Color.white);
+            var nameLabel = CreateLabel(FormatVisiblePlayerName(player), 22, FontStyle.Bold, TextAnchor.MiddleLeft, Color.white);
             nameRow.Add(nameLabel);
             if (player != null && player.IsSharedGoalie)
             {
                 nameRow.Add(CreateSharedGoalieBadge(11));
             }
 
-            var statsRow = new VisualElement();
-            statsRow.style.display = DisplayStyle.Flex;
-            statsRow.style.flexDirection = FlexDirection.Row;
-            statsRow.style.flexWrap = Wrap.Wrap;
-            statsRow.style.marginTop = new StyleLength(new Length(8, LengthUnit.Pixel));
-            statsRow.Add(CreateStatChip("G", player.Goals, new Color(0.45f, 0.89f, 0.62f, 1f)));
-            statsRow.Add(CreateStatChip("A", player.Assists, new Color(0.56f, 0.84f, 1f, 1f)));
-            statsRow.Add(CreateStatChip("S", player.Saves, new Color(0.98f, 0.80f, 0.42f, 1f)));
-            statsRow.Add(CreateStatChip("SH", player.Shots, new Color(0.86f, 0.90f, 0.97f, 1f)));
+            var statsRail = new VisualElement();
+            statsRail.style.display = DisplayStyle.Flex;
+            statsRail.style.flexDirection = FlexDirection.Row;
+            statsRail.style.flexWrap = Wrap.Wrap;
+            statsRail.style.marginTop = new StyleLength(new Length(10, LengthUnit.Pixel));
+            statsRail.Add(CreateMetricBlock("GOALS", player?.Goals ?? 0, new Color(0.45f, 0.89f, 0.62f, 1f)));
+            statsRail.Add(CreateMetricBlock("ASSISTS", player?.Assists ?? 0, new Color(0.56f, 0.84f, 1f, 1f)));
 
             var mmrRow = new VisualElement();
             mmrRow.style.display = DisplayStyle.Flex;
             mmrRow.style.flexDirection = FlexDirection.Row;
             mmrRow.style.alignItems = Align.Center;
-            mmrRow.style.marginTop = new StyleLength(new Length(9, LengthUnit.Pixel));
+            mmrRow.style.marginTop = new StyleLength(new Length(12, LengthUnit.Pixel));
 
-            var mmrLabel = CreateLabel(FormatDetailedRatingSummary(player), 12, FontStyle.Bold, TextAnchor.MiddleLeft, new Color(0.96f, 0.92f, 0.74f, 1f));
+            var mmrLabel = CreateLabel(FormatDetailedRatingSummary(player), 12, FontStyle.Bold, TextAnchor.MiddleLeft, new Color(0.94f, 0.90f, 0.74f, 1f));
             mmrRow.Add(mmrLabel);
 
             content.Add(topRow);
             content.Add(nameRow);
-            content.Add(statsRow);
+            content.Add(statsRail);
             content.Add(mmrRow);
 
             card.Add(avatar);
@@ -485,24 +481,21 @@ namespace schrader
             row.style.flexDirection = FlexDirection.Row;
             row.style.justifyContent = Justify.SpaceBetween;
             row.style.alignItems = Align.Center;
-            row.style.paddingTop = new StyleLength(new Length(10, LengthUnit.Pixel));
-            row.style.paddingBottom = new StyleLength(new Length(10, LengthUnit.Pixel));
-            row.style.paddingLeft = new StyleLength(new Length(12, LengthUnit.Pixel));
-            row.style.paddingRight = new StyleLength(new Length(12, LengthUnit.Pixel));
+            row.style.paddingTop = new StyleLength(new Length(12, LengthUnit.Pixel));
+            row.style.paddingBottom = new StyleLength(new Length(12, LengthUnit.Pixel));
+            row.style.paddingLeft = new StyleLength(new Length(14, LengthUnit.Pixel));
+            row.style.paddingRight = new StyleLength(new Length(14, LengthUnit.Pixel));
             row.style.marginBottom = new StyleLength(new Length(8, LengthUnit.Pixel));
-            row.style.backgroundColor = new StyleColor(Tint(TeamPanelColor(team), 0.95f, 0.06f));
-            row.style.borderTopLeftRadius = new StyleLength(new Length(14, LengthUnit.Pixel));
-            row.style.borderTopRightRadius = new StyleLength(new Length(14, LengthUnit.Pixel));
-            row.style.borderBottomLeftRadius = new StyleLength(new Length(14, LengthUnit.Pixel));
-            row.style.borderBottomRightRadius = new StyleLength(new Length(14, LengthUnit.Pixel));
+            row.style.backgroundColor = new StyleColor(Tint(TeamSurfaceColor(team), 0.98f, 0.04f));
+            row.style.borderTopLeftRadius = new StyleLength(new Length(16, LengthUnit.Pixel));
+            row.style.borderTopRightRadius = new StyleLength(new Length(16, LengthUnit.Pixel));
+            row.style.borderBottomLeftRadius = new StyleLength(new Length(16, LengthUnit.Pixel));
+            row.style.borderBottomRightRadius = new StyleLength(new Length(16, LengthUnit.Pixel));
             row.style.borderTopWidth = 1;
             row.style.borderRightWidth = 1;
             row.style.borderBottomWidth = 1;
             row.style.borderLeftWidth = 1;
-            row.style.borderTopColor = new StyleColor(new Color(1f, 1f, 1f, 0.12f));
-            row.style.borderRightColor = new StyleColor(new Color(1f, 1f, 1f, 0.06f));
-            row.style.borderBottomColor = new StyleColor(new Color(0f, 0f, 0f, 0.24f));
-            row.style.borderLeftColor = new StyleColor(new Color(1f, 1f, 1f, 0.06f));
+            ApplyUniformBorder(row, new Color(1f, 1f, 1f, 0.04f));
 
             var left = new VisualElement();
             left.style.display = DisplayStyle.Flex;
@@ -510,25 +503,20 @@ namespace schrader
             left.style.alignItems = Align.Center;
             left.style.flexGrow = 1;
 
-            left.Add(CreateAvatarFrame(player, 28, team, emphasize: false));
+            var avatar = CreateAvatarFrame(player, 30, team, emphasize: false);
+            avatar.style.marginRight = new StyleLength(new Length(12, LengthUnit.Pixel));
+            left.Add(avatar);
 
             var textColumn = new VisualElement();
             textColumn.style.display = DisplayStyle.Flex;
             textColumn.style.flexDirection = FlexDirection.Column;
             textColumn.style.flexGrow = 1;
 
-            var nameLabel = CreateLabel(player.Username ?? "---", 15, FontStyle.Bold, TextAnchor.MiddleLeft, ReadableTeamColor(team));
+            var nameLabel = CreateLabel(FormatVisiblePlayerName(player), 15, FontStyle.Bold, TextAnchor.MiddleLeft, new Color(0.96f, 0.97f, 1f, 0.98f));
             var nameRow = new VisualElement();
             nameRow.style.display = DisplayStyle.Flex;
             nameRow.style.flexDirection = FlexDirection.Row;
             nameRow.style.alignItems = Align.Center;
-
-            if (player.IsMVP)
-            {
-                var crown = CreateLabel("♛", 13, FontStyle.Bold, TextAnchor.MiddleLeft, new Color(1f, 0.90f, 0.60f, 1f));
-                crown.style.marginRight = new StyleLength(new Length(6, LengthUnit.Pixel));
-                nameRow.Add(crown);
-            }
 
             nameRow.Add(nameLabel);
             if (player != null && player.IsSharedGoalie)
@@ -536,8 +524,8 @@ namespace schrader
                 nameRow.Add(CreateSharedGoalieBadge(10));
             }
 
-            var statsLabel = CreateLabel(FormatInlineStats(player), 11, FontStyle.Normal, TextAnchor.MiddleLeft, new Color(0.83f, 0.89f, 0.95f, 0.94f));
-            statsLabel.style.marginTop = new StyleLength(new Length(4, LengthUnit.Pixel));
+            var statsLabel = CreateLabel(FormatInlineStats(player), 11, FontStyle.Normal, TextAnchor.MiddleLeft, new Color(0.76f, 0.84f, 0.92f, 0.90f));
+            statsLabel.style.marginTop = new StyleLength(new Length(5, LengthUnit.Pixel));
 
             textColumn.Add(nameRow);
             textColumn.Add(statsLabel);
@@ -547,13 +535,13 @@ namespace schrader
             right.style.display = DisplayStyle.Flex;
             right.style.flexDirection = FlexDirection.Column;
             right.style.alignItems = Align.FlexEnd;
-            right.style.marginLeft = new StyleLength(new Length(12, LengthUnit.Pixel));
+            right.style.marginLeft = new StyleLength(new Length(16, LengthUnit.Pixel));
 
-            var deltaLabel = CreatePillLabel(FormatRatingDelta(player), 11, FontStyle.Bold, TextAnchor.MiddleCenter, RatingDeltaColor(player));
-            ApplyPillVisual(deltaLabel, Tint(RatingDeltaColor(player), 0.35f, 0.08f), RatingDeltaColor(player));
+            var deltaLabel = CreatePillLabel(FormatRatingDelta(player), 10, FontStyle.Bold, TextAnchor.MiddleCenter, RatingDeltaColor(player));
+            ApplyPillVisual(deltaLabel, Tint(RatingDeltaColor(player), 0.24f, 0.06f), RatingDeltaColor(player));
 
             var mmrLabel = CreateLabel(FormatCompactRatingSummary(player), 11, FontStyle.Normal, TextAnchor.MiddleRight, new Color(0.95f, 0.92f, 0.75f, 1f));
-            mmrLabel.style.marginTop = new StyleLength(new Length(4, LengthUnit.Pixel));
+            mmrLabel.style.marginTop = new StyleLength(new Length(5, LengthUnit.Pixel));
 
             right.Add(deltaLabel);
             right.Add(mmrLabel);
@@ -573,27 +561,25 @@ namespace schrader
             card.style.minHeight = 104;
             card.style.paddingTop = new StyleLength(new Length(14, LengthUnit.Pixel));
             card.style.paddingBottom = new StyleLength(new Length(14, LengthUnit.Pixel));
-            card.style.paddingLeft = new StyleLength(new Length(12, LengthUnit.Pixel));
-            card.style.paddingRight = new StyleLength(new Length(12, LengthUnit.Pixel));
-            card.style.backgroundColor = new StyleColor(Tint(TeamPanelColor(team), 0.90f, 0.03f));
-            card.style.borderTopLeftRadius = new StyleLength(new Length(18, LengthUnit.Pixel));
-            card.style.borderTopRightRadius = new StyleLength(new Length(18, LengthUnit.Pixel));
-            card.style.borderBottomLeftRadius = new StyleLength(new Length(18, LengthUnit.Pixel));
-            card.style.borderBottomRightRadius = new StyleLength(new Length(18, LengthUnit.Pixel));
+            card.style.paddingLeft = new StyleLength(new Length(14, LengthUnit.Pixel));
+            card.style.paddingRight = new StyleLength(new Length(14, LengthUnit.Pixel));
+            card.style.backgroundColor = new StyleColor(Tint(TeamSurfaceColor(team), 0.88f, 0.01f));
+            card.style.borderTopLeftRadius = new StyleLength(new Length(20, LengthUnit.Pixel));
+            card.style.borderTopRightRadius = new StyleLength(new Length(20, LengthUnit.Pixel));
+            card.style.borderBottomLeftRadius = new StyleLength(new Length(20, LengthUnit.Pixel));
+            card.style.borderBottomRightRadius = new StyleLength(new Length(20, LengthUnit.Pixel));
             card.style.borderTopWidth = 1;
             card.style.borderRightWidth = 1;
             card.style.borderBottomWidth = 1;
             card.style.borderLeftWidth = 1;
-            card.style.borderTopColor = new StyleColor(new Color(1f, 1f, 1f, 0.10f));
-            card.style.borderRightColor = new StyleColor(new Color(1f, 1f, 1f, 0.05f));
-            card.style.borderBottomColor = new StyleColor(new Color(0f, 0f, 0f, 0.26f));
-            card.style.borderLeftColor = new StyleColor(new Color(1f, 1f, 1f, 0.05f));
+            ApplyUniformBorder(card, new Color(1f, 1f, 1f, 0.035f));
 
-            var marker = CreateLabel("•", 18, FontStyle.Bold, TextAnchor.MiddleCenter, Tint(TeamAccent(team), 1.15f, 0.10f));
-            var titleLabel = CreateLabel(title, 13, FontStyle.Bold, TextAnchor.MiddleCenter, new Color(0.90f, 0.94f, 0.99f, 0.94f));
-            titleLabel.style.marginTop = new StyleLength(new Length(2, LengthUnit.Pixel));
-            var subtitleLabel = CreateLabel(subtitle, 11, FontStyle.Normal, TextAnchor.MiddleCenter, new Color(0.76f, 0.82f, 0.90f, 0.82f));
-            subtitleLabel.style.marginTop = new StyleLength(new Length(4, LengthUnit.Pixel));
+            var marker = CreateLabel("•", 14, FontStyle.Bold, TextAnchor.MiddleCenter, Tint(TeamAccent(team), 0.95f, -0.05f));
+            marker.style.opacity = 0.7f;
+            var titleLabel = CreateLabel(title, 12, FontStyle.Bold, TextAnchor.MiddleCenter, new Color(0.86f, 0.91f, 0.97f, 0.88f));
+            titleLabel.style.marginTop = new StyleLength(new Length(1, LengthUnit.Pixel));
+            var subtitleLabel = CreateLabel(subtitle, 10, FontStyle.Normal, TextAnchor.MiddleCenter, new Color(0.72f, 0.79f, 0.87f, 0.68f));
+            subtitleLabel.style.marginTop = new StyleLength(new Length(3, LengthUnit.Pixel));
 
             card.Add(marker);
             card.Add(titleLabel);
@@ -612,7 +598,7 @@ namespace schrader
             wrapper.style.paddingBottom = new StyleLength(new Length(10, LengthUnit.Pixel));
 
             var label = CreatePillLabel(text, 11, FontStyle.Normal, TextAnchor.MiddleCenter, new Color(0.77f, 0.83f, 0.91f, 0.90f));
-            ApplyPillVisual(label, new Color(0.17f, 0.22f, 0.29f, 0.76f), new Color(0.77f, 0.83f, 0.91f, 0.90f));
+            ApplyPillVisual(label, new Color(0.14f, 0.18f, 0.24f, 0.78f), new Color(0.77f, 0.83f, 0.91f, 0.90f));
             wrapper.Add(label);
             return wrapper;
         }
@@ -672,7 +658,44 @@ namespace schrader
 
         private static string FormatInlineStats(MatchResultPlayerMessage player)
         {
-            return $"G {player?.Goals ?? 0}   A {player?.Assists ?? 0}   S {player?.Saves ?? 0}   SH {player?.Shots ?? 0}";
+            return $"Goals {player?.Goals ?? 0}   ·   Assists {player?.Assists ?? 0}";
+        }
+
+        private static VisualElement CreateMetricBlock(string label, int value, Color accent)
+        {
+            var block = new VisualElement();
+            block.style.display = DisplayStyle.Flex;
+            block.style.flexDirection = FlexDirection.Column;
+            block.style.marginRight = new StyleLength(new Length(10, LengthUnit.Pixel));
+            block.style.paddingTop = new StyleLength(new Length(8, LengthUnit.Pixel));
+            block.style.paddingBottom = new StyleLength(new Length(8, LengthUnit.Pixel));
+            block.style.paddingLeft = new StyleLength(new Length(10, LengthUnit.Pixel));
+            block.style.paddingRight = new StyleLength(new Length(10, LengthUnit.Pixel));
+            block.style.minWidth = 84;
+            block.style.backgroundColor = new StyleColor(Tint(accent, 0.16f, 0.02f));
+            block.style.borderTopLeftRadius = new StyleLength(new Length(14, LengthUnit.Pixel));
+            block.style.borderTopRightRadius = new StyleLength(new Length(14, LengthUnit.Pixel));
+            block.style.borderBottomLeftRadius = new StyleLength(new Length(14, LengthUnit.Pixel));
+            block.style.borderBottomRightRadius = new StyleLength(new Length(14, LengthUnit.Pixel));
+            block.style.borderTopWidth = 1;
+            block.style.borderRightWidth = 1;
+            block.style.borderBottomWidth = 1;
+            block.style.borderLeftWidth = 1;
+            ApplyUniformBorder(block, Tint(accent, 0.34f, 0.02f));
+
+            var labelElement = CreateLabel(label, 10, FontStyle.Bold, TextAnchor.MiddleLeft, new Color(0.76f, 0.83f, 0.91f, 0.82f));
+            var valueElement = CreateLabel(value.ToString(), 18, FontStyle.Bold, TextAnchor.MiddleLeft, accent);
+            valueElement.style.marginTop = new StyleLength(new Length(2, LengthUnit.Pixel));
+
+            block.Add(labelElement);
+            block.Add(valueElement);
+            return block;
+        }
+
+        private static string FormatVisiblePlayerName(MatchResultPlayerMessage player)
+        {
+            var clean = NormalizePresentedName(player?.Username);
+            return string.IsNullOrWhiteSpace(clean) ? "---" : clean;
         }
 
         private static string FormatRatingDelta(MatchResultPlayerMessage player)
@@ -743,6 +766,79 @@ namespace schrader
             return badge;
         }
 
+        private static string NormalizePresentedName(string username)
+        {
+            var clean = StripRichTextTags(username ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(clean))
+            {
+                return "---";
+            }
+
+            var bulletIndex = clean.LastIndexOf('•');
+            if (bulletIndex > 0)
+            {
+                var suffix = clean.Substring(bulletIndex + 1).Trim();
+                if (suffix.EndsWith("MMR", StringComparison.OrdinalIgnoreCase))
+                {
+                    clean = clean.Substring(0, bulletIndex).TrimEnd();
+                }
+            }
+
+            var numberIndex = FindPlayerNumberToken(clean);
+            if (numberIndex >= 0)
+            {
+                clean = clean.Substring(numberIndex).Trim();
+            }
+
+            clean = clean.Replace("★", string.Empty).Replace("☆", string.Empty).Trim();
+            clean = TrimLeadingIdentityDecorators(clean);
+            return CollapseWhitespace(clean);
+        }
+
+        private static int FindPlayerNumberToken(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return -1;
+            }
+
+            for (var index = 0; index < value.Length - 1; index++)
+            {
+                if (value[index] == '#' && char.IsDigit(value[index + 1]))
+                {
+                    return index;
+                }
+            }
+
+            return -1;
+        }
+
+        private static string TrimLeadingIdentityDecorators(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return value;
+            }
+
+            var tokens = CollapseWhitespace(value)
+                .Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries)
+                .ToList();
+            var removableTokens = new[] { "bronze", "silver", "gold", "platinum", "diamond", "elite", "champion", "owner", "mvp" };
+
+            while (tokens.Count > 1)
+            {
+                var token = tokens[0].Trim('[', ']', '(', ')', '-', '•', '|');
+                if (!removableTokens.Contains(token, StringComparer.OrdinalIgnoreCase))
+                {
+                    break;
+                }
+
+                tokens.RemoveAt(0);
+            }
+
+            return string.Join(" ", tokens).Trim();
+        }
+
         private static Color TeamPanelColor(TeamResult team)
         {
             switch (team)
@@ -753,6 +849,19 @@ namespace schrader
                     return new Color(0.10f, 0.17f, 0.28f, 0.90f);
                 default:
                     return new Color(0.14f, 0.14f, 0.18f, 0.90f);
+            }
+        }
+
+        private static Color TeamSurfaceColor(TeamResult team)
+        {
+            switch (team)
+            {
+                case TeamResult.Red:
+                    return new Color(0.17f, 0.10f, 0.12f, 0.72f);
+                case TeamResult.Blue:
+                    return new Color(0.09f, 0.14f, 0.23f, 0.72f);
+                default:
+                    return new Color(0.11f, 0.13f, 0.18f, 0.72f);
             }
         }
 
@@ -801,10 +910,7 @@ namespace schrader
                 frame.style.borderRightWidth = 1;
                 frame.style.borderBottomWidth = 1;
                 frame.style.borderLeftWidth = 1;
-                frame.style.borderTopColor = new StyleColor(new Color(1f, 1f, 1f, emphasize ? 0.22f : 0.16f));
-                frame.style.borderRightColor = new StyleColor(new Color(1f, 1f, 1f, emphasize ? 0.10f : 0.08f));
-                frame.style.borderBottomColor = new StyleColor(new Color(0f, 0f, 0f, 0.26f));
-                frame.style.borderLeftColor = new StyleColor(new Color(1f, 1f, 1f, emphasize ? 0.10f : 0.08f));
+                ApplyUniformBorder(frame, new Color(1f, 1f, 1f, emphasize ? 0.12f : 0.08f));
                 frame.style.overflow = Overflow.Hidden;
 
                 BindAvatarFrameContent(frame, player?.SteamId, player?.Id, player?.Username, size >= 52 ? 20 : 12);
@@ -908,7 +1014,7 @@ namespace schrader
 
             private static string ResolveAvatarInitial(string username)
             {
-                var name = (username ?? string.Empty).Trim();
+                var name = NormalizePresentedName(username);
                 return string.IsNullOrEmpty(name) ? "?" : name.Substring(0, 1).ToUpperInvariant();
             }
 
@@ -934,10 +1040,7 @@ namespace schrader
                 chip.style.borderRightWidth = 1;
                 chip.style.borderBottomWidth = 1;
                 chip.style.borderLeftWidth = 1;
-                chip.style.borderTopColor = new StyleColor(Tint(accent, 0.56f, 0.10f));
-                chip.style.borderRightColor = new StyleColor(Tint(accent, 0.44f, 0.02f));
-                chip.style.borderBottomColor = new StyleColor(new Color(0f, 0f, 0f, 0.20f));
-                chip.style.borderLeftColor = new StyleColor(Tint(accent, 0.44f, 0.02f));
+                ApplyUniformBorder(chip, Tint(accent, 0.44f, 0.02f));
                 return chip;
             }
 
@@ -979,10 +1082,7 @@ namespace schrader
 
             label.style.backgroundColor = new StyleColor(background);
             label.style.color = new StyleColor(textColor);
-            label.style.borderTopColor = new StyleColor(Tint(background, 1.18f, 0.08f));
-            label.style.borderRightColor = new StyleColor(Tint(background, 1.02f, 0.02f));
-            label.style.borderBottomColor = new StyleColor(new Color(0f, 0f, 0f, 0.22f));
-            label.style.borderLeftColor = new StyleColor(Tint(background, 1.02f, 0.02f));
+            ApplyUniformBorder(label, Tint(background, 1.02f, 0.02f));
         }
 
         private static void StyleButton(Button button, ButtonPalette palette)
@@ -1023,11 +1123,85 @@ namespace schrader
 
             button.style.backgroundColor = new StyleColor(color);
             button.style.color = new StyleColor(palette.Text);
-            button.style.borderTopColor = new StyleColor(Tint(color, 1.12f, 0.10f));
-            button.style.borderRightColor = new StyleColor(Tint(color, 1.02f, 0.02f));
-            button.style.borderBottomColor = new StyleColor(new Color(0f, 0f, 0f, 0.30f));
-            button.style.borderLeftColor = new StyleColor(Tint(color, 1.02f, 0.02f));
+            ApplyUniformBorder(button, Tint(color, 1.02f, 0.02f));
             button.transform.scale = new Vector3(scale, scale, 1f);
+        }
+
+        private static void ApplyUniformBorder(VisualElement element, Color color)
+        {
+            if (element == null)
+            {
+                return;
+            }
+
+            element.style.borderTopColor = new StyleColor(color);
+            element.style.borderRightColor = new StyleColor(color);
+            element.style.borderBottomColor = new StyleColor(color);
+            element.style.borderLeftColor = new StyleColor(color);
+        }
+
+        private static string StripRichTextTags(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+            {
+                return value;
+            }
+
+            var buffer = new System.Text.StringBuilder(value.Length);
+            var insideTag = false;
+            for (var index = 0; index < value.Length; index++)
+            {
+                var character = value[index];
+                if (character == '<')
+                {
+                    insideTag = true;
+                    continue;
+                }
+
+                if (insideTag)
+                {
+                    if (character == '>')
+                    {
+                        insideTag = false;
+                    }
+
+                    continue;
+                }
+
+                buffer.Append(character);
+            }
+
+            return buffer.ToString();
+        }
+
+        private static string CollapseWhitespace(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return value;
+            }
+
+            var buffer = new System.Text.StringBuilder(value.Length);
+            var previousWasWhitespace = false;
+            foreach (var character in value)
+            {
+                if (char.IsWhiteSpace(character))
+                {
+                    if (previousWasWhitespace)
+                    {
+                        continue;
+                    }
+
+                    buffer.Append(' ');
+                    previousWasWhitespace = true;
+                    continue;
+                }
+
+                buffer.Append(character);
+                previousWasWhitespace = false;
+            }
+
+            return buffer.ToString().Trim();
         }
 
         private static void StartPanelEntranceAnimation(VisualElement panel)

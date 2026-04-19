@@ -32,10 +32,10 @@ namespace schrader
                 try
                 {
                     UIChat.Instance.Server_SendSystemChatMessage(
-                        $"<size=18><b><color=#00ff00>Welcome to SpeedRankeds!</color></b></size>\n" +
-                        $"<size=13><color=#d8f2e6>Use <b>/commands</b> to display available server chat commands.</color></size>\n" +
-                        $"<size=13><b><color=#78d8ff>Host your own PUCK server</color></b></size>\n" +
-                        $"<size=13><color=#ffffff>{Constants.BuildPuckLandingUrl(Constants.HOST_SOURCE_CHAT)}</color> <color=#9fc4db>(or use <b>/host</b>)</color></size>",
+                        $"<size=18><b><color=#00ff00>Welcome to SpeedRankeds!</color></b></size>\n"
+                        + $"<size=13><color=#d8f2e6>Use <b>/commands</b> to display available server chat commands.</color></size>\n"
+                        + $"<size=13><b><color=#78d8ff>Host your own PUCK server</color></b></size>\n"
+                        + $"<size=13><color=#ffffff>{Constants.BuildPuckLandingUrl(Constants.HOST_SOURCE_CHAT)}</color> <color=#9fc4db>(or use <b>/host</b>)</color></size>",
                         clientId);
                 }
                 catch { }
@@ -133,7 +133,7 @@ namespace schrader
                     {
                         try
                         {
-                            UIChat.Instance.Server_SendSystemChatMessage("<size=13><color=#ffcc66>Ranked</color> Normal start disabled. Redirecting to ranked vote...</size>", clientId);
+                            UIChat.Instance.Server_SendSystemChatMessage(Server.ChatStyle.Message(Server.ChatStyle.RankedModule, "Normal start is disabled here. Redirecting to the ranked ready vote.", Server.ChatTone.Warning, 13), clientId);
                         }
                         catch { }
 
@@ -169,7 +169,7 @@ namespace schrader
                         {
                             var pid = TryGetPlayerId(player, clientId);
                             var mmr = GetMmr(pid);
-                            UIChat.Instance.Server_SendSystemChatMessage($"<size=14>Your MMR: <b>{mmr}</b></size>", clientId);
+                            UIChat.Instance.Server_SendSystemChatMessage(Server.ChatStyle.Message(Server.ChatStyle.RankedModule, $"Your current MMR is {Server.ChatStyle.Emphasis(mmr.ToString())}.", Server.ChatTone.Info), clientId);
                         }
                         catch { }
                         return false;
@@ -179,7 +179,7 @@ namespace schrader
                     {
                         try
                         {
-                            UIChat.Instance.Server_SendSystemChatMessage("<size=14><color=#66ccff>Opening Discord invite...</color></size>", clientId);
+                            UIChat.Instance.Server_SendSystemChatMessage(Server.ChatStyle.Message(Server.ChatStyle.DiscordModule, "Opening the Discord invite in your browser.", Server.ChatTone.Info), clientId);
                         }
                         catch { }
 
@@ -200,7 +200,7 @@ namespace schrader
                         var linkCode = trimmed.Length > 5 ? trimmed.Substring(5).Trim() : string.Empty;
                         if (string.IsNullOrWhiteSpace(linkCode))
                         {
-                            SendSystemChatToClient("<size=14>Usage: /link <code></size>", clientId);
+                                SendSystemChatToClient(Server.ChatStyle.Usage("/link CODE"), clientId);
                             return false;
                         }
 
@@ -212,7 +212,7 @@ namespace schrader
                     {
                         try
                         {
-                            UIChat.Instance.Server_SendSystemChatMessage("<size=14><color=#66ccff>Opening the hosting page in your browser...</color></size>", clientId);
+                            UIChat.Instance.Server_SendSystemChatMessage(Server.ChatStyle.Message(Server.ChatStyle.DiscordModule, "Opening the hosting page in your browser.", Server.ChatTone.Info), clientId);
                         }
                         catch { }
 
@@ -253,7 +253,7 @@ namespace schrader
                     {
                         if (!TryIsAdmin(player, clientId))
                         {
-                            SendCommandHelpLine(clientId, "<color=#ff6666>You must be an admin to use this command</color>");
+                            SendCommandHelpLine(clientId, Server.ChatStyle.Message(Server.ChatStyle.AdminModule, "You must be an admin to use this command.", Server.ChatTone.Error, 13));
                             return false;
                         }
 
@@ -261,7 +261,7 @@ namespace schrader
                             var separatorIndex = commandArgs.LastIndexOf(' ');
                             if (separatorIndex <= 0)
                         {
-                                SendSystemChatToClient("<size=14>Usage: /fc <player|steamId|#number> <red|blue|spectator></size>", clientId);
+                                SendSystemChatToClient(Server.ChatStyle.Usage("/fc <player|steamId|#number> <red|blue|spectator>"), clientId);
                             return false;
                         }
 
@@ -270,11 +270,11 @@ namespace schrader
 
                             if (!Server.RankedSystem.TryForcePlayerTeamByTarget(playerTarget, requestedTeam, out var forceTeamMessage))
                         {
-                            SendSystemChatToClient($"<size=14><color=#ff6666>{forceTeamMessage}</color></size>", clientId);
+                                SendSystemChatToClient(Server.ChatStyle.Message(Server.ChatStyle.AdminModule, forceTeamMessage, Server.ChatTone.Error), clientId);
                             return false;
                         }
 
-                        SendSystemChatToAll($"<size=14><color=#ffcc66>Admin</color> {forceTeamMessage}</size>");
+                            SendSystemChatToAll(Server.ChatStyle.Message(Server.ChatStyle.AdminModule, forceTeamMessage, Server.ChatTone.Warning));
                         return false;
                     }
 
@@ -282,24 +282,24 @@ namespace schrader
                     {
                         if (!TryIsAdmin(player, clientId))
                         {
-                            SendCommandHelpLine(clientId, "<color=#ff6666>You must be an admin to use this command</color>");
+                            SendCommandHelpLine(clientId, Server.ChatStyle.Message(Server.ChatStyle.AdminModule, "You must be an admin to use this command.", Server.ChatTone.Error, 13));
                             return false;
                         }
 
                         var parts = trimmed.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
                         if (parts.Length != 3 || !int.TryParse(parts[1], out var amount))
                         {
-                            SendSystemChatToClient("<size=14>Usage: /addscore <amount> <red|blue></size>", clientId);
+                            SendSystemChatToClient(Server.ChatStyle.Usage("/addscore <amount> <red|blue>"), clientId);
                             return false;
                         }
 
                         if (!Server.RankedSystem.TryAddScore(parts[2], amount, out var redScore, out var blueScore, out var addScoreError))
                         {
-                            SendSystemChatToClient($"<size=14><color=#ff6666>{addScoreError}</color></size>", clientId);
+                            SendSystemChatToClient(Server.ChatStyle.Message(Server.ChatStyle.AdminModule, addScoreError, Server.ChatTone.Error), clientId);
                             return false;
                         }
 
-                        SendSystemChatToAll($"<size=14><color=#ffcc66>Admin</color> adjusted score to <b>Red {redScore} - Blue {blueScore}</b>.</size>");
+                        SendSystemChatToAll(Server.ChatStyle.Message(Server.ChatStyle.AdminModule, $"Adjusted the live score to {Server.ChatStyle.Team(TeamResult.Red)} {Server.ChatStyle.Emphasis(redScore.ToString())} - {Server.ChatStyle.Team(TeamResult.Blue)} {Server.ChatStyle.Emphasis(blueScore.ToString())}.", Server.ChatTone.Warning));
                         return false;
                     }
 
@@ -307,14 +307,14 @@ namespace schrader
                     {
                         if (!TryIsAdmin(player, clientId))
                         {
-                            SendCommandHelpLine(clientId, "<color=#ff6666>You must be an admin to use this command</color>");
+                            SendCommandHelpLine(clientId, Server.ChatStyle.Message(Server.ChatStyle.AdminModule, "You must be an admin to use this command.", Server.ChatTone.Error, 13));
                             return false;
                         }
 
                         var parts = trimmed.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
                         if (parts.Length < 3)
                         {
-                            SendSystemChatToClient("<size=14>Usage: /setnamecolor <player|steamId|#number> <color|rgb|#RRGGBB|reset></size>", clientId);
+                            SendSystemChatToClient(Server.ChatStyle.Usage("/setnamecolor <player|steamId|#number> <color|rgb|#RRGGBB|reset>"), clientId);
                             return false;
                         }
 
@@ -322,11 +322,11 @@ namespace schrader
                         var rawTarget = string.Join(" ", parts.Skip(1).Take(parts.Length - 2));
                         if (!Server.RankedSystem.TrySetNameColorForCommand(rawTarget, requestedColor, out var resultMessage))
                         {
-                            SendSystemChatToClient($"<size=14><color=#ff6666>{resultMessage}</color></size>", clientId);
+                            SendSystemChatToClient(Server.ChatStyle.Message(Server.ChatStyle.AdminModule, resultMessage, Server.ChatTone.Error), clientId);
                             return false;
                         }
 
-                        SendSystemChatToAll($"<size=14><color=#ffcc66>Admin</color> {resultMessage}</size>");
+                        SendSystemChatToAll(Server.ChatStyle.Message(Server.ChatStyle.AdminModule, resultMessage, Server.ChatTone.Warning));
                         return false;
                     }
 
@@ -334,14 +334,14 @@ namespace schrader
                     {
                         if (!TryIsAdmin(player, clientId))
                         {
-                            SendCommandHelpLine(clientId, "<color=#ff6666>You must be an admin to use this command</color>");
+                            SendCommandHelpLine(clientId, Server.ChatStyle.Message(Server.ChatStyle.AdminModule, "You must be an admin to use this command.", Server.ChatTone.Error, 13));
                             return false;
                         }
 
                         var parts = trimmed.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
                         if (parts.Length < 3)
                         {
-                            SendSystemChatToClient("<size=14>Usage: /setchatcolor <player|steamId|#number> <color|rgb|#RRGGBB|reset></size>", clientId);
+                            SendSystemChatToClient(Server.ChatStyle.Usage("/setchatcolor <player|steamId|#number> <color|rgb|#RRGGBB|reset>"), clientId);
                             return false;
                         }
 
@@ -349,11 +349,11 @@ namespace schrader
                         var rawTarget = string.Join(" ", parts.Skip(1).Take(parts.Length - 2));
                         if (!Server.RankedSystem.TrySetMessageColorForCommand(rawTarget, requestedColor, out var resultMessage))
                         {
-                            SendSystemChatToClient($"<size=14><color=#ff6666>{resultMessage}</color></size>", clientId);
+                            SendSystemChatToClient(Server.ChatStyle.Message(Server.ChatStyle.AdminModule, resultMessage, Server.ChatTone.Error), clientId);
                             return false;
                         }
 
-                        SendSystemChatToAll($"<size=14><color=#ffcc66>Admin</color> {resultMessage}</size>");
+                        SendSystemChatToAll(Server.ChatStyle.Message(Server.ChatStyle.AdminModule, resultMessage, Server.ChatTone.Warning));
                         return false;
                     }
 
@@ -368,13 +368,13 @@ namespace schrader
                                 {
                                     if (!TryIsAdmin(player, clientId))
                                     {
-                                        SendCommandHelpLine(clientId, "<color=#ff6666>You must be an admin to use this command</color>");
+                                        SendCommandHelpLine(clientId, Server.ChatStyle.Message(Server.ChatStyle.AdminModule, "You must be an admin to use this command.", Server.ChatTone.Error, 13));
                                         return false;
                                     }
 
                                     if (!TryGetEligiblePlayersForStart(player, clientId, out var eligible, out var reason))
                                     {
-                                        SendSystemChatToClient($"<size=14><color=#ff6666>Ranked</color> cannot start: {reason}</size>", clientId);
+                                        SendSystemChatToClient(Server.ChatStyle.Message(Server.ChatStyle.RankedModule, $"Cannot start: {Server.ChatStyle.Safe(reason)}.", Server.ChatTone.Error), clientId);
                                         return false;
                                     }
 
@@ -396,25 +396,25 @@ namespace schrader
                                             if (arg == "red" || arg == "r")
                                             {
                                                 EndRankedMatch(TeamResult.Red, true, true);
-                                                SendSystemChatToAll("<size=14><color=#ffcc66>Ranked</color> forcibly ended by admin. Winner: Red.</size>");
+                                                SendSystemChatToAll(Server.ChatStyle.Message(Server.ChatStyle.AdminModule, $"Ranked was forcibly ended by admin. Winner: {Server.ChatStyle.Team(TeamResult.Red)}.", Server.ChatTone.Warning));
                                                 return false;
                                             }
                                             else if (arg == "blue" || arg == "b")
                                             {
                                                 EndRankedMatch(TeamResult.Blue, true, true);
-                                                SendSystemChatToAll("<size=14><color=#ffcc66>Ranked</color> forcibly ended by admin. Winner: Blue.</size>");
+                                                SendSystemChatToAll(Server.ChatStyle.Message(Server.ChatStyle.AdminModule, $"Ranked was forcibly ended by admin. Winner: {Server.ChatStyle.Team(TeamResult.Blue)}.", Server.ChatTone.Warning));
                                                 return false;
                                             }
                                             else if (arg == "draw")
                                             {
                                                 EndRankedMatch(TeamResult.Unknown, true, true);
-                                                SendSystemChatToAll("<size=14><color=#ffcc66>Ranked</color> forcibly ended by admin: draw. MMR unchanged.</size>");
+                                                SendSystemChatToAll(Server.ChatStyle.Message(Server.ChatStyle.AdminModule, "Ranked was forcibly ended by admin as a draw. MMR is unchanged.", Server.ChatTone.Warning));
                                                 return false;
                                             }
                                         }
 
                                         EndRankedMatch(TeamResult.Unknown, true, true);
-                                        SendSystemChatToAll("<size=14><color=#ffcc66>Ranked</color> forcibly ended by admin: draw. MMR unchanged.</size>");
+                                        SendSystemChatToAll(Server.ChatStyle.Message(Server.ChatStyle.AdminModule, "Ranked was forcibly ended by admin as a draw. MMR is unchanged.", Server.ChatTone.Warning));
                                         return false;
                                 }
                                 else if (sub == "test")
@@ -427,7 +427,7 @@ namespace schrader
 
                                     if (!Server.RankedSystem.AreSyntheticPlayersAllowed())
                                     {
-                                        SendSystemChatToClient("<size=14><color=#ff6666>Ranked</color> controlled test mode is disabled on this server.</size>", clientId);
+                                        SendSystemChatToClient(Server.ChatStyle.Message(Server.ChatStyle.RankedModule, "Controlled test mode is disabled on this server.", Server.ChatTone.Error), clientId);
                                         return false;
                                     }
 
@@ -435,19 +435,19 @@ namespace schrader
                                     if (toggle == "on")
                                     {
                                         SetControlledTestModeEnabled(true);
-                                        SendSystemChatToAll("<size=14><color=#ffcc66>Ranked</color> controlled test mode enabled.</size>");
+                                        SendSystemChatToAll(Server.ChatStyle.Message(Server.ChatStyle.RankedModule, "Controlled test mode enabled.", Server.ChatTone.Warning));
                                         return false;
                                     }
 
                                     if (toggle == "off")
                                     {
                                         SetControlledTestModeEnabled(false);
-                                        SendSystemChatToAll("<size=14><color=#ffcc66>Ranked</color> controlled test mode disabled.</size>");
+                                        SendSystemChatToAll(Server.ChatStyle.Message(Server.ChatStyle.RankedModule, "Controlled test mode disabled.", Server.ChatTone.Warning));
                                         return false;
                                     }
 
                                     var statusText = IsControlledTestModeEnabled() ? "enabled" : "disabled";
-                                    SendSystemChatToClient($"<size=14><color=#ffcc66>Ranked</color> controlled test mode is currently <b>{statusText}</b>.</size>", clientId);
+                                    SendSystemChatToClient(Server.ChatStyle.Message(Server.ChatStyle.RankedModule, $"Controlled test mode is currently {Server.ChatStyle.Emphasis(statusText)}.", Server.ChatTone.Info), clientId);
                                     return false;
                                 }
                                 else if (sub == "status")
@@ -466,12 +466,12 @@ namespace schrader
                                         return false;
                                     }
 
-                                    SendSystemChatToClient("<size=14>Usage: /ranked status publish</size>", clientId);
+                                    SendSystemChatToClient(Server.ChatStyle.Usage("/ranked status publish"), clientId);
                                     return false;
                                 }
                             }
 
-                            SendSystemChatToClient("<size=14>Usage: /ranked start | /ranked end [red|blue|draw] | /ranked test <on|off|status> | /ranked status publish</size>", clientId);
+                            SendSystemChatToClient(Server.ChatStyle.Usage("/ranked start | /ranked end [red|blue|draw] | /ranked test <on|off|status> | /ranked status publish"), clientId);
                             return false;
                         }
 
@@ -606,7 +606,7 @@ namespace schrader
                         var linkCode = cmd.Length > 5 ? cmd.Substring(5).Trim() : string.Empty;
                         if (string.IsNullOrWhiteSpace(linkCode))
                         {
-                            SendSystemChatToClient("<size=14>Usage: /link <code></size>", clientId);
+                                SendSystemChatToClient(Server.ChatStyle.Usage("/link CODE"), clientId);
                             return false;
                         }
 
@@ -659,7 +659,7 @@ namespace schrader
                 }
 
                 method.Invoke(pmInstance, new object[] { true });
-                try { UIChat.Instance.Server_SendSystemChatMessage("<size=14><color=#00ff00>All pucks despawned.</color></size>", clientId); } catch { }
+                try { UIChat.Instance.Server_SendSystemChatMessage(Server.ChatStyle.Message(Server.ChatStyle.AdminModule, "All pucks were despawned.", Server.ChatTone.Success), clientId); } catch { }
                 Debug.Log($"[{Constants.MOD_NAME}] [PUCK-SPAWN] Cleared all pucks via /cs from clientId={clientId}.");
             }
             catch (Exception ex)
@@ -708,7 +708,7 @@ namespace schrader
                 if (Server.RankedSystem.IsMatchActive())
                 {
                     Debug.Log($"[{Constants.MOD_NAME}] [PUCK-SPAWN] Denied spawn for {requesterKey} during active match.");
-                    try { UIChat.Instance.Server_SendSystemChatMessage("<size=14><color=#ff6666>Cannot spawn pucks during an active match.</color></size>", clientId); } catch { }
+                    try { UIChat.Instance.Server_SendSystemChatMessage(Server.ChatStyle.Message(Server.ChatStyle.AdminModule, "Cannot spawn pucks during an active match.", Server.ChatTone.Error), clientId); } catch { }
                     return;
                 }
 
@@ -717,7 +717,7 @@ namespace schrader
                     Debug.Log($"[{Constants.MOD_NAME}] [PUCK-SPAWN] Denied spawn for {requesterKey}. livePucks={livePuckCount} wait={waitSeconds:0.00}s");
                     if (!string.IsNullOrWhiteSpace(denialMessage))
                     {
-                        try { UIChat.Instance.Server_SendSystemChatMessage(denialMessage, clientId); } catch { }
+                        try { UIChat.Instance.Server_SendSystemChatMessage(Server.ChatStyle.Message(Server.ChatStyle.AdminModule, denialMessage, Server.ChatTone.Warning), clientId); } catch { }
                     }
                     return;
                 }
@@ -770,7 +770,7 @@ namespace schrader
 
                 RecordManualPuckSpawn(requesterKey);
                 Debug.Log($"[{Constants.MOD_NAME}] [PUCK-SPAWN] Allowed spawn for {requesterKey} at {spawnPos}. livePucksBefore={livePuckCount}");
-                try { UIChat.Instance.Server_SendSystemChatMessage($"<size=14><b><color=#00ff00>{requesterName}</color></b> has spawned a puck.</size>", clientId); } catch { }
+                try { UIChat.Instance.Server_SendSystemChatMessage(Server.ChatStyle.Message(Server.ChatStyle.AdminModule, $"{Server.ChatStyle.Player(requesterName)} spawned a puck.", Server.ChatTone.Success), clientId); } catch { }
             }
             catch (Exception ex)
             {
@@ -1203,19 +1203,19 @@ namespace schrader
         private static void SendCommandsOverview(object player, ulong clientId)
         {
             SendCommandHelpLine(clientId, "<size=15><b>Server Commands</b></size>");
-            SendCommandHelpLine(clientId, "<size=13>/s</size> <size=12>- Spawn a puck (server). Blocked during matches, goals and replays.</size>");
-            SendCommandHelpLine(clientId, "<size=12><color=#9dc4de>General</color></size>");
-            SendCommandHelpLine(clientId, "<size=13>/commands</size> <size=12>- Show this full command list.</size>");
-            SendCommandHelpLine(clientId, "<size=13>/vr</size> <size=12>- Start a ranked ready vote.</size>");
-            SendCommandHelpLine(clientId, "<size=13>/vs</size> <size=12>- Alias for /vr. Normal start is disabled here.</size>");
-            SendCommandHelpLine(clientId, "<size=13>/votesinglegoalie</size> <size=12>- Start a shared-goalie vote if you are the only active goalie.</size>");
-            SendCommandHelpLine(clientId, "<size=13>/y | /n</size> <size=12>- Vote yes or no in ready checks, shared-goalie votes and forfeit votes.</size>");
-            SendCommandHelpLine(clientId, "<size=13>/ff</size> <size=12>- Start or vote on a forfeit for your team.</size>");
-            SendCommandHelpLine(clientId, "<size=13>/mmr</size> <size=12>- Show your current MMR.</size>");
-            SendCommandHelpLine(clientId, "<size=13>/discord</size> <size=12>- Open the Discord invite in your browser.</size>");
-            SendCommandHelpLine(clientId, "<size=13>/link &lt;code&gt;</size> <size=12>- Finish Discord verification using the code generated in Discord.</size>");
-            SendCommandHelpLine(clientId, "<size=13>/host</size> <size=12>- Open the dedicated SpeedHosting PUCK page in your browser.</size>");
-            SendCommandHelpLine(clientId, "<size=13>/cs</size> <size=12>- Despawn all pucks on the map.</size>");
+            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/s", "Spawn a puck on the server. Blocked during matches, goals and replays."));
+            SendCommandHelpLine(clientId, Server.ChatStyle.HelpHeading("General"));
+            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/commands", "Show this full command list."));
+            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/vr", "Start a ranked ready vote."));
+            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/vs", "Alias for /vr. Normal start is disabled here."));
+            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/votesinglegoalie", "Start a shared-goalie vote if you are the only active goalie."));
+            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/y or /n", "Vote yes or no in ready checks, shared-goalie votes and forfeit votes."));
+            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/ff", "Start or vote on a forfeit for your team."));
+            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/mmr", "Show your current MMR."));
+            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/discord", "Open the Discord invite in your browser."));
+                SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/link CODE", "Finish Discord verification using the code generated in Discord."));
+            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/host", "Open the dedicated SpeedHosting PUCK page in your browser."));
+            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/cs", "Despawn all pucks on the map."));
 
 
             
@@ -1225,34 +1225,34 @@ namespace schrader
                 return;
             }
 
-            SendCommandHelpLine(clientId, "<size=12><color=#ffcc66>Admin only</color></size>");
-            SendCommandHelpLine(clientId, "<size=13>/ranked start</size> <size=12>- Force-start a ranked match with eligible players.</size>");
-            SendCommandHelpLine(clientId, "<size=13>/ranked end [red|blue|draw]</size> <size=12>- Force-end the current ranked match.</size>");
-            SendCommandHelpLine(clientId, "<size=13>/ranked test <on|off|status></size> <size=12>- Control synthetic-player test mode when enabled.</size>");
-            SendCommandHelpLine(clientId, "<size=13>/dummygk <red|blue> <easy|normal|hard></size> <size=12>- Spawn or replace a real goalkeeper bot for the chosen team.</size>");
-            SendCommandHelpLine(clientId, "<size=13>/ranked status publish</size> <size=12>- Fetch authoritative server activity from SpeedUP and publish the Discord status embed.</size>");
-            SendCommandHelpLine(clientId, "<size=13>/fc <player|steamId|#number> <red|blue|spectator></size> <size=12>- Force a live player onto a team or back to spectator.</size>");
-            SendCommandHelpLine(clientId, "<size=13>/addscore <amount> <red|blue></size> <size=12>- Adjust the real in-game score and trigger the native score phase.</size>");
-            SendCommandHelpLine(clientId, "<size=13>/mute <player|steamId|#number> <duration> <reason...></size> <size=12>- Persist a backend mute and apply it immediately to live chat.</size>");
-            SendCommandHelpLine(clientId, "<size=13>/tempban <player|steamId|#number> <duration> <reason...></size> <size=12>- Persist a backend temporary ban and immediately disconnect the live target.</size>");
-            SendCommandHelpLine(clientId, "<size=13>/unmute <player|steamId|#number> [reason...]</size> <size=12>- Clear a backend mute and update live chat permission immediately.</size>");
-            SendCommandHelpLine(clientId, "<size=13>/unban <player|steamId|#number> [reason...]</size> <size=12>- Clear a backend ban for a SteamID or live player.</size>");
-            SendCommandHelpLine(clientId, "<size=13>/setnamecolor <player|steamId|#number> <color|rgb|#RRGGBB|reset></size> <size=12>- Persist a visible name color or RGB rainbow for a SteamID in UserData.</size>");
-            SendCommandHelpLine(clientId, "<size=13>/setchatcolor <player|steamId|#number> <color|rgb|#RRGGBB|reset></size> <size=12>- Persist a chat body color or RGB rainbow for a SteamID in UserData.</size>");
+            SendCommandHelpLine(clientId, Server.ChatStyle.HelpHeading("Admin Only", "#ffcc66"));
+            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/ranked start", "Force-start a ranked match with eligible players."));
+            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/ranked end [red|blue|draw]", "Force-end the current ranked match."));
+            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/ranked test <on|off|status>", "Control synthetic-player test mode when enabled."));
+            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/dummygk <red|blue> <easy|normal|hard>", "Spawn or replace a real goalkeeper bot for the chosen team."));
+            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/ranked status publish", "Fetch authoritative server activity from SpeedUP and publish the Discord status embed."));
+            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/fc <player|steamId|#number> <red|blue|spectator>", "Force a live player onto a team or back to spectator."));
+            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/addscore <amount> <red|blue>", "Adjust the real in-game score and trigger the native score phase."));
+            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/mute <player|steamId|#number> <duration> <reason...>", "Persist a backend mute and apply it immediately to live chat."));
+            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/tempban <player|steamId|#number> <duration> <reason...>", "Persist a backend temporary ban and immediately disconnect the live target."));
+            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/unmute <player|steamId|#number> [reason...]", "Clear a backend mute and update live chat permission immediately."));
+            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/unban <player|steamId|#number> [reason...]", "Clear a backend ban for a SteamID or live player."));
+            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/setnamecolor <player|steamId|#number> <color|rgb|#RRGGBB|reset>", "Persist a visible name color or RGB rainbow for a SteamID in UserData."));
+            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/setchatcolor <player|steamId|#number> <color|rgb|#RRGGBB|reset>", "Persist a chat body color or RGB rainbow for a SteamID in UserData."));
 
 
-            SendCommandHelpLine(clientId, "<size=12><color=#9dc4de>Draft / captains</color></size>");
-            SendCommandHelpLine(clientId, "<size=13>/draft</size> <size=12>- Show the current draft status in chat.</size>");
-            SendCommandHelpLine(clientId, "<size=13>/draftui</size> <size=12>- Explain the automatic ranked overlay and text fallback.</size>");
-            SendCommandHelpLine(clientId, "<size=13>/pick <player></size> <size=12>- Captain fallback to draft a player.</size>");
-            SendCommandHelpLine(clientId, "<size=13>/accept <player></size> <size=12>- Captain fallback to accept a late joiner.</size>");
-            SendCommandHelpLine(clientId, "<size=13>/approve <requestId></size> <size=12>- Captain approval for late joins or team switches.</size>");
-            SendCommandHelpLine(clientId, "<size=13>/reject <requestId></size> <size=12>- Captain rejection for late joins or team switches.</size>");
+            SendCommandHelpLine(clientId, Server.ChatStyle.HelpHeading("Draft / Captains"));
+            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/draft", "Show the current draft status in chat."));
+            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/draftui", "Explain the automatic ranked overlay and text fallback."));
+            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/pick <player>", "Captain fallback to draft a player."));
+            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/accept <player>", "Captain fallback to accept a late joiner."));
+            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/approve <requestId>", "Captain approval for late joins or team switches."));
+            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/reject <requestId>", "Captain rejection for late joins or team switches."));
 
-            SendCommandHelpLine(clientId, "<size=12><color=#9dc4de>Replay tools</color></size>");
-            SendCommandHelpLine(clientId, "<size=13>/record start</size> <size=12>- Start recording your current input path.</size>");
-            SendCommandHelpLine(clientId, "<size=13>/record stop</size> <size=12>- Stop recording and save it into BotMemory.</size>");
-            SendCommandHelpLine(clientId, "<size=13>/replay</size> <size=12>- Start replay behavior mode using the latest library match.</size>");
+            SendCommandHelpLine(clientId, Server.ChatStyle.HelpHeading("Replay Tools"));
+            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/record start", "Start recording your current input path."));
+            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/record stop", "Stop recording and save it into BotMemory."));
+            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/replay", "Start replay behavior mode using the latest library match."));
             SendCommandHelpLine(clientId, "<size=13>/replay list</size> <size=12>- List saved BotMemory recordings and replay types.</size>");
             SendCommandHelpLine(clientId, "<size=13>/replay <name|type></size> <size=12>- Replay a specific recording or pattern type.</size>");
 

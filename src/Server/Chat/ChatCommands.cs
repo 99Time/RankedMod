@@ -118,12 +118,12 @@ namespace schrader.Server
         {
             try
             {
-                SendSystemChatToClient("<size=14><color=#ffcc66>Draft UI</color> the ranked overlay opens automatically on clients during vote and draft. Use <b>/draft</b> if you need the text fallback.</size>", clientId);
+                SendSystemChatToClient(ChatStyle.Message(ChatStyle.DraftUiModule, $"The ranked overlay opens automatically during vote and draft. Use {ChatStyle.Command("/draft")} only if you need the text fallback.", ChatTone.Info), clientId);
             }
             catch (Exception ex)
             {
                 Debug.LogError($"[{Constants.MOD_NAME}] HandleDraftUiCommand failed: {ex.Message}");
-                SendSystemChatToClient("<size=14><color=#ff6666>Draft UI</color> command failed.</size>", clientId);
+                SendSystemChatToClient(ChatStyle.Message(ChatStyle.DraftUiModule, "Command failed.", ChatTone.Error), clientId);
             }
         }
 
@@ -133,32 +133,32 @@ namespace schrader.Server
             {
                 if (!AreSyntheticPlayersAllowed())
                 {
-                    SendSystemChatToClient("<size=14><color=#ff6666>Dummy</color> synthetic players are disabled on this server.</size>", clientId);
+                    SendSystemChatToClient(ChatStyle.Message(ChatStyle.DummyModule, "Synthetic players are disabled on this server.", ChatTone.Error), clientId);
                     return;
                 }
 
                 if (!TryIsAdminInternal(player, clientId))
                 {
-                    SendSystemChatToClient("<size=14><color=#ff6666>Dummy</color> permission denied.</size>", clientId);
+                    SendSystemChatToClient(ChatStyle.Message(ChatStyle.DummyModule, "Permission denied.", ChatTone.Error), clientId);
                     return;
                 }
 
                 if (!int.TryParse(rawCount, out var count) || count <= 0)
                 {
-                    SendSystemChatToClient("<size=14>Usage: /dummy <count></size>", clientId);
+                    SendSystemChatToClient(ChatStyle.Usage("/dummy <count>"), clientId);
                     return;
                 }
 
                 var created = CreateDummyParticipants(count, rankedActive);
                 if (created.Count == 0)
                 {
-                    SendSystemChatToClient("<size=14><color=#ff6666>Dummy</color> no bots were created.</size>", clientId);
+                    SendSystemChatToClient(ChatStyle.Message(ChatStyle.DummyModule, "No bots were created.", ChatTone.Error), clientId);
                     return;
                 }
 
                 if (!rankedActive)
                 {
-                    SendSystemChatToAll($"<size=14><color=#ffcc66>Dummy</color> queued {created.Count} bot spawn request(s) for the next draft: {string.Join(", ", created.Select(p => p.displayName))}</size>");
+                    SendSystemChatToAll(ChatStyle.Message(ChatStyle.DummyModule, $"Queued {ChatStyle.Emphasis(created.Count.ToString())} bot spawn request(s) for the next draft: {ChatStyle.Safe(string.Join(", ", created.Select(p => p.displayName)))}.", ChatTone.Warning));
                     return;
                 }
 
@@ -172,13 +172,13 @@ namespace schrader.Server
                     MergeOrReplaceParticipant(participant, TeamResult.Unknown);
                 }
 
-                SendSystemChatToAll($"<size=14><color=#ffcc66>Dummy</color> created {created.Count} real bot late joiners: {string.Join(", ", created.Select(p => p.displayName))}</size>");
-                SendSystemChatToAll("<size=13><color=#ffcc66>Dummy</color> captains can accept them like any other late joiner.</size>");
+                SendSystemChatToAll(ChatStyle.Message(ChatStyle.DummyModule, $"Created {ChatStyle.Emphasis(created.Count.ToString())} real bot late joiner(s): {ChatStyle.Safe(string.Join(", ", created.Select(p => p.displayName)))}.", ChatTone.Warning));
+                SendSystemChatToAll(ChatStyle.Message(ChatStyle.DummyModule, $"Captains can accept them like any other late joiner.", ChatTone.Info, 13));
             }
             catch (Exception ex)
             {
                 Debug.LogError($"[{Constants.MOD_NAME}] HandleDummyCommand failed: {ex.Message}");
-                SendSystemChatToClient("<size=14><color=#ff6666>Dummy</color> command failed.</size>", clientId);
+                SendSystemChatToClient(ChatStyle.Message(ChatStyle.DummyModule, "Command failed.", ChatTone.Error), clientId);
             }
         }
 
@@ -188,13 +188,13 @@ namespace schrader.Server
             {
                 if (!AreSyntheticPlayersAllowed())
                 {
-                    SendSystemChatToClient("<size=14><color=#ff6666>Dummy</color> synthetic players are disabled on this server.</size>", clientId);
+                    SendSystemChatToClient(ChatStyle.Message(ChatStyle.DummyModule, "Synthetic players are disabled on this server.", ChatTone.Error), clientId);
                     return;
                 }
 
                 if (!TryIsAdminInternal(player, clientId))
                 {
-                    SendSystemChatToClient("<size=14><color=#ff6666>Dummy</color> permission denied.</size>", clientId);
+                    SendSystemChatToClient(ChatStyle.Message(ChatStyle.DummyModule, "Permission denied.", ChatTone.Error), clientId);
                     return;
                 }
 
@@ -204,7 +204,7 @@ namespace schrader.Server
                     || !TryParseDummyGoalkeeperTeam(tokens[0], out var team)
                     || !TryParseDummyGoalkeeperDifficulty(tokens[1], out var difficulty))
                 {
-                    SendSystemChatToClient("<size=14>Usage: /dummygk &lt;red|blue&gt; &lt;easy|normal|hard&gt;</size>", clientId);
+                    SendSystemChatToClient(ChatStyle.Usage("/dummygk <red|blue> <easy|normal|hard>"), clientId);
                     return;
                 }
 
@@ -218,7 +218,7 @@ namespace schrader.Server
                 var participant = SpawnTrackedGoalkeeperParticipant(team, difficulty, requestedName);
                 if (participant == null)
                 {
-                    SendSystemChatToClient("<size=14><color=#ff6666>Dummy</color> could not spawn the goalkeeper.</size>", clientId);
+                    SendSystemChatToClient(ChatStyle.Message(ChatStyle.DummyModule, "Could not spawn the goalkeeper.", ChatTone.Error), clientId);
                     return;
                 }
 
@@ -237,12 +237,12 @@ namespace schrader.Server
 
                 var difficultyLabel = difficulty.ToString().ToLowerInvariant();
                 var replacementLabel = replacedExisting ? "replaced and respawned" : "spawned";
-                SendSystemChatToAll($"<size=14><color=#ffcc66>Dummy</color> {replacementLabel} {FormatTeamLabel(team)} goalkeeper <b>{participant.displayName}</b> ({difficultyLabel}).</size>");
+                SendSystemChatToAll(ChatStyle.Message(ChatStyle.DummyModule, $"{ChatStyle.Safe(replacementLabel)} {ChatStyle.Team(team)} goalkeeper {ChatStyle.Player(participant.displayName)} ({ChatStyle.Emphasis(difficultyLabel)}).", ChatTone.Warning));
             }
             catch (Exception ex)
             {
                 Debug.LogError($"[{Constants.MOD_NAME}] HandleDummyGoalkeeperCommand failed: {ex.Message}");
-                SendSystemChatToClient("<size=14><color=#ff6666>Dummy</color> command failed.</size>", clientId);
+                SendSystemChatToClient(ChatStyle.Message(ChatStyle.DummyModule, "Command failed.", ChatTone.Error), clientId);
             }
         }
 

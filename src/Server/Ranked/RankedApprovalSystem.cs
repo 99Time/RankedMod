@@ -500,14 +500,14 @@ namespace schrader.Server
 
                 if (!TryBuildConnectedPlayerSnapshot(player, out var snapshot) || snapshot == null)
                 {
-                    SendSystemChatToClient("<size=13><color=#ff6666>Ranked</color> could not resolve your player for a join request.</size>", clientId);
+                    SendSystemChatToClient(ChatStyle.Message(ChatStyle.RankedModule, "Could not resolve your player for a join request.", ChatTone.Error, 13), clientId);
                     return true;
                 }
 
                 var playerKey = ResolveParticipantIdToKey(snapshot);
                 if (string.IsNullOrWhiteSpace(playerKey))
                 {
-                    SendSystemChatToClient("<size=13><color=#ff6666>Ranked</color> could not resolve your player key for a join request.</size>", clientId);
+                    SendSystemChatToClient(ChatStyle.Message(ChatStyle.RankedModule, "Could not resolve your player key for a join request.", ChatTone.Error, 13), clientId);
                     return true;
                 }
 
@@ -517,7 +517,7 @@ namespace schrader.Server
 
                 if (IsPendingJoinState(playerKey))
                 {
-                    SendSystemChatToClient($"<size=13><color=#ffcc66>Ranked</color> you already have a pending request for {FormatTeamLabel(targetTeam)}.</size>", clientId);
+                    SendSystemChatToClient(ChatStyle.Message(ChatStyle.RankedModule, $"You already have a pending request for {ChatStyle.Team(targetTeam)}.", ChatTone.Warning, 13), clientId);
                     return true;
                 }
 
@@ -542,7 +542,7 @@ namespace schrader.Server
 
                 if (existingRequest != null)
                 {
-                    SendSystemChatToClient($"<size=13><color=#ffcc66>Ranked</color> you already have a pending request for {FormatTeamLabel(existingRequest.TargetTeam)}.</size>", clientId);
+                    SendSystemChatToClient(ChatStyle.Message(ChatStyle.RankedModule, $"You already have a pending request for {ChatStyle.Team(existingRequest.TargetTeam)}.", ChatTone.Warning, 13), clientId);
                     return true;
                 }
 
@@ -582,7 +582,7 @@ namespace schrader.Server
                         TryOpenPlayerTeamSelection(playerKey, snapshot.clientId);
                     }
 
-                    SendSystemChatToClient($"<size=13><color=#ffcc66>Ranked</color> {FormatTeamLabel(targetTeam)} captain is unavailable right now. Try again when that captain reconnects.</size>", clientId);
+                    SendSystemChatToClient(ChatStyle.Message(ChatStyle.RankedModule, $"The {ChatStyle.Team(targetTeam)} captain is unavailable right now. Try again when that captain reconnects.", ChatTone.Warning, 13), clientId);
                     return true;
                 }
 
@@ -632,8 +632,8 @@ namespace schrader.Server
 
                 var requestLabel = isSameTeamRequest ? "rejoin" : isSwitchRequest ? "switch" : "join";
                 Debug.Log($"[{Constants.MOD_NAME}] [JOIN][COOLDOWN] accepted requester={playerKey} clientId={snapshot.clientId} target={FormatTeamLabel(targetTeam)} cooldownExpired=true");
-                SendSystemChatToClient($"<size=13><color=#66ccff>Ranked</color> {requestLabel} request sent to {FormatTeamLabel(targetTeam)} captain.</size>", clientId);
-                SendSystemChatToClient($"<size=13><color=#ffcc66>Ranked</color> {request.PlayerName} wants to {(isSameTeamRequest ? $"re-enter {FormatTeamLabel(targetTeam)}" : isSwitchRequest ? $"switch into {FormatTeamLabel(targetTeam)}" : $"join {FormatTeamLabel(targetTeam)}")}. Use the approval popup.</size>", captainClientId);
+                SendSystemChatToClient(ChatStyle.Message(ChatStyle.RankedModule, $"{ChatStyle.Safe(requestLabel)} request sent to the {ChatStyle.Team(targetTeam)} captain.", ChatTone.Info, 13), clientId);
+                SendSystemChatToClient(ChatStyle.Message(ChatStyle.RankedModule, $"{ChatStyle.Player(request.PlayerName)} wants to {(isSameTeamRequest ? $"re-enter {ChatStyle.Team(targetTeam)}" : isSwitchRequest ? $"switch into {ChatStyle.Team(targetTeam)}" : $"join {ChatStyle.Team(targetTeam)}")}. Use the approval popup.", ChatTone.Warning, 13), captainClientId);
                 Debug.Log($"[{Constants.MOD_NAME}] [JOIN] Sent to captain {captainName ?? captainKey ?? "unknown"}: request {request.RequestId} for {request.PlayerName} -> {FormatTeamLabel(targetTeam)}.");
                 RefreshCaptainApprovalPanels();
                 return true;
@@ -641,7 +641,7 @@ namespace schrader.Server
             catch (Exception ex)
             {
                 Debug.LogError($"[{Constants.MOD_NAME}] Failed to queue team approval request: {ex.Message}");
-                SendSystemChatToClient("<size=13><color=#ff6666>Ranked</color> could not create a team approval request.</size>", clientId);
+                SendSystemChatToClient(ChatStyle.Message(ChatStyle.RankedModule, "Could not create a team approval request.", ChatTone.Error, 13), clientId);
                 return true;
             }
         }
@@ -707,7 +707,7 @@ namespace schrader.Server
             {
                 if (draftActive)
                 {
-                    SendSystemChatToClient("<size=13><color=#ffcc66>Ranked</color> there is no active approval flow right now.</size>", clientId);
+                    SendSystemChatToClient(ChatStyle.Message(ChatStyle.RankedModule, "There is no active approval flow right now.", ChatTone.Warning, 13), clientId);
                     return;
                 }
 
@@ -721,14 +721,14 @@ namespace schrader.Server
 
                     if (targetedRequest == null)
                     {
-                        SendSystemChatToClient("<size=13><color=#ffcc66>Ranked</color> there is no active approval flow right now.</size>", clientId);
+                        SendSystemChatToClient(ChatStyle.Message(ChatStyle.RankedModule, "There is no active approval flow right now.", ChatTone.Warning, 13), clientId);
                         return;
                     }
                 }
 
                 if (string.IsNullOrWhiteSpace(requestId))
                 {
-                    SendSystemChatToClient($"<size=13>Usage: {(approved ? "/approve" : "/reject")} <requestId></size>", clientId);
+                    SendSystemChatToClient(ChatStyle.Usage($"{(approved ? "/approve" : "/reject")} <requestId>"), clientId);
                     return;
                 }
 
@@ -738,7 +738,7 @@ namespace schrader.Server
                 var isOfficialCaptain = TryGetCaptainTeam(actorKey, out _);
                 if (!isOfficialCaptain && clientId == 0)
                 {
-                    SendSystemChatToClient("<size=13><color=#ff6666>Ranked</color> only team captains can approve or reject requests.</size>", clientId);
+                    SendSystemChatToClient(ChatStyle.Message(ChatStyle.RankedModule, "Only team captains can approve or reject requests.", ChatTone.Error, 13), clientId);
                     return;
                 }
 
@@ -747,7 +747,7 @@ namespace schrader.Server
                 {
                     if (!pendingTeamApprovalRequests.TryGetValue(requestId.Trim(), out request) || request == null)
                     {
-                        SendSystemChatToClient("<size=13><color=#ff6666>Ranked</color> request not found.</size>", clientId);
+                        SendSystemChatToClient(ChatStyle.Message(ChatStyle.RankedModule, "Request not found.", ChatTone.Error, 13), clientId);
                         return;
                     }
 
@@ -755,7 +755,7 @@ namespace schrader.Server
 
                     if (!IsApprovalRequestOwner(actorKey, clientId, request))
                     {
-                        SendSystemChatToClient("<size=13><color=#ff6666>Ranked</color> that request belongs to the other captain.</size>", clientId);
+                        SendSystemChatToClient(ChatStyle.Message(ChatStyle.RankedModule, "That request belongs to the other captain.", ChatTone.Error, 13), clientId);
                         return;
                     }
 
@@ -777,7 +777,7 @@ namespace schrader.Server
             catch (Exception ex)
             {
                 Debug.LogError($"[{Constants.MOD_NAME}] Approval decision failed: {ex.Message}");
-                SendSystemChatToClient("<size=13><color=#ff6666>Ranked</color> could not process that request.</size>", clientId);
+                SendSystemChatToClient(ChatStyle.Message(ChatStyle.RankedModule, "Could not process that request.", ChatTone.Error, 13), clientId);
             }
         }
 
@@ -803,11 +803,11 @@ namespace schrader.Server
 
                 if (request.ClientId != 0)
                 {
-                    SendSystemChatToClient($"<size=13><color=#ff6666>Ranked</color> approval failed. Your state was left unchanged.</size>", request.ClientId);
+                    SendSystemChatToClient(ChatStyle.Message(ChatStyle.RankedModule, "Approval failed. Your state was left unchanged.", ChatTone.Error, 13), request.ClientId);
                 }
 
                 RegisterApprovalNotification(request, ApprovalRequestDisplayStatus.Cancelled, GetCaptainDisplayNameByKey(captainKey) ?? "Captain");
-                SendCaptainChatForRequest(request.TargetTeam, $"<size=13><color=#ff6666>Ranked</color> could not move <b>{request.PlayerName}</b> into {FormatTeamLabel(request.TargetTeam)}. The player was left unchanged.</size>");
+                SendCaptainChatForRequest(request.TargetTeam, ChatStyle.Message(ChatStyle.RankedModule, $"Could not move {ChatStyle.Player(request.PlayerName)} into {ChatStyle.Team(request.TargetTeam)}. The player was left unchanged.", ChatTone.Error, 13));
                 return;
             }
 
@@ -838,12 +838,12 @@ namespace schrader.Server
                 : GetCaptainDisplayNameByKey(captainKey) ?? "Captain";
             if (request.ClientId != 0)
             {
-                SendSystemChatToClient($"<size=13><color=#00ff99>Ranked</color> approved for {FormatTeamLabel(request.TargetTeam)}. Select a position to enter the match.</size>", request.ClientId);
+                SendSystemChatToClient(ChatStyle.Message(ChatStyle.RankedModule, $"Approved for {ChatStyle.Team(request.TargetTeam)}. Select a position to enter the match.", ChatTone.Success, 13), request.ClientId);
             }
 
             RegisterApprovalNotification(request, ApprovalRequestDisplayStatus.Approved, captainName);
             Debug.Log($"[{Constants.MOD_NAME}] [JOIN] Approved: {request.PlayerName} ({request.PlayerId}) -> {FormatTeamLabel(request.TargetTeam)} by {captainName}.");
-            SendSystemChatToAll($"<size=14><color=#ffcc66>Ranked</color> {captainName} approved <b>{request.PlayerName}</b> for {FormatTeamLabel(request.TargetTeam)}.</size>");
+            SendSystemChatToAll(ChatStyle.Message(ChatStyle.RankedModule, $"{ChatStyle.Player(captainName)} approved {ChatStyle.Player(request.PlayerName)} for {ChatStyle.Team(request.TargetTeam)}.", ChatTone.Info));
         }
 
         private static void ResolveRejectedRequest(TeamApprovalRequest request, string captainKey)
@@ -860,30 +860,30 @@ namespace schrader.Server
                 SetJoinState(request.PlayerId, RankedJoinState.InTeam);
                 if (request.ClientId != 0)
                 {
-                    SendSystemChatToClient($"<size=13><color=#ff6666>Ranked</color> {captainName} rejected your switch request. You remain on {FormatTeamLabel(request.PreviousTeam)}.</size>", request.ClientId);
+                    SendSystemChatToClient(ChatStyle.Message(ChatStyle.RankedModule, $"{ChatStyle.Player(captainName)} rejected your switch request. You remain on {ChatStyle.Team(request.PreviousTeam)}.", ChatTone.Error, 13), request.ClientId);
                 }
 
                 Debug.Log($"[{Constants.MOD_NAME}] [JOIN] Rejected: {request.PlayerName} ({request.PlayerId}) switch to {FormatTeamLabel(request.TargetTeam)} by {captainName}.");
-                SendSystemChatToAll($"<size=14><color=#ffcc66>Ranked</color> {captainName} rejected {request.PlayerName}'s switch request to {FormatTeamLabel(request.TargetTeam)}.</size>");
+                SendSystemChatToAll(ChatStyle.Message(ChatStyle.RankedModule, $"{ChatStyle.Player(captainName)} rejected {ChatStyle.Player(request.PlayerName)}'s switch request to {ChatStyle.Team(request.TargetTeam)}.", ChatTone.Info));
                 return;
             }
 
             var rejectedByBothTeams = RegisterRejectedLateJoinTeam(request.PlayerId, request.TargetTeam);
             if (request.ClientId != 0)
             {
-                SendSystemChatToClient($"<size=13><color=#ff6666>Ranked</color> {captainName} rejected your request to join {FormatTeamLabel(request.TargetTeam)}.</size>", request.ClientId);
+                SendSystemChatToClient(ChatStyle.Message(ChatStyle.RankedModule, $"{ChatStyle.Player(captainName)} rejected your request to join {ChatStyle.Team(request.TargetTeam)}.", ChatTone.Error, 13), request.ClientId);
             }
 
             TryOpenPlayerTeamSelection(request.PlayerId, request.ClientId);
             SetJoinState(request.PlayerId, RankedJoinState.Idle);
 
             Debug.Log($"[{Constants.MOD_NAME}] [JOIN] Rejected: {request.PlayerName} ({request.PlayerId}) from {FormatTeamLabel(request.TargetTeam)} by {captainName}.");
-            SendSystemChatToAll($"<size=14><color=#ffcc66>Ranked</color> {captainName} rejected <b>{request.PlayerName}</b> from joining {FormatTeamLabel(request.TargetTeam)}.</size>");
+            SendSystemChatToAll(ChatStyle.Message(ChatStyle.RankedModule, $"{ChatStyle.Player(captainName)} rejected {ChatStyle.Player(request.PlayerName)} from joining {ChatStyle.Team(request.TargetTeam)}.", ChatTone.Info));
 
             if (rejectedByBothTeams)
             {
                 Debug.Log($"[{Constants.MOD_NAME}] Player rejected by both teams — removed: {request.PlayerName} ({request.PlayerId})");
-                SendSystemChatToAll($"<size=14><color=#ff6666>Ranked</color> {request.PlayerName} was rejected by both teams and removed.</size>");
+                SendSystemChatToAll(ChatStyle.Message(ChatStyle.RankedModule, $"{ChatStyle.Player(request.PlayerName)} was rejected by both teams and removed.", ChatTone.Error));
                 TryKickPlayer(request.PlayerId, request.ClientId);
             }
         }

@@ -311,7 +311,7 @@ namespace schrader.Server
                     Debug.LogWarning($"[{Constants.MOD_NAME}] [DRAFT] Scoreboard translation mismatch: clicked player could not resolve to a ranked participant.");
                     if (actorClientId != 0)
                     {
-                        SendSystemChatToClient("<size=13><color=#ff6666>Draft UI</color> could not resolve the clicked player from the scoreboard event.</size>", actorClientId);
+                        SendSystemChatToClient(ChatStyle.Message(ChatStyle.DraftUiModule, "Could not resolve the clicked player from the scoreboard event.", ChatTone.Error, 13), actorClientId);
                     }
                     return false;
                 }
@@ -335,7 +335,7 @@ namespace schrader.Server
                             Debug.LogWarning($"[{Constants.MOD_NAME}] [DRAFT] Scoreboard duplicate pool entries: {string.Join(", ", duplicateEntries)}");
                         }
 
-                        SendSystemChatToClient("<size=13><color=#ff6666>Draft UI</color> clicked player is not in the current available draft pool.</size>", actorClientId);
+                        SendSystemChatToClient(ChatStyle.Message(ChatStyle.DraftUiModule, "Clicked player is not in the current available draft pool.", ChatTone.Error, 13), actorClientId);
                         return false;
                     }
 
@@ -357,7 +357,7 @@ namespace schrader.Server
 
                 if (actorClientId != 0)
                 {
-                    SendSystemChatToClient("<size=13><color=#ffcc66>Draft UI</color> clicked player is not available for a draft action.</size>", actorClientId);
+                    SendSystemChatToClient(ChatStyle.Message(ChatStyle.DraftUiModule, "Clicked player is not available for a draft action.", ChatTone.Warning, 13), actorClientId);
                 }
                 return false;
             }
@@ -957,7 +957,7 @@ namespace schrader.Server
                 }
                 if (clientId != 0)
                 {
-                    SendSystemChatToClient("<size=13>Team changes are locked during active matches.</size>", clientId);
+                    SendSystemChatToClient(ChatStyle.Message(ChatStyle.RankedModule, "Team changes are locked during active matches.", ChatTone.Warning, 13), clientId);
                 }
                 return false;
             }

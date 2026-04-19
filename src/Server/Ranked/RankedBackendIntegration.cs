@@ -27,6 +27,7 @@ namespace schrader.Server
         private const string BackendTempBanPathEnvVar = "SCHRADER_BACKEND_TEMPBAN_PATH";
         private const string BackendUnmutePathEnvVar = "SCHRADER_BACKEND_UNMUTE_PATH";
         private const string BackendUnbanPathEnvVar = "SCHRADER_BACKEND_UNBAN_PATH";
+        private const string BackendServerModeEnvVar = "SCHRADER_RANKED_SERVER_MODE";
         private const string BackendTimeoutMsEnvVar = "SCHRADER_BACKEND_TIMEOUT_MS";
         private const string BackendModerationCacheSecondsEnvVar = "SCHRADER_BACKEND_MODERATION_CACHE_SECONDS";
         private const string BackendBadgeCacheSecondsEnvVar = "SCHRADER_BACKEND_BADGE_CACHE_SECONDS";
@@ -40,6 +41,8 @@ namespace schrader.Server
         private const int DefaultBackendTimeoutMs = 5000;
         private const int DefaultBackendModerationCacheSeconds = 60;
         private const int DefaultBackendBadgeCacheSeconds = 300;
+        private const string CompetitiveServerMode = "competitive";
+        private const string PublicServerMode = "public";
         private static readonly TimeSpan BackendDiscordReminderInitialDelay = TimeSpan.Zero;
         private static readonly TimeSpan BackendDiscordReminderInterval = TimeSpan.FromMinutes(10);
         private static readonly TimeSpan BackendDiscordLinkConsistencyGrace = TimeSpan.FromSeconds(15);
@@ -63,6 +66,7 @@ namespace schrader.Server
         private sealed class BackendConfig
         {
             public bool Enabled = true;
+            public string ServerMode = CompetitiveServerMode;
             public string BaseUrl;
             public string ApiKey;
             public string PlayerStatePath = DefaultBackendPlayerStatePath;
@@ -363,6 +367,16 @@ namespace schrader.Server
         {
             try
             {
+                var config = GetBackendConfig();
+                if (IsPublicServerMode(config))
+                {
+                    return new DiscordOnboardingStateMessage
+                    {
+                        IsResolved = true,
+                        IsLinked = true
+                    };
+                }
+
                 if (clientId == 0 || !TryGetPlayerByClientId(clientId, out var player) || player == null)
                 {
                     return DiscordOnboardingStateMessage.Unresolved();
@@ -399,6 +413,12 @@ namespace schrader.Server
         {
             try
             {
+                if (IsPublicServerMode(GetBackendConfig()))
+                {
+                    Debug.Log($"[{Constants.MOD_NAME}] [BACKEND][VERIFY] Ignoring verification refusal because serverMode={PublicServerMode}. clientId={clientId} action={action ?? "unknown"}");
+                    return;
+                }
+
                 object player = null;
                 if (clientId != 0)
                 {
@@ -418,7 +438,7 @@ namespace schrader.Server
 
                 if (effectiveClientId != 0)
                 {
-                    SendSystemChatToClient("<size=14><color=#ff6666>Discord verification is required on this server. Disconnecting now.</color></size>", effectiveClientId);
+                    SendSystemChatToClient(ChatStyle.Message(ChatStyle.DiscordModule, "Discord verification is required on this server. Disconnecting now.", ChatTone.Error), effectiveClientId);
                 }
 
                 var kicked = TryKickPlayer(steamId, effectiveClientId);
@@ -468,7 +488,7 @@ namespace schrader.Server
 
                 if (string.IsNullOrWhiteSpace(trimmedCode))
                 {
-                    SendSystemChatToClient("<size=14>Usage: /link <code></size>", clientId);
+                    SendSystemChatToClient(ChatStyle.Usage("/link CODE"), clientId);
                     return;
                 }
 
@@ -477,13 +497,13 @@ namespace schrader.Server
                 if (!IsBackendConfigured(config))
                 {
                     Debug.LogWarning($"[{Constants.MOD_NAME}] [BACKEND] /link aborted because backend config is not valid. clientId={clientId} configPath={GetBackendConfigPath()}");
-                    SendSystemChatToClient("<size=14><color=#ff6666>Linking service is currently unavailable. Please try again later.</color></size>", clientId);
+                    SendSystemChatToClient(ChatStyle.Message(ChatStyle.DiscordModule, "Linking service is currently unavailable. Please try again later.", ChatTone.Error), clientId);
                     return;
                 }
 
                 if (!TryGetPlayerByClientId(clientId, out var player) || player == null)
                 {
-                    SendSystemChatToClient("<size=14><color=#ff6666>Could not identify your player for Discord linking.</color></size>", clientId);
+                    SendSystemChatToClient(ChatStyle.Message(ChatStyle.DiscordModule, "Could not identify your player for Discord linking.", ChatTone.Error), clientId);
                     return;
                 }
 
@@ -491,7 +511,7 @@ namespace schrader.Server
                 if (!IsSteamIdentityKey(steamId))
                 {
                     Debug.LogWarning($"[{Constants.MOD_NAME}] [BACKEND] /link aborted because authoritative SteamID could not be resolved. clientId={clientId} resolved={steamId ?? "null"}");
-                    SendSystemChatToClient("<size=14><color=#ff6666>Could not resolve your SteamID for Discord linking.</color></size>", clientId);
+                    SendSystemChatToClient(ChatStyle.Message(ChatStyle.DiscordModule, "Could not resolve your SteamID for Discord linking.", ChatTone.Error), clientId);
                     return;
                 }
 
@@ -506,13 +526,13 @@ namespace schrader.Server
                     : null;
 
                 Debug.Log($"[{Constants.MOD_NAME}] [BACKEND] /link resolved authoritative SteamID. clientId={clientId} steamId={steamId} gameDisplayName={gameDisplayName ?? "null"} gamePlayerNumber={gamePlayerNumber ?? "null"} code={trimmedCode}");
-                SendSystemChatToClient("<size=14>Submitting your Discord link code...</size>", clientId);
+                SendSystemChatToClient(ChatStyle.Message(ChatStyle.DiscordModule, "Submitting your Discord link code.", ChatTone.Info), clientId);
                 _ = CompleteDiscordLinkAsync(config, clientId, steamId, trimmedCode, gameDisplayName, gamePlayerNumber);
             }
             catch (Exception ex)
             {
                 Debug.LogError($"[{Constants.MOD_NAME}] [BACKEND] Failed to start Discord link completion: {ex.Message}");
-                SendSystemChatToClient("<size=14><color=#ff6666>Linking service is currently unavailable. Please try again later.</color></size>", clientId);
+                SendSystemChatToClient(ChatStyle.Message(ChatStyle.DiscordModule, "Linking service is currently unavailable. Please try again later.", ChatTone.Error), clientId);
             }
         }
 
@@ -1338,7 +1358,7 @@ namespace schrader.Server
 
                     if (shouldSendReminder)
                     {
-                        SendSystemChatToClient("<size=14><b><color=#8dd8ff>Discord Link</color></b> <color=#d7eef8>Join the Discord and complete verification to publish your stats.</color> <color=#ffe08a>Use <b>/discord</b> and then <b>/link CODE</b>.</color></size>", snapshot.clientId);
+                            SendSystemChatToClient(ChatStyle.Message(ChatStyle.DiscordModule, $"Join the Discord and complete verification to publish your stats. Use {ChatStyle.Command("/discord")} and then {ChatStyle.Command("/link CODE")}.", ChatTone.Info), snapshot.clientId);
                     }
                 }
 
@@ -1801,6 +1821,14 @@ namespace schrader.Server
             isLinked = false;
             resolutionReason = "steamid-invalid";
 
+            if (IsPublicServerMode(GetBackendConfig()))
+            {
+                isResolved = true;
+                isLinked = true;
+                resolutionReason = "public-mode";
+                return;
+            }
+
             var normalizedSteamId = NormalizeResolvedPlayerKey(steamId);
             if (!IsSteamIdentityKey(normalizedSteamId))
             {
@@ -1856,6 +1884,11 @@ namespace schrader.Server
 
         private static bool IsMandatoryVerificationBlockedState(object state)
         {
+            if (IsPublicServerMode(GetBackendConfig()))
+            {
+                return false;
+            }
+
             var stateName = state?.ToString() ?? string.Empty;
             return string.Equals(stateName, "TeamSelect", StringComparison.Ordinal)
                 || string.Equals(stateName, "PositionSelectBlue", StringComparison.Ordinal)
@@ -1897,6 +1930,11 @@ namespace schrader.Server
         {
             try
             {
+                if (IsPublicServerMode(GetBackendConfig()))
+                {
+                    return false;
+                }
+
                 if (!TryResolveDiscordVerificationStateForPlayer(player, clientId, out var resolvedClientId, out var steamId, out var isResolved, out var isLinked, out var resolutionReason))
                 {
                     return false;
@@ -1910,7 +1948,7 @@ namespace schrader.Server
 
                 if (resolvedClientId != 0)
                 {
-                    SendSystemChatToClient("<size=14><color=#ff6666>Discord verification is required to join a team on this server. Use /discord and /link CODE to continue.</color></size>", resolvedClientId);
+                    SendSystemChatToClient(ChatStyle.Message(ChatStyle.DiscordModule, $"Discord verification is required to join a team on this server. Use {ChatStyle.Command("/discord")} and then {ChatStyle.Command("/link CODE")} to continue.", ChatTone.Error), resolvedClientId);
                 }
 
                 Debug.LogWarning($"[{Constants.MOD_NAME}] [BACKEND][VERIFY] Mandatory verification gate triggered. clientId={resolvedClientId} steamId={steamId} linked={isLinked} resolved={isResolved} reason={resolutionReason} requestedTeam={requestedTeam} source={source}");
@@ -1977,6 +2015,9 @@ namespace schrader.Server
         private static BackendConfig LoadBackendConfig()
         {
             var config = new BackendConfig();
+            var rawBackendFileServerMode = (string)null;
+            var backendFileDeclaredServerMode = false;
+            var rawBackendEnvServerMode = GetEnvironmentOverride(BackendServerModeEnvVar, null);
             try
             {
                 var configPath = GetBackendConfigPath();
@@ -1984,6 +2025,20 @@ namespace schrader.Server
                 if (File.Exists(configPath))
                 {
                     var json = File.ReadAllText(configPath);
+                    try
+                    {
+                        var rawFileRoot = JObject.Parse(json);
+                        if (TryGetDynamicMemberValue(rawFileRoot, "serverMode", out var rawBackendServerModeValue))
+                        {
+                            backendFileDeclaredServerMode = true;
+                            rawBackendFileServerMode = ExtractDynamicMemberValueToString(rawBackendServerModeValue);
+                        }
+                    }
+                    catch (Exception rawServerModeEx)
+                    {
+                        Debug.LogWarning($"[{Constants.MOD_NAME}] [BACKEND] Failed to inspect raw backend serverMode field: {rawServerModeEx.Message}");
+                    }
+
                     var fileConfig = JsonConvert.DeserializeObject<BackendConfig>(json);
                     if (fileConfig != null)
                     {
@@ -2002,7 +2057,7 @@ namespace schrader.Server
                         config.BadgeCacheSeconds = fileConfig.BadgeCacheSeconds > 0 ? fileConfig.BadgeCacheSeconds : config.BadgeCacheSeconds;
                     }
 
-                    Debug.Log($"[{Constants.MOD_NAME}] [BACKEND] Backend config file loaded. baseUrl={config.BaseUrl ?? "null"} playerStatePath={config.PlayerStatePath ?? "null"} matchResultPath={config.MatchResultPath ?? "null"} linkCompletePath={config.LinkCompletePath ?? "null"} mutePath={config.MutePath ?? "null"} tempBanPath={config.TempBanPath ?? "null"} unmutePath={config.UnmutePath ?? "null"} unbanPath={config.UnbanPath ?? "null"} authConfigured={!string.IsNullOrWhiteSpace(config.ApiKey)}");
+                    Debug.Log($"[{Constants.MOD_NAME}] [BACKEND] Backend config file loaded. rawServerMode={(backendFileDeclaredServerMode ? DescribeServerModeValue(rawBackendFileServerMode) : "missing")} baseUrl={config.BaseUrl ?? "null"} playerStatePath={config.PlayerStatePath ?? "null"} matchResultPath={config.MatchResultPath ?? "null"} linkCompletePath={config.LinkCompletePath ?? "null"} mutePath={config.MutePath ?? "null"} tempBanPath={config.TempBanPath ?? "null"} unmutePath={config.UnmutePath ?? "null"} unbanPath={config.UnbanPath ?? "null"} authConfigured={!string.IsNullOrWhiteSpace(config.ApiKey)}");
                 }
                 else
                 {
@@ -2026,13 +2081,92 @@ namespace schrader.Server
             config.TimeoutMs = GetEnvironmentOverrideInt(BackendTimeoutMsEnvVar, config.TimeoutMs);
             config.ModerationCacheSeconds = GetEnvironmentOverrideInt(BackendModerationCacheSecondsEnvVar, config.ModerationCacheSeconds);
             config.BadgeCacheSeconds = GetEnvironmentOverrideInt(BackendBadgeCacheSecondsEnvVar, config.BadgeCacheSeconds);
-            Debug.Log($"[{Constants.MOD_NAME}] [BACKEND] Effective backend config. enabled={config.Enabled} baseUrl={config.BaseUrl ?? "null"} playerStatePath={config.PlayerStatePath ?? "null"} matchResultPath={config.MatchResultPath ?? "null"} linkCompletePath={config.LinkCompletePath ?? "null"} mutePath={config.MutePath ?? "null"} tempBanPath={config.TempBanPath ?? "null"} unmutePath={config.UnmutePath ?? "null"} unbanPath={config.UnbanPath ?? "null"} authConfigured={!string.IsNullOrWhiteSpace(config.ApiKey)} timeoutMs={config.TimeoutMs}");
+
+            var runtimeResolved = TryResolveAuthoritativeServerMode(out var rawRuntimeServerMode, out var normalizedRuntimeServerMode, out var runtimeResolutionMessage);
+            config.ServerMode = runtimeResolved ? normalizedRuntimeServerMode : CompetitiveServerMode;
+
+            var sourceWinner = runtimeResolved ? "serverConfiguration" : "fallback-competitive";
+            var contradictionParts = new List<string>();
+
+            if (backendFileDeclaredServerMode
+                && TryNormalizeServerMode(rawBackendFileServerMode, out var normalizedBackendFileServerMode)
+                && !string.Equals(normalizedBackendFileServerMode, config.ServerMode, StringComparison.OrdinalIgnoreCase))
+            {
+                contradictionParts.Add($"backendConfig={normalizedBackendFileServerMode}");
+            }
+
+            if (TryNormalizeServerMode(rawBackendEnvServerMode, out var normalizedBackendEnvServerMode)
+                && !string.Equals(normalizedBackendEnvServerMode, config.ServerMode, StringComparison.OrdinalIgnoreCase))
+            {
+                contradictionParts.Add($"env={normalizedBackendEnvServerMode}");
+            }
+
+            var contradictionText = contradictionParts.Count > 0 ? string.Join(", ", contradictionParts) : "none";
+            var usedFallback = !runtimeResolved;
+
+            Debug.Log($"[{Constants.MOD_NAME}] [BACKEND] Authoritative serverMode resolved. runtimeRaw={DescribeServerModeValue(rawRuntimeServerMode)} backendRaw={(backendFileDeclaredServerMode ? DescribeServerModeValue(rawBackendFileServerMode) : "missing")} envRaw={DescribeServerModeValue(rawBackendEnvServerMode)} effective={config.ServerMode} source={sourceWinner} contradiction={contradictionText} fallback={usedFallback} details={runtimeResolutionMessage ?? "none"}");
+
+            if (usedFallback || contradictionParts.Count > 0)
+            {
+                Debug.LogWarning($"[{Constants.MOD_NAME}] [BACKEND] serverMode resolution warning. runtimeRaw={DescribeServerModeValue(rawRuntimeServerMode)} backendRaw={(backendFileDeclaredServerMode ? DescribeServerModeValue(rawBackendFileServerMode) : "missing")} envRaw={DescribeServerModeValue(rawBackendEnvServerMode)} effective={config.ServerMode} source={sourceWinner} contradiction={contradictionText} fallback={usedFallback}");
+            }
+
+            Debug.Log($"[{Constants.MOD_NAME}] [BACKEND] Effective backend config. enabled={config.Enabled} serverMode={config.ServerMode} baseUrl={config.BaseUrl ?? "null"} playerStatePath={config.PlayerStatePath ?? "null"} matchResultPath={config.MatchResultPath ?? "null"} linkCompletePath={config.LinkCompletePath ?? "null"} mutePath={config.MutePath ?? "null"} tempBanPath={config.TempBanPath ?? "null"} unmutePath={config.UnmutePath ?? "null"} unbanPath={config.UnbanPath ?? "null"} authConfigured={!string.IsNullOrWhiteSpace(config.ApiKey)} timeoutMs={config.TimeoutMs}");
             return config;
         }
 
         private static bool IsBackendConfigured(BackendConfig config)
         {
-            return config != null && config.Enabled && !string.IsNullOrWhiteSpace(config.BaseUrl);
+            return config != null && config.Enabled && IsCompetitiveServerMode(config) && !string.IsNullOrWhiteSpace(config.BaseUrl);
+        }
+
+        private static string NormalizeServerMode(string configuredMode)
+        {
+            if (TryNormalizeServerMode(configuredMode, out var normalizedMode))
+            {
+                return normalizedMode;
+            }
+
+            if (!string.IsNullOrWhiteSpace(configuredMode))
+            {
+                Debug.LogWarning($"[{Constants.MOD_NAME}] [BACKEND] Unknown serverMode '{configuredMode}'. Falling back to {CompetitiveServerMode}.");
+            }
+
+            return CompetitiveServerMode;
+        }
+
+        private static bool TryNormalizeServerMode(string configuredMode, out string normalizedMode)
+        {
+            normalizedMode = null;
+            if (string.IsNullOrWhiteSpace(configuredMode))
+            {
+                return false;
+            }
+
+            var trimmedMode = configuredMode.Trim();
+            if (string.Equals(trimmedMode, PublicServerMode, StringComparison.OrdinalIgnoreCase))
+            {
+                normalizedMode = PublicServerMode;
+                return true;
+            }
+
+            if (string.Equals(trimmedMode, CompetitiveServerMode, StringComparison.OrdinalIgnoreCase))
+            {
+                normalizedMode = CompetitiveServerMode;
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool IsPublicServerMode(BackendConfig config)
+        {
+            return string.Equals(config?.ServerMode, PublicServerMode, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsCompetitiveServerMode(BackendConfig config)
+        {
+            return !IsPublicServerMode(config);
         }
 
         private static string BuildConfiguredUrl(string baseUrl, string configuredPath, string steamId)
@@ -2389,6 +2523,147 @@ namespace schrader.Server
             {
                 return fallback;
             }
+        }
+
+        private static bool TryResolveAuthoritativeServerMode(out string rawServerMode, out string normalizedServerMode, out string message)
+        {
+            rawServerMode = null;
+            normalizedServerMode = CompetitiveServerMode;
+
+            if (!TryGetDedicatedServerConfigurationForBackend(out var configuration, out message))
+            {
+                return false;
+            }
+
+            if (!TryGetDynamicMemberValue(configuration, "serverMode", out var runtimeServerModeValue))
+            {
+                message = "serverMode field missing on live ServerConfiguration.";
+                return false;
+            }
+
+            rawServerMode = ExtractDynamicMemberValueToString(runtimeServerModeValue);
+            if (!TryNormalizeServerMode(rawServerMode, out normalizedServerMode))
+            {
+                message = $"serverMode field on live ServerConfiguration is invalid ({DescribeDynamicValue(runtimeServerModeValue)}).";
+                normalizedServerMode = CompetitiveServerMode;
+                return false;
+            }
+
+            message = "Resolved serverMode from live ServerConfiguration.";
+            return true;
+        }
+
+        private static bool TryGetDedicatedServerConfigurationForBackend(out object configuration, out string message)
+        {
+            configuration = null;
+
+            var serverManagerType = ReflectionUtils.FindTypeByName("ServerManager", "Puck.ServerManager");
+            if (serverManagerType == null)
+            {
+                message = "ServerManager type could not be resolved.";
+                return false;
+            }
+
+            var serverManager = ReflectionUtils.GetManagerInstance(serverManagerType);
+            if (serverManager == null)
+            {
+                message = "ServerManager instance is unavailable.";
+                return false;
+            }
+
+            if (!TryGetDynamicMemberValue(serverManager, "ServerConfigurationManager", out var configurationManager) || configurationManager == null)
+            {
+                message = "ServerConfigurationManager is unavailable on ServerManager.";
+                return false;
+            }
+
+            if (!TryGetDynamicMemberValue(configurationManager, "ServerConfiguration", out configuration) || configuration == null)
+            {
+                message = "ServerConfiguration is unavailable on ServerConfigurationManager.";
+                return false;
+            }
+
+            message = "Resolved ServerConfiguration from ServerConfigurationManager.ServerConfiguration.";
+            return true;
+        }
+
+        private static bool TryGetDynamicMemberValue(object instance, string memberName, out object value)
+        {
+            value = null;
+            if (instance == null || string.IsNullOrWhiteSpace(memberName))
+            {
+                return false;
+            }
+
+            if (instance is JObject jObject)
+            {
+                var property = jObject.Properties().FirstOrDefault(candidate => string.Equals(candidate.Name, memberName, StringComparison.OrdinalIgnoreCase));
+                if (property == null)
+                {
+                    return false;
+                }
+
+                value = property.Value;
+                return true;
+            }
+
+            if (instance is JToken token && token.Type == JTokenType.Object)
+            {
+                return TryGetDynamicMemberValue((JObject)token, memberName, out value);
+            }
+
+            var bindingFlags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+            var type = instance.GetType();
+            var propertyInfo = type.GetProperty(memberName, bindingFlags)
+                ?? type.GetProperties(bindingFlags).FirstOrDefault(candidate => string.Equals(candidate.Name, memberName, StringComparison.OrdinalIgnoreCase));
+            if (propertyInfo != null)
+            {
+                value = propertyInfo.GetValue(instance);
+                return true;
+            }
+
+            var fieldInfo = type.GetField(memberName, bindingFlags)
+                ?? type.GetFields(bindingFlags).FirstOrDefault(candidate => string.Equals(candidate.Name, memberName, StringComparison.OrdinalIgnoreCase));
+            if (fieldInfo != null)
+            {
+                value = fieldInfo.GetValue(instance);
+                return true;
+            }
+
+            return false;
+        }
+
+        private static string ExtractDynamicMemberValueToString(object value)
+        {
+            var normalizedValue = UnwrapDynamicToken(value);
+            if (normalizedValue == null)
+            {
+                return null;
+            }
+
+            var stringValue = normalizedValue.ToString();
+            return string.IsNullOrWhiteSpace(stringValue) ? null : stringValue.Trim();
+        }
+
+        private static string DescribeDynamicValue(object value)
+        {
+            var normalizedValue = UnwrapDynamicToken(value);
+            return normalizedValue == null ? "null" : normalizedValue.ToString();
+        }
+
+        private static string DescribeServerModeValue(string value)
+        {
+            return string.IsNullOrWhiteSpace(value) ? "null" : value.Trim();
+        }
+
+        private static object UnwrapDynamicToken(object value)
+        {
+            if (value is JValue jValue)
+            {
+                return jValue.Value;
+            }
+
+            return value;
         }
 
         private static string FirstNonEmptyString(JObject node, params string[] propertyNames)
