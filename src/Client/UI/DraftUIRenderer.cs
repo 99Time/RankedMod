@@ -18,6 +18,7 @@ namespace schrader
             public VisualElement Backdrop;
             public VisualElement Root;
             public VisualElement ApprovalPopupLayer;
+            internal DiscordOnboardingUIRenderer.View DiscordOnboarding;
             internal WelcomeUIRenderer.View Welcome;
             public VisualElement VotingPanel;
             public Label VotingChipLabel;
@@ -69,7 +70,7 @@ namespace schrader
             internal PostMatchUIRenderer.View PostMatch;
         }
 
-        public static void CreateUI(UIHUD hud, VisualElement rootVisualElement, out View view, Action onVoteAccepted, Action onVoteRejected, Action onApprovalAccepted, Action onApprovalRejected, Action<string> onPickPlayer, Action<string> onAcceptLateJoiner, Action onWelcomeDiscordOpen, Action onWelcomeHostOpen, Action onWelcomeContinue, Action onPostMatchHostOpen, Action onPostMatchContinue, Action onPostMatchClose)
+        public static void CreateUI(UIHUD hud, VisualElement rootVisualElement, out View view, Action onVoteAccepted, Action onVoteRejected, Action onApprovalAccepted, Action onApprovalRejected, Action<string> onPickPlayer, Action<string> onAcceptLateJoiner, Action<string> onDiscordOnboardingVerify, Action onDiscordOnboardingJoin, Action onDiscordOnboardingLeave, Action onDiscordOnboardingCloseVerification, Action onWelcomeDiscordOpen, Action onWelcomeHostOpen, Action onWelcomeContinue, Action onPostMatchHostOpen, Action onPostMatchContinue, Action onPostMatchClose)
         {
             view = null;
 
@@ -148,6 +149,7 @@ namespace schrader
             BuildVotingUI(view, onVoteAccepted, onVoteRejected);
             BuildApprovalUI(view, onApprovalAccepted, onApprovalRejected);
             BuildDraftUI(view);
+            DiscordOnboardingUIRenderer.BuildUI(view, onDiscordOnboardingVerify, onDiscordOnboardingJoin, onDiscordOnboardingLeave, onDiscordOnboardingCloseVerification);
             WelcomeUIRenderer.BuildUI(view, onWelcomeDiscordOpen, onWelcomeHostOpen, onWelcomeContinue);
             PostMatchUIRenderer.BuildUI(view, onPostMatchHostOpen, onPostMatchContinue, onPostMatchClose);
 
@@ -161,6 +163,7 @@ namespace schrader
             view.Container.style.display = DisplayStyle.None;
             view.Container.style.opacity = 0f;
             SetApprovalPopupVisible(view, false);
+            if (view.DiscordOnboarding?.Panel != null) view.DiscordOnboarding.Panel.style.display = DisplayStyle.None;
             if (view.Welcome?.Panel != null) view.Welcome.Panel.style.display = DisplayStyle.None;
             if (view.PostMatch?.Panel != null) view.PostMatch.Panel.style.display = DisplayStyle.None;
         }
@@ -170,6 +173,7 @@ namespace schrader
             if (view == null) return;
             ApplyVotingRootChrome(view);
             view.Container.style.display = DisplayStyle.Flex;
+            if (view.DiscordOnboarding?.Panel != null) view.DiscordOnboarding.Panel.style.display = DisplayStyle.None;
             if (view.Welcome?.Panel != null) view.Welcome.Panel.style.display = DisplayStyle.None;
             view.VotingPanel.style.display = DisplayStyle.Flex;
             view.DraftPanel.style.display = DisplayStyle.None;
@@ -188,6 +192,7 @@ namespace schrader
             ApplyDefaultRootChrome(view);
             view.Container.style.display = DisplayStyle.Flex;
             view.VotingPanel.style.display = DisplayStyle.None;
+            if (view.DiscordOnboarding?.Panel != null) view.DiscordOnboarding.Panel.style.display = DisplayStyle.None;
             if (view.Welcome?.Panel != null) view.Welcome.Panel.style.display = DisplayStyle.None;
             view.DraftPanel.style.display = DisplayStyle.Flex;
             if (view.PostMatch?.Panel != null) view.PostMatch.Panel.style.display = DisplayStyle.None;
@@ -244,7 +249,7 @@ namespace schrader
             view.Root.style.borderLeftWidth = 1;
             view.Root.style.borderTopColor = new StyleColor(new Color(0.48f, 0.60f, 0.70f, 0.28f));
             view.Root.style.borderRightColor = new StyleColor(new Color(0.48f, 0.60f, 0.70f, 0.18f));
-            view.Root.style.borderBottomColor = new StyleColor(new Color(0.02f, 0.03f, 0.05f, 0.65f));
+            view.Root.style.borderBottomColor = new StyleColor(new Color(0.48f, 0.60f, 0.70f, 0.18f));
             view.Root.style.borderLeftColor = new StyleColor(new Color(0.48f, 0.60f, 0.70f, 0.18f));
         }
 
@@ -261,19 +266,22 @@ namespace schrader
             var countdownProgress = Mathf.Clamp01(remainingSeconds / durationSeconds);
             var pulse = 0.5f + (Mathf.Sin(Time.unscaledTime * 3.2f) * 0.5f);
             var remainingYesVotes = Mathf.Max(0, state.RequiredYesVotes - state.YesVotes);
+            var waitingVotes = Mathf.Max(0, state.EligibleCount - state.YesVotes - state.NoVotes);
 
-            view.VotingTitleLabel.text = string.IsNullOrWhiteSpace(state.Title) ? "RANKED MATCH STARTING VOTE" : state.Title;
-            view.VotingPromptLabel.text = string.IsNullOrWhiteSpace(state.PromptText) ? "Vote now with /y or /n." : state.PromptText;
-            view.VotingTimerLabel.text = $"{Mathf.CeilToInt(remainingSeconds)}s left";
-            view.VotingStatsLabel.text = $"Ready {state.YesVotes}/{Mathf.Max(0, state.EligibleCount)}  ·  No {state.NoVotes}  ·  Need {remainingYesVotes} yes";
+            view.VotingTitleLabel.text = string.IsNullOrWhiteSpace(state.Title) ? "MATCH FOUND" : state.Title;
+            view.VotingPromptLabel.text = "Vote with the buttons below to begin ranked play.";
+            view.VotingTimerLabel.text = FormatVoteCountdown(remainingSeconds);
+            view.VotingStatsLabel.text = state.NoVotes > 0
+                ? $"Ready {state.YesVotes}  ·  Waiting {waitingVotes}\nDeclined {state.NoVotes}  ·  Need {remainingYesVotes} yes"
+                : $"Ready {state.YesVotes}  ·  Waiting {waitingVotes}\nNeed {remainingYesVotes} yes";
             view.VotingStatsLabel.style.display = DisplayStyle.Flex;
-            view.VotingFooterLabel.text = string.IsNullOrWhiteSpace(state.FooterText) ? "Action: /y starts ranked, /n stops it." : state.FooterText;
-            view.VotingFooterLabel.style.display = DisplayStyle.Flex;
+            view.VotingFooterLabel.text = string.Empty;
+            view.VotingFooterLabel.style.display = DisplayStyle.None;
 
             view.VotingReadyFill.style.width = new StyleLength(new Length(readyProgress * 100f, LengthUnit.Percent));
             view.VotingCountdownFill.style.width = new StyleLength(new Length(countdownProgress * 100f, LengthUnit.Percent));
             view.VotingReadyFill.style.opacity = 0.88f + (pulse * 0.12f);
-            view.VotingCountdownFill.style.opacity = 0.78f + ((1f - pulse) * 0.18f);
+            view.VotingCountdownFill.style.opacity = 0f;
 
             view.VotingAcceptButton.SetEnabled(!voteLocked);
             view.VotingRejectButton.SetEnabled(!voteLocked);
@@ -282,7 +290,7 @@ namespace schrader
                 view.VotingAcceptTitleLabel,
                 view.VotingAcceptSubtitleLabel,
                 "VOTE YES",
-                "/y Start ranked",
+                string.Empty,
                 voteLocked,
                 hasAccepted);
             ConfigureVoteActionButton(
@@ -290,7 +298,7 @@ namespace schrader
                 view.VotingRejectTitleLabel,
                 view.VotingRejectSubtitleLabel,
                 "VOTE NO",
-                "/n Not now",
+                string.Empty,
                 voteLocked,
                 hasRejected);
 
@@ -532,180 +540,163 @@ namespace schrader
             panel.style.flexDirection = FlexDirection.Column;
             panel.style.alignSelf = Align.Center;
             panel.style.width = new StyleLength(new Length(100, LengthUnit.Percent));
-            panel.style.maxWidth = 820;
-            panel.style.paddingTop = new StyleLength(new Length(20, LengthUnit.Pixel));
-            panel.style.paddingBottom = new StyleLength(new Length(18, LengthUnit.Pixel));
-            panel.style.paddingLeft = new StyleLength(new Length(24, LengthUnit.Pixel));
-            panel.style.paddingRight = new StyleLength(new Length(24, LengthUnit.Pixel));
-            panel.style.backgroundColor = new StyleColor(new Color(0.05f, 0.08f, 0.11f, 0.94f));
-            panel.style.borderTopLeftRadius = new StyleLength(new Length(18, LengthUnit.Pixel));
-            panel.style.borderTopRightRadius = new StyleLength(new Length(18, LengthUnit.Pixel));
-            panel.style.borderBottomLeftRadius = new StyleLength(new Length(18, LengthUnit.Pixel));
-            panel.style.borderBottomRightRadius = new StyleLength(new Length(18, LengthUnit.Pixel));
-            panel.style.borderTopWidth = 1;
-            panel.style.borderRightWidth = 1;
-            panel.style.borderBottomWidth = 1;
-            panel.style.borderLeftWidth = 1;
-            panel.style.borderTopColor = new StyleColor(new Color(0.77f, 0.83f, 0.90f, 0.26f));
-            panel.style.borderRightColor = new StyleColor(new Color(0.77f, 0.83f, 0.90f, 0.10f));
-            panel.style.borderBottomColor = new StyleColor(new Color(0f, 0f, 0f, 0.55f));
-            panel.style.borderLeftColor = new StyleColor(new Color(0.77f, 0.83f, 0.90f, 0.10f));
+            panel.style.maxWidth = 1000;
+            panel.style.paddingTop = new StyleLength(new Length(28, LengthUnit.Pixel));
+            panel.style.paddingBottom = new StyleLength(new Length(28, LengthUnit.Pixel));
+            panel.style.paddingLeft = new StyleLength(new Length(28, LengthUnit.Pixel));
+            panel.style.paddingRight = new StyleLength(new Length(28, LengthUnit.Pixel));
+            panel.style.backgroundColor = new StyleColor(new Color(0.04f, 0.07f, 0.10f, 0.96f));
+            panel.style.borderTopLeftRadius = new StyleLength(new Length(30, LengthUnit.Pixel));
+            panel.style.borderTopRightRadius = new StyleLength(new Length(30, LengthUnit.Pixel));
+            panel.style.borderBottomLeftRadius = new StyleLength(new Length(30, LengthUnit.Pixel));
+            panel.style.borderBottomRightRadius = new StyleLength(new Length(30, LengthUnit.Pixel));
 
-            var panelShadow = new VisualElement();
-            panelShadow.style.position = Position.Absolute;
-            panelShadow.style.top = 10;
-            panelShadow.style.left = 10;
-            panelShadow.style.right = 10;
-            panelShadow.style.bottom = -10;
-            panelShadow.style.backgroundColor = new StyleColor(new Color(0f, 0f, 0f, 0.16f));
-            panelShadow.style.borderTopLeftRadius = new StyleLength(new Length(24, LengthUnit.Pixel));
-            panelShadow.style.borderTopRightRadius = new StyleLength(new Length(24, LengthUnit.Pixel));
-            panelShadow.style.borderBottomLeftRadius = new StyleLength(new Length(24, LengthUnit.Pixel));
-            panelShadow.style.borderBottomRightRadius = new StyleLength(new Length(24, LengthUnit.Pixel));
-            panel.Add(panelShadow);
+            var panelOutline = new VisualElement();
+            panelOutline.style.position = Position.Absolute;
+            panelOutline.style.top = 0;
+            panelOutline.style.left = 0;
+            panelOutline.style.right = 0;
+            panelOutline.style.bottom = 0;
+            panelOutline.style.borderTopWidth = 1;
+            panelOutline.style.borderRightWidth = 1;
+            panelOutline.style.borderBottomWidth = 1;
+            panelOutline.style.borderLeftWidth = 1;
+            panelOutline.style.borderTopColor = new StyleColor(new Color(0.95f, 0.78f, 0.32f, 0.30f));
+            panelOutline.style.borderRightColor = new StyleColor(new Color(0.82f, 0.88f, 0.94f, 0.12f));
+            panelOutline.style.borderBottomColor = new StyleColor(new Color(0.95f, 0.78f, 0.32f, 0.18f));
+            panelOutline.style.borderLeftColor = new StyleColor(new Color(0.82f, 0.88f, 0.94f, 0.12f));
+            panelOutline.style.borderTopLeftRadius = new StyleLength(new Length(30, LengthUnit.Pixel));
+            panelOutline.style.borderTopRightRadius = new StyleLength(new Length(30, LengthUnit.Pixel));
+            panelOutline.style.borderBottomLeftRadius = new StyleLength(new Length(30, LengthUnit.Pixel));
+            panelOutline.style.borderBottomRightRadius = new StyleLength(new Length(30, LengthUnit.Pixel));
+            panelOutline.pickingMode = PickingMode.Ignore;
 
             var topAccent = new VisualElement();
             topAccent.style.width = new StyleLength(new Length(100, LengthUnit.Percent));
-            topAccent.style.height = 2;
-            topAccent.style.marginBottom = new StyleLength(new Length(18, LengthUnit.Pixel));
-            topAccent.style.backgroundColor = new StyleColor(new Color(0.91f, 0.74f, 0.26f, 0.96f));
-            topAccent.style.borderTopLeftRadius = new StyleLength(new Length(999, LengthUnit.Pixel));
-            topAccent.style.borderTopRightRadius = new StyleLength(new Length(999, LengthUnit.Pixel));
-            topAccent.style.borderBottomLeftRadius = new StyleLength(new Length(999, LengthUnit.Pixel));
-            topAccent.style.borderBottomRightRadius = new StyleLength(new Length(999, LengthUnit.Pixel));
+            topAccent.style.height = 1;
+            topAccent.style.marginBottom = new StyleLength(new Length(22, LengthUnit.Pixel));
+            topAccent.style.backgroundColor = new StyleColor(new Color(0.93f, 0.77f, 0.30f, 0.82f));
 
-            var header = new VisualElement();
-            header.style.display = DisplayStyle.Flex;
-            header.style.flexDirection = FlexDirection.Column;
-            header.style.alignItems = Align.Center;
+            var headerRow = new VisualElement();
+            headerRow.style.display = DisplayStyle.Flex;
+            headerRow.style.flexDirection = FlexDirection.Row;
+            headerRow.style.justifyContent = Justify.SpaceBetween;
+            headerRow.style.alignItems = Align.FlexStart;
+            headerRow.style.flexWrap = Wrap.NoWrap;
 
-            view.VotingTitleLabel = CreateLabel("RANKED MATCH STARTING VOTE", 26, FontStyle.Bold, TextAnchor.MiddleCenter, new Color(0.98f, 0.99f, 1f, 1f));
-            view.VotingPromptLabel = CreateLabel("Vote now with /y or /n", 13, FontStyle.Normal, TextAnchor.MiddleCenter, new Color(0.72f, 0.79f, 0.86f, 1f));
-            view.VotingPromptLabel.style.marginTop = new StyleLength(new Length(4, LengthUnit.Pixel));
+            var heroColumn = new VisualElement();
+            heroColumn.style.display = DisplayStyle.Flex;
+            heroColumn.style.flexDirection = FlexDirection.Column;
+            heroColumn.style.flexGrow = 1;
+            heroColumn.style.flexShrink = 1;
+            heroColumn.style.flexBasis = new StyleLength(new Length(0, LengthUnit.Pixel));
+            heroColumn.style.minWidth = 360;
+            heroColumn.style.marginRight = new StyleLength(new Length(18, LengthUnit.Pixel));
 
-            header.Add(view.VotingTitleLabel);
-            header.Add(view.VotingPromptLabel);
+            var headerChip = new VisualElement();
+            headerChip.style.alignSelf = Align.FlexStart;
+            headerChip.style.paddingTop = new StyleLength(new Length(5, LengthUnit.Pixel));
+            headerChip.style.paddingBottom = new StyleLength(new Length(5, LengthUnit.Pixel));
+            headerChip.style.paddingLeft = new StyleLength(new Length(14, LengthUnit.Pixel));
+            headerChip.style.paddingRight = new StyleLength(new Length(14, LengthUnit.Pixel));
+            headerChip.style.backgroundColor = new StyleColor(new Color(0.22f, 0.18f, 0.08f, 0.82f));
+            headerChip.style.borderTopLeftRadius = new StyleLength(new Length(999, LengthUnit.Pixel));
+            headerChip.style.borderTopRightRadius = new StyleLength(new Length(999, LengthUnit.Pixel));
+            headerChip.style.borderBottomLeftRadius = new StyleLength(new Length(999, LengthUnit.Pixel));
+            headerChip.style.borderBottomRightRadius = new StyleLength(new Length(999, LengthUnit.Pixel));
+            headerChip.style.borderTopWidth = 1;
+            headerChip.style.borderRightWidth = 1;
+            headerChip.style.borderBottomWidth = 1;
+            headerChip.style.borderLeftWidth = 1;
+            headerChip.style.borderTopColor = new StyleColor(new Color(1f, 0.90f, 0.62f, 0.24f));
+            headerChip.style.borderRightColor = new StyleColor(new Color(1f, 0.90f, 0.62f, 0.10f));
+            headerChip.style.borderBottomColor = new StyleColor(new Color(1f, 0.90f, 0.62f, 0.12f));
+            headerChip.style.borderLeftColor = new StyleColor(new Color(1f, 0.90f, 0.62f, 0.10f));
+            headerChip.Add(CreateLabel("RANKED VOTE", 10, FontStyle.Bold, TextAnchor.MiddleCenter, new Color(1f, 0.90f, 0.60f, 0.98f)));
 
-            var actionRow = new VisualElement();
-            actionRow.style.display = DisplayStyle.Flex;
-            actionRow.style.flexDirection = FlexDirection.Row;
-            actionRow.style.alignItems = Align.Center;
-            actionRow.style.justifyContent = Justify.Center;
-            actionRow.style.flexWrap = Wrap.Wrap;
-            actionRow.style.marginTop = new StyleLength(new Length(20, LengthUnit.Pixel));
+            view.VotingTitleLabel = CreateLabel("MATCH FOUND", 36, FontStyle.Bold, TextAnchor.MiddleLeft, new Color(0.98f, 0.99f, 1f, 1f));
+            view.VotingTitleLabel.style.marginTop = new StyleLength(new Length(16, LengthUnit.Pixel));
+            view.VotingTitleLabel.style.whiteSpace = WhiteSpace.Normal;
+            view.VotingTitleLabel.style.maxWidth = 620;
+            view.VotingPromptLabel = CreateLabel("Vote with the buttons below to begin ranked play.", 14, FontStyle.Normal, TextAnchor.MiddleLeft, new Color(0.78f, 0.84f, 0.90f, 0.96f));
+            view.VotingPromptLabel.style.marginTop = new StyleLength(new Length(8, LengthUnit.Pixel));
+            view.VotingPromptLabel.style.maxWidth = 520;
 
-            view.VotingAcceptButton = new Button(() => onVoteAccepted?.Invoke());
-            view.VotingAcceptButton.text = string.Empty;
-            StyleButton(view.VotingAcceptButton, new ButtonPalette(
-                new Color(0.19f, 0.71f, 0.40f, 0.98f),
-                new Color(0.26f, 0.82f, 0.49f, 1f),
-                new Color(0.13f, 0.53f, 0.30f, 1f),
-                Color.white));
-            view.VotingAcceptButton.style.width = 200;
-            view.VotingAcceptButton.style.height = 72;
-            view.VotingAcceptButton.style.marginBottom = 0;
-            view.VotingAcceptButton.style.alignItems = Align.Stretch;
-            view.VotingAcceptButton.style.justifyContent = Justify.Center;
-            view.VotingAcceptButton.style.flexDirection = FlexDirection.Row;
-            view.VotingAcceptButton.style.whiteSpace = WhiteSpace.Normal;
-            view.VotingAcceptButton.style.unityTextAlign = TextAnchor.MiddleCenter;
-            view.VotingAcceptButton.style.paddingLeft = new StyleLength(new Length(16, LengthUnit.Pixel));
-            view.VotingAcceptButton.style.paddingRight = new StyleLength(new Length(16, LengthUnit.Pixel));
-            view.VotingAcceptButton.style.borderTopColor = new StyleColor(new Color(0.80f, 1f, 0.88f, 0.52f));
-            view.VotingAcceptButton.style.borderRightColor = new StyleColor(new Color(0.80f, 1f, 0.88f, 0.22f));
-            view.VotingAcceptButton.style.borderLeftColor = new StyleColor(new Color(0.80f, 1f, 0.88f, 0.22f));
-            var acceptIcon = CreateLabel("✓", 24, FontStyle.Bold, TextAnchor.MiddleCenter, Color.white);
-            acceptIcon.style.width = 28;
-            acceptIcon.style.marginRight = new StyleLength(new Length(8, LengthUnit.Pixel));
-            var acceptTextStack = new VisualElement();
-            acceptTextStack.style.display = DisplayStyle.Flex;
-            acceptTextStack.style.flexDirection = FlexDirection.Column;
-            acceptTextStack.style.alignItems = Align.FlexStart;
-            acceptTextStack.style.justifyContent = Justify.Center;
-            view.VotingAcceptTitleLabel = CreateLabel("VOTE YES", 15, FontStyle.Bold, TextAnchor.MiddleLeft, Color.white);
-            view.VotingAcceptSubtitleLabel = CreateLabel("/y Start ranked", 11, FontStyle.Normal, TextAnchor.MiddleLeft, new Color(0.88f, 1f, 0.92f, 0.96f));
-            view.VotingAcceptSubtitleLabel.style.marginTop = new StyleLength(new Length(1, LengthUnit.Pixel));
-            acceptTextStack.Add(view.VotingAcceptTitleLabel);
-            acceptTextStack.Add(view.VotingAcceptSubtitleLabel);
-            view.VotingAcceptButton.Add(acceptIcon);
-            view.VotingAcceptButton.Add(acceptTextStack);
+            heroColumn.Add(headerChip);
+            heroColumn.Add(view.VotingTitleLabel);
+            heroColumn.Add(view.VotingPromptLabel);
 
-            var progressStack = new VisualElement();
-            progressStack.style.display = DisplayStyle.Flex;
-            progressStack.style.flexDirection = FlexDirection.Column;
-            progressStack.style.alignItems = Align.Center;
-            progressStack.style.justifyContent = Justify.Center;
-            progressStack.style.width = 250;
-            progressStack.style.marginLeft = new StyleLength(new Length(20, LengthUnit.Pixel));
-            progressStack.style.marginRight = new StyleLength(new Length(20, LengthUnit.Pixel));
-            view.VotingTimerLabel = CreateLabel("0s left", 16, FontStyle.Bold, TextAnchor.MiddleCenter, new Color(0.94f, 0.97f, 1f, 1f));
-            var readyTrack = CreateVoteProgressTrack(new Color(0.17f, 0.21f, 0.26f, 0.96f), new Color(0.25f, 0.90f, 0.53f, 0.98f), 4, out view.VotingReadyFill);
-            readyTrack.style.marginTop = new StyleLength(new Length(10, LengthUnit.Pixel));
-            progressStack.Add(view.VotingTimerLabel);
-            progressStack.Add(readyTrack);
-            view.VotingStatsLabel = CreateLabel(string.Empty, 11, FontStyle.Normal, TextAnchor.MiddleCenter, new Color(0.74f, 0.80f, 0.86f, 1f));
+            var topAside = new VisualElement();
+            topAside.style.display = DisplayStyle.Flex;
+            topAside.style.flexDirection = FlexDirection.Column;
+            topAside.style.width = 280;
+            topAside.style.minWidth = 250;
+            topAside.style.flexShrink = 0;
+
+            var timerCard = CreateVoteSectionCard();
+            timerCard.style.width = new StyleLength(new Length(100, LengthUnit.Percent));
+            timerCard.style.minWidth = 230;
+            timerCard.style.alignSelf = Align.Stretch;
+
+            var timerEyebrow = CreateLabel("COUNTDOWN", 10, FontStyle.Bold, TextAnchor.MiddleCenter, new Color(1f, 0.90f, 0.62f, 0.90f));
+            timerEyebrow.style.alignSelf = Align.Center;
+            view.VotingTimerLabel = CreateLabel("00:00", 40, FontStyle.Bold, TextAnchor.MiddleCenter, new Color(0.97f, 0.98f, 1f, 1f));
+            view.VotingTimerLabel.style.marginTop = new StyleLength(new Length(8, LengthUnit.Pixel));
+            view.VotingTimerLabel.style.alignSelf = Align.Center;
+            var readyTrack = CreateVoteProgressTrack(new Color(0.13f, 0.17f, 0.22f, 0.96f), new Color(0.24f, 0.81f, 0.49f, 0.98f), 6, out view.VotingReadyFill);
+            readyTrack.style.marginTop = new StyleLength(new Length(14, LengthUnit.Pixel));
+            var summaryCard = CreateVoteSectionCard();
+            summaryCard.style.marginTop = new StyleLength(new Length(14, LengthUnit.Pixel));
+            var summaryEyebrow = CreateLabel("VOTE STATUS", 10, FontStyle.Bold, TextAnchor.MiddleLeft, new Color(1f, 0.90f, 0.62f, 0.90f));
+            view.VotingStatsLabel = CreateLabel(string.Empty, 11, FontStyle.Normal, TextAnchor.MiddleLeft, new Color(0.77f, 0.83f, 0.89f, 0.96f));
             view.VotingStatsLabel.style.display = DisplayStyle.None;
-            view.VotingStatsLabel.style.marginTop = new StyleLength(new Length(8, LengthUnit.Pixel));
-            progressStack.Add(view.VotingStatsLabel);
+            view.VotingStatsLabel.style.marginTop = new StyleLength(new Length(10, LengthUnit.Pixel));
+            view.VotingStatsLabel.style.alignSelf = Align.FlexStart;
+            view.VotingStatsLabel.style.whiteSpace = WhiteSpace.Normal;
 
-            view.VotingRejectButton = new Button(() => onVoteRejected?.Invoke());
-            view.VotingRejectButton.text = string.Empty;
-            StyleButton(view.VotingRejectButton, new ButtonPalette(
-                new Color(0.80f, 0.28f, 0.28f, 0.98f),
-                new Color(0.92f, 0.34f, 0.34f, 1f),
-                new Color(0.60f, 0.19f, 0.19f, 1f),
-                Color.white));
-            view.VotingRejectButton.style.width = 200;
-            view.VotingRejectButton.style.height = 72;
-            view.VotingRejectButton.style.marginBottom = 0;
-            view.VotingRejectButton.style.alignItems = Align.Stretch;
-            view.VotingRejectButton.style.justifyContent = Justify.Center;
-            view.VotingRejectButton.style.flexDirection = FlexDirection.Row;
-            view.VotingRejectButton.style.whiteSpace = WhiteSpace.Normal;
-            view.VotingRejectButton.style.unityTextAlign = TextAnchor.MiddleCenter;
-            view.VotingRejectButton.style.paddingLeft = new StyleLength(new Length(16, LengthUnit.Pixel));
-            view.VotingRejectButton.style.paddingRight = new StyleLength(new Length(16, LengthUnit.Pixel));
-            view.VotingRejectButton.style.borderTopColor = new StyleColor(new Color(1f, 0.82f, 0.82f, 0.52f));
-            view.VotingRejectButton.style.borderRightColor = new StyleColor(new Color(1f, 0.82f, 0.82f, 0.22f));
-            view.VotingRejectButton.style.borderLeftColor = new StyleColor(new Color(1f, 0.82f, 0.82f, 0.22f));
-            var rejectIcon = CreateLabel("✕", 22, FontStyle.Bold, TextAnchor.MiddleCenter, Color.white);
-            rejectIcon.style.width = 28;
-            rejectIcon.style.marginRight = new StyleLength(new Length(8, LengthUnit.Pixel));
-            var rejectTextStack = new VisualElement();
-            rejectTextStack.style.display = DisplayStyle.Flex;
-            rejectTextStack.style.flexDirection = FlexDirection.Column;
-            rejectTextStack.style.alignItems = Align.FlexStart;
-            rejectTextStack.style.justifyContent = Justify.Center;
-            view.VotingRejectTitleLabel = CreateLabel("VOTE NO", 15, FontStyle.Bold, TextAnchor.MiddleLeft, Color.white);
-            view.VotingRejectSubtitleLabel = CreateLabel("/n Not now", 11, FontStyle.Normal, TextAnchor.MiddleLeft, new Color(1f, 0.91f, 0.91f, 0.96f));
-            view.VotingRejectSubtitleLabel.style.marginTop = new StyleLength(new Length(1, LengthUnit.Pixel));
-            rejectTextStack.Add(view.VotingRejectTitleLabel);
-            rejectTextStack.Add(view.VotingRejectSubtitleLabel);
-            view.VotingRejectButton.Add(rejectIcon);
-            view.VotingRejectButton.Add(rejectTextStack);
+            timerCard.Add(timerEyebrow);
+            timerCard.Add(view.VotingTimerLabel);
+            timerCard.Add(readyTrack);
+            summaryCard.Add(summaryEyebrow);
+            summaryCard.Add(view.VotingStatsLabel);
 
-            actionRow.Add(view.VotingAcceptButton);
-            actionRow.Add(progressStack);
-            actionRow.Add(view.VotingRejectButton);
+            topAside.Add(timerCard);
+            topAside.Add(summaryCard);
+
+            headerRow.Add(heroColumn);
+            headerRow.Add(topAside);
+
+            var contentRow = new VisualElement();
+            contentRow.style.display = DisplayStyle.Flex;
+            contentRow.style.flexDirection = FlexDirection.Row;
+            contentRow.style.flexWrap = Wrap.Wrap;
+            contentRow.style.alignItems = Align.Stretch;
+            contentRow.style.marginTop = new StyleLength(new Length(24, LengthUnit.Pixel));
 
             var playersSection = CreateVoteSectionCard();
-            playersSection.style.marginTop = new StyleLength(new Length(18, LengthUnit.Pixel));
+            playersSection.style.flexGrow = 1;
+            playersSection.style.flexShrink = 1;
+            playersSection.style.flexBasis = new StyleLength(new Length(0, LengthUnit.Pixel));
+            playersSection.style.minWidth = 460;
+            playersSection.style.marginRight = new StyleLength(new Length(16, LengthUnit.Pixel));
 
             var rosterHeader = new VisualElement();
             rosterHeader.style.display = DisplayStyle.Flex;
             rosterHeader.style.flexDirection = FlexDirection.Row;
-            rosterHeader.style.justifyContent = Justify.FlexStart;
+            rosterHeader.style.justifyContent = Justify.SpaceBetween;
             rosterHeader.style.alignItems = Align.Center;
 
-            var rosterTitle = CreateLabel("LOBBY STATUS", 13, FontStyle.Bold, TextAnchor.MiddleLeft, new Color(0.98f, 0.99f, 1f, 1f));
+            var rosterTitle = CreateLabel("MATCH LOBBY", 12, FontStyle.Bold, TextAnchor.MiddleLeft, new Color(1f, 0.97f, 0.92f, 0.98f));
+            var rosterHint = CreateLabel("Ready / Waiting / Declined", 11, FontStyle.Normal, TextAnchor.MiddleRight, new Color(0.74f, 0.81f, 0.88f, 0.90f));
             rosterHeader.Add(rosterTitle);
+            rosterHeader.Add(rosterHint);
 
             var rosterColumns = new VisualElement();
             rosterColumns.style.display = DisplayStyle.Flex;
             rosterColumns.style.flexDirection = FlexDirection.Row;
             rosterColumns.style.flexWrap = Wrap.Wrap;
             rosterColumns.style.alignItems = Align.FlexStart;
-            rosterColumns.style.marginTop = new StyleLength(new Length(10, LengthUnit.Pixel));
+            rosterColumns.style.marginTop = new StyleLength(new Length(14, LengthUnit.Pixel));
 
             view.VotingPlayersLeftColumn = new VisualElement();
             view.VotingPlayersLeftColumn.style.display = DisplayStyle.Flex;
@@ -722,26 +713,102 @@ namespace schrader
             view.VotingPlayersRightColumn.style.flexShrink = 1;
             view.VotingPlayersRightColumn.style.flexBasis = new StyleLength(new Length(0, LengthUnit.Pixel));
             view.VotingPlayersRightColumn.style.minWidth = 220;
-            view.VotingPlayersRightColumn.style.marginLeft = new StyleLength(new Length(10, LengthUnit.Pixel));
+            view.VotingPlayersRightColumn.style.marginLeft = new StyleLength(new Length(12, LengthUnit.Pixel));
 
             rosterColumns.Add(view.VotingPlayersLeftColumn);
             rosterColumns.Add(view.VotingPlayersRightColumn);
             playersSection.Add(rosterHeader);
             playersSection.Add(rosterColumns);
 
-            var countdownTrack = CreateVoteProgressTrack(new Color(0.20f, 0.17f, 0.10f, 0.88f), new Color(0.93f, 0.74f, 0.26f, 0.98f), 3, out view.VotingCountdownFill);
-            countdownTrack.style.marginTop = new StyleLength(new Length(16, LengthUnit.Pixel));
+            var decisionColumn = CreateVoteSectionCard();
+            decisionColumn.style.width = 240;
+            decisionColumn.style.minWidth = 220;
+            decisionColumn.style.alignSelf = Align.Stretch;
 
-            view.VotingFooterLabel = CreateLabel(string.Empty, 11, FontStyle.Normal, TextAnchor.MiddleCenter, Color.white);
+            var decisionEyebrow = CreateLabel("CAST VOTE", 10, FontStyle.Bold, TextAnchor.MiddleLeft, new Color(1f, 0.90f, 0.62f, 0.90f));
+            var decisionHint = CreateLabel("One choice locks your response.", 12, FontStyle.Normal, TextAnchor.MiddleLeft, new Color(0.76f, 0.83f, 0.89f, 0.94f));
+            decisionHint.style.marginTop = new StyleLength(new Length(6, LengthUnit.Pixel));
+
+            view.VotingAcceptButton = new Button(() => onVoteAccepted?.Invoke());
+            view.VotingAcceptButton.text = string.Empty;
+            StyleButton(view.VotingAcceptButton, new ButtonPalette(
+                new Color(0.15f, 0.47f, 0.31f, 0.98f),
+                new Color(0.21f, 0.59f, 0.39f, 1f),
+                new Color(0.11f, 0.37f, 0.24f, 1f),
+                Color.white));
+            view.VotingAcceptButton.style.width = new StyleLength(new Length(100, LengthUnit.Percent));
+            view.VotingAcceptButton.style.height = 78;
+            view.VotingAcceptButton.style.flexGrow = 0;
+            view.VotingAcceptButton.style.flexShrink = 0;
+            view.VotingAcceptButton.style.marginTop = new StyleLength(new Length(18, LengthUnit.Pixel));
+            view.VotingAcceptButton.style.marginBottom = new StyleLength(new Length(12, LengthUnit.Pixel));
+            view.VotingAcceptButton.style.justifyContent = Justify.Center;
+            view.VotingAcceptButton.style.alignItems = Align.Center;
+            view.VotingAcceptButton.style.borderTopLeftRadius = new StyleLength(new Length(12, LengthUnit.Pixel));
+            view.VotingAcceptButton.style.borderTopRightRadius = new StyleLength(new Length(12, LengthUnit.Pixel));
+            view.VotingAcceptButton.style.borderBottomLeftRadius = new StyleLength(new Length(12, LengthUnit.Pixel));
+            view.VotingAcceptButton.style.borderBottomRightRadius = new StyleLength(new Length(12, LengthUnit.Pixel));
+
+            var acceptTextStack = new VisualElement();
+            acceptTextStack.style.display = DisplayStyle.Flex;
+            acceptTextStack.style.flexDirection = FlexDirection.Column;
+            acceptTextStack.style.alignItems = Align.Center;
+            acceptTextStack.style.justifyContent = Justify.Center;
+            view.VotingAcceptTitleLabel = CreateLabel("VOTE YES", 16, FontStyle.Bold, TextAnchor.MiddleCenter, Color.white);
+            view.VotingAcceptSubtitleLabel = CreateLabel(string.Empty, 11, FontStyle.Normal, TextAnchor.MiddleCenter, Color.white);
+            view.VotingAcceptSubtitleLabel.style.display = DisplayStyle.None;
+            acceptTextStack.Add(view.VotingAcceptTitleLabel);
+            acceptTextStack.Add(view.VotingAcceptSubtitleLabel);
+            view.VotingAcceptButton.Add(acceptTextStack);
+
+            view.VotingRejectButton = new Button(() => onVoteRejected?.Invoke());
+            view.VotingRejectButton.text = string.Empty;
+            StyleButton(view.VotingRejectButton, new ButtonPalette(
+                new Color(0.55f, 0.20f, 0.20f, 0.98f),
+                new Color(0.67f, 0.25f, 0.25f, 1f),
+                new Color(0.44f, 0.16f, 0.16f, 1f),
+                Color.white));
+            view.VotingRejectButton.style.width = new StyleLength(new Length(100, LengthUnit.Percent));
+            view.VotingRejectButton.style.height = 78;
+            view.VotingRejectButton.style.flexGrow = 0;
+            view.VotingRejectButton.style.flexShrink = 0;
+            view.VotingRejectButton.style.justifyContent = Justify.Center;
+            view.VotingRejectButton.style.alignItems = Align.Center;
+            view.VotingRejectButton.style.marginBottom = 0;
+            view.VotingRejectButton.style.borderTopLeftRadius = new StyleLength(new Length(12, LengthUnit.Pixel));
+            view.VotingRejectButton.style.borderTopRightRadius = new StyleLength(new Length(12, LengthUnit.Pixel));
+            view.VotingRejectButton.style.borderBottomLeftRadius = new StyleLength(new Length(12, LengthUnit.Pixel));
+            view.VotingRejectButton.style.borderBottomRightRadius = new StyleLength(new Length(12, LengthUnit.Pixel));
+
+            var rejectTextStack = new VisualElement();
+            rejectTextStack.style.display = DisplayStyle.Flex;
+            rejectTextStack.style.flexDirection = FlexDirection.Column;
+            rejectTextStack.style.alignItems = Align.Center;
+            rejectTextStack.style.justifyContent = Justify.Center;
+            view.VotingRejectTitleLabel = CreateLabel("VOTE NO", 16, FontStyle.Bold, TextAnchor.MiddleCenter, Color.white);
+            view.VotingRejectSubtitleLabel = CreateLabel(string.Empty, 11, FontStyle.Normal, TextAnchor.MiddleCenter, Color.white);
+            view.VotingRejectSubtitleLabel.style.display = DisplayStyle.None;
+            rejectTextStack.Add(view.VotingRejectTitleLabel);
+            rejectTextStack.Add(view.VotingRejectSubtitleLabel);
+            view.VotingRejectButton.Add(rejectTextStack);
+
+            decisionColumn.Add(decisionEyebrow);
+            decisionColumn.Add(decisionHint);
+            decisionColumn.Add(view.VotingAcceptButton);
+            decisionColumn.Add(view.VotingRejectButton);
+
+            var countdownTrack = CreateVoteProgressTrack(new Color(0.14f, 0.16f, 0.19f, 0.96f), new Color(0.91f, 0.74f, 0.28f, 0.98f), 4, out view.VotingCountdownFill);
+            countdownTrack.style.display = DisplayStyle.None;
+            view.VotingFooterLabel = CreateLabel(string.Empty, 11, FontStyle.Normal, TextAnchor.MiddleCenter, new Color(0.88f, 0.92f, 0.97f, 0.96f));
             view.VotingFooterLabel.style.display = DisplayStyle.None;
-            view.VotingFooterLabel.style.marginTop = new StyleLength(new Length(10, LengthUnit.Pixel));
+
+            contentRow.Add(playersSection);
+            contentRow.Add(decisionColumn);
 
             panel.Add(topAccent);
-            panel.Add(header);
-            panel.Add(actionRow);
-            panel.Add(playersSection);
-            panel.Add(countdownTrack);
-            panel.Add(view.VotingFooterLabel);
+            panel.Add(headerRow);
+            panel.Add(contentRow);
+            panel.Add(panelOutline);
 
             view.Root.Add(panel);
             view.VotingPanel = panel;
@@ -752,23 +819,23 @@ namespace schrader
             var card = new VisualElement();
             card.style.display = DisplayStyle.Flex;
             card.style.flexDirection = FlexDirection.Column;
-            card.style.paddingTop = new StyleLength(new Length(14, LengthUnit.Pixel));
-            card.style.paddingBottom = new StyleLength(new Length(14, LengthUnit.Pixel));
-            card.style.paddingLeft = new StyleLength(new Length(14, LengthUnit.Pixel));
-            card.style.paddingRight = new StyleLength(new Length(14, LengthUnit.Pixel));
-            card.style.backgroundColor = new StyleColor(new Color(0.10f, 0.14f, 0.20f, 0.86f));
-            card.style.borderTopLeftRadius = new StyleLength(new Length(14, LengthUnit.Pixel));
-            card.style.borderTopRightRadius = new StyleLength(new Length(14, LengthUnit.Pixel));
-            card.style.borderBottomLeftRadius = new StyleLength(new Length(14, LengthUnit.Pixel));
-            card.style.borderBottomRightRadius = new StyleLength(new Length(14, LengthUnit.Pixel));
+            card.style.paddingTop = new StyleLength(new Length(16, LengthUnit.Pixel));
+            card.style.paddingBottom = new StyleLength(new Length(16, LengthUnit.Pixel));
+            card.style.paddingLeft = new StyleLength(new Length(16, LengthUnit.Pixel));
+            card.style.paddingRight = new StyleLength(new Length(16, LengthUnit.Pixel));
+            card.style.backgroundColor = new StyleColor(new Color(0.08f, 0.11f, 0.15f, 0.92f));
+            card.style.borderTopLeftRadius = new StyleLength(new Length(18, LengthUnit.Pixel));
+            card.style.borderTopRightRadius = new StyleLength(new Length(18, LengthUnit.Pixel));
+            card.style.borderBottomLeftRadius = new StyleLength(new Length(18, LengthUnit.Pixel));
+            card.style.borderBottomRightRadius = new StyleLength(new Length(18, LengthUnit.Pixel));
             card.style.borderTopWidth = 1;
             card.style.borderRightWidth = 1;
             card.style.borderBottomWidth = 1;
             card.style.borderLeftWidth = 1;
-            card.style.borderTopColor = new StyleColor(new Color(0.72f, 0.80f, 0.88f, 0.18f));
-            card.style.borderRightColor = new StyleColor(new Color(0.72f, 0.80f, 0.88f, 0.08f));
-            card.style.borderBottomColor = new StyleColor(new Color(0f, 0f, 0f, 0.36f));
-            card.style.borderLeftColor = new StyleColor(new Color(0.72f, 0.80f, 0.88f, 0.08f));
+            card.style.borderTopColor = new StyleColor(new Color(0.95f, 0.78f, 0.32f, 0.14f));
+            card.style.borderRightColor = new StyleColor(new Color(0.80f, 0.86f, 0.92f, 0.08f));
+            card.style.borderBottomColor = new StyleColor(new Color(0.80f, 0.86f, 0.92f, 0.10f));
+            card.style.borderLeftColor = new StyleColor(new Color(0.80f, 0.86f, 0.92f, 0.08f));
             return card;
         }
 
@@ -805,6 +872,7 @@ namespace schrader
 
             titleLabel.text = title ?? string.Empty;
             subtitleLabel.text = subtitle ?? string.Empty;
+            subtitleLabel.style.display = string.IsNullOrWhiteSpace(subtitle) ? DisplayStyle.None : DisplayStyle.Flex;
             button.style.opacity = isSelected ? 1f : isLocked ? 0.48f : 1f;
             button.style.transformOrigin = new TransformOrigin(50, 50, 0);
             titleLabel.style.color = new StyleColor(isSelected ? Color.white : new Color(0.96f, 0.97f, 0.99f, 1f));
@@ -813,6 +881,14 @@ namespace schrader
                 : isLocked
                     ? new Color(0.78f, 0.83f, 0.88f, 1f)
                     : new Color(0.86f, 0.91f, 0.95f, 1f));
+        }
+
+        private static string FormatVoteCountdown(float remainingSeconds)
+        {
+            var totalSeconds = Mathf.Max(0, Mathf.CeilToInt(remainingSeconds));
+            var minutes = totalSeconds / 60;
+            var seconds = totalSeconds % 60;
+            return $"{minutes:00}:{seconds:00}";
         }
 
         private static void ApplyVoteAmbientMotion(View view, bool hasAccepted, bool hasRejected, float pulse)
@@ -874,23 +950,23 @@ namespace schrader
             card.style.flexDirection = FlexDirection.Row;
             card.style.alignItems = Align.Center;
             card.style.justifyContent = Justify.SpaceBetween;
-            card.style.paddingTop = new StyleLength(new Length(8, LengthUnit.Pixel));
-            card.style.paddingBottom = new StyleLength(new Length(8, LengthUnit.Pixel));
-            card.style.paddingLeft = new StyleLength(new Length(10, LengthUnit.Pixel));
-            card.style.paddingRight = new StyleLength(new Length(10, LengthUnit.Pixel));
+            card.style.paddingTop = new StyleLength(new Length(10, LengthUnit.Pixel));
+            card.style.paddingBottom = new StyleLength(new Length(10, LengthUnit.Pixel));
+            card.style.paddingLeft = new StyleLength(new Length(12, LengthUnit.Pixel));
+            card.style.paddingRight = new StyleLength(new Length(12, LengthUnit.Pixel));
             card.style.marginBottom = new StyleLength(new Length(8, LengthUnit.Pixel));
             card.style.backgroundColor = new StyleColor(ResolveVoteCardBackground(entry));
-            card.style.borderTopLeftRadius = new StyleLength(new Length(10, LengthUnit.Pixel));
-            card.style.borderTopRightRadius = new StyleLength(new Length(10, LengthUnit.Pixel));
-            card.style.borderBottomLeftRadius = new StyleLength(new Length(10, LengthUnit.Pixel));
-            card.style.borderBottomRightRadius = new StyleLength(new Length(10, LengthUnit.Pixel));
+            card.style.borderTopLeftRadius = new StyleLength(new Length(14, LengthUnit.Pixel));
+            card.style.borderTopRightRadius = new StyleLength(new Length(14, LengthUnit.Pixel));
+            card.style.borderBottomLeftRadius = new StyleLength(new Length(14, LengthUnit.Pixel));
+            card.style.borderBottomRightRadius = new StyleLength(new Length(14, LengthUnit.Pixel));
             card.style.borderTopWidth = 1;
             card.style.borderRightWidth = 1;
             card.style.borderBottomWidth = 1;
             card.style.borderLeftWidth = 1;
             card.style.borderTopColor = new StyleColor(ResolveVoteCardBorder(entry));
             card.style.borderRightColor = new StyleColor(new Color(1f, 1f, 1f, 0.07f));
-            card.style.borderBottomColor = new StyleColor(new Color(0f, 0f, 0f, 0.28f));
+            card.style.borderBottomColor = new StyleColor(new Color(1f, 1f, 1f, 0.09f));
             card.style.borderLeftColor = new StyleColor(new Color(1f, 1f, 1f, 0.07f));
 
             var leftSide = new VisualElement();
@@ -908,10 +984,16 @@ namespace schrader
             textColumn.style.overflow = Overflow.Hidden;
 
             var nameLabel = CreateLabel(FormatVotePlayerName(entry), 12, FontStyle.Bold, TextAnchor.MiddleLeft, new Color(0.99f, 0.99f, 1f, 1f));
-            nameLabel.style.whiteSpace = WhiteSpace.NoWrap;
+            nameLabel.style.whiteSpace = WhiteSpace.Normal;
             nameLabel.style.overflow = Overflow.Hidden;
+            nameLabel.style.flexShrink = 1;
+            var detailLabel = CreateLabel(ResolveVoteDetailText(entry), 10, FontStyle.Normal, TextAnchor.MiddleLeft, new Color(0.74f, 0.81f, 0.88f, 0.92f));
+            detailLabel.style.whiteSpace = WhiteSpace.Normal;
+            detailLabel.style.overflow = Overflow.Hidden;
+            detailLabel.style.marginTop = new StyleLength(new Length(2, LengthUnit.Pixel));
 
             textColumn.Add(nameLabel);
+            textColumn.Add(detailLabel);
             leftSide.Add(textColumn);
 
             card.Add(leftSide);
@@ -922,10 +1004,10 @@ namespace schrader
         private static VisualElement CreateVoteAvatarFrame(VoteOverlayPlayerEntryMessage entry)
         {
             var frame = new VisualElement();
-            frame.style.width = 34;
-            frame.style.height = 34;
+            frame.style.width = 38;
+            frame.style.height = 38;
             frame.style.flexShrink = 0;
-            frame.style.marginRight = new StyleLength(new Length(10, LengthUnit.Pixel));
+            frame.style.marginRight = new StyleLength(new Length(12, LengthUnit.Pixel));
             frame.style.alignItems = Align.Center;
             frame.style.justifyContent = Justify.Center;
             frame.style.backgroundColor = new StyleColor(ResolveVoteAccent(entry));
@@ -939,7 +1021,7 @@ namespace schrader
             frame.style.borderLeftWidth = 1;
             frame.style.borderTopColor = new StyleColor(new Color(1f, 1f, 1f, 0.18f));
             frame.style.borderRightColor = new StyleColor(new Color(1f, 1f, 1f, 0.10f));
-            frame.style.borderBottomColor = new StyleColor(new Color(0f, 0f, 0f, 0.26f));
+            frame.style.borderBottomColor = new StyleColor(new Color(1f, 1f, 1f, 0.12f));
             frame.style.borderLeftColor = new StyleColor(new Color(1f, 1f, 1f, 0.10f));
             frame.style.overflow = Overflow.Hidden;
 
@@ -1015,16 +1097,24 @@ namespace schrader
             pill.style.alignItems = Align.Center;
             pill.style.justifyContent = Justify.Center;
             pill.style.marginLeft = new StyleLength(new Length(10, LengthUnit.Pixel));
-            pill.style.paddingTop = new StyleLength(new Length(4, LengthUnit.Pixel));
-            pill.style.paddingBottom = new StyleLength(new Length(4, LengthUnit.Pixel));
-            pill.style.paddingLeft = new StyleLength(new Length(8, LengthUnit.Pixel));
-            pill.style.paddingRight = new StyleLength(new Length(8, LengthUnit.Pixel));
+            pill.style.paddingTop = new StyleLength(new Length(5, LengthUnit.Pixel));
+            pill.style.paddingBottom = new StyleLength(new Length(5, LengthUnit.Pixel));
+            pill.style.paddingLeft = new StyleLength(new Length(10, LengthUnit.Pixel));
+            pill.style.paddingRight = new StyleLength(new Length(10, LengthUnit.Pixel));
             pill.style.backgroundColor = new StyleColor(ResolveVoteStatusBackground(entry));
             pill.style.borderTopLeftRadius = new StyleLength(new Length(999, LengthUnit.Pixel));
             pill.style.borderTopRightRadius = new StyleLength(new Length(999, LengthUnit.Pixel));
             pill.style.borderBottomLeftRadius = new StyleLength(new Length(999, LengthUnit.Pixel));
             pill.style.borderBottomRightRadius = new StyleLength(new Length(999, LengthUnit.Pixel));
             pill.style.flexShrink = 0;
+            pill.style.borderTopWidth = 1;
+            pill.style.borderRightWidth = 1;
+            pill.style.borderBottomWidth = 1;
+            pill.style.borderLeftWidth = 1;
+            pill.style.borderTopColor = new StyleColor(new Color(1f, 1f, 1f, 0.12f));
+            pill.style.borderRightColor = new StyleColor(new Color(1f, 1f, 1f, 0.06f));
+            pill.style.borderBottomColor = new StyleColor(new Color(1f, 1f, 1f, 0.08f));
+            pill.style.borderLeftColor = new StyleColor(new Color(1f, 1f, 1f, 0.06f));
             pill.Add(CreateLabel(ResolveVoteStatusText(entry), 9, FontStyle.Bold, TextAnchor.MiddleCenter, ResolveVoteStatusTextColor(entry)));
             return pill;
         }
@@ -1076,20 +1166,20 @@ namespace schrader
 
             if (entry.IsInitiator && entry.HasVoted)
             {
-                return "Vote starter";
+                return entry.VoteAccepted ? "Vote starter  ·  Ready" : "Vote starter  ·  Declined";
             }
 
             if (entry.IsInitiator)
             {
-                return "Started the vote";
+                return "Vote starter  ·  Waiting";
             }
 
             if (!entry.HasVoted)
             {
-                return "Waiting for response";
+                return "Awaiting response";
             }
 
-            return entry.VoteAccepted ? "Ready for ranked" : "Opted out";
+            return entry.VoteAccepted ? "Ready for ranked" : "Declined this vote";
         }
 
         private static string ResolveVoteStatusText(VoteOverlayPlayerEntryMessage entry)
@@ -1118,48 +1208,48 @@ namespace schrader
         {
             if (entry == null || !entry.HasVoted)
             {
-                return new Color(0.12f, 0.17f, 0.23f, 0.92f);
+                return new Color(0.09f, 0.12f, 0.16f, 0.94f);
             }
 
             return entry.VoteAccepted
-                ? new Color(0.11f, 0.23f, 0.18f, 0.92f)
-                : new Color(0.25f, 0.12f, 0.12f, 0.92f);
+                ? new Color(0.09f, 0.18f, 0.14f, 0.94f)
+                : new Color(0.18f, 0.10f, 0.10f, 0.94f);
         }
 
         private static Color ResolveVoteCardBorder(VoteOverlayPlayerEntryMessage entry)
         {
             if (entry == null || !entry.HasVoted)
             {
-                return new Color(0.74f, 0.66f, 0.26f, 0.20f);
+                return new Color(0.92f, 0.76f, 0.28f, 0.18f);
             }
 
             return entry.VoteAccepted
-                ? new Color(0.37f, 0.87f, 0.58f, 0.34f)
-                : new Color(0.98f, 0.46f, 0.46f, 0.34f);
+                ? new Color(0.34f, 0.82f, 0.53f, 0.28f)
+                : new Color(0.92f, 0.42f, 0.42f, 0.28f);
         }
 
         private static Color ResolveVoteAccent(VoteOverlayPlayerEntryMessage entry)
         {
             if (entry == null || !entry.HasVoted)
             {
-                return new Color(0.58f, 0.50f, 0.20f, 0.84f);
+                return new Color(0.66f, 0.52f, 0.18f, 0.84f);
             }
 
             return entry.VoteAccepted
-                ? new Color(0.20f, 0.67f, 0.43f, 0.90f)
-                : new Color(0.74f, 0.26f, 0.26f, 0.90f);
+                ? new Color(0.19f, 0.61f, 0.39f, 0.90f)
+                : new Color(0.68f, 0.24f, 0.24f, 0.90f);
         }
 
         private static Color ResolveVoteStatusBackground(VoteOverlayPlayerEntryMessage entry)
         {
             if (entry == null || !entry.HasVoted)
             {
-                return new Color(0.44f, 0.36f, 0.10f, 0.82f);
+                return new Color(0.36f, 0.28f, 0.08f, 0.84f);
             }
 
             return entry.VoteAccepted
-                ? new Color(0.16f, 0.47f, 0.31f, 0.88f)
-                : new Color(0.56f, 0.20f, 0.20f, 0.88f);
+                ? new Color(0.14f, 0.41f, 0.27f, 0.88f)
+                : new Color(0.48f, 0.18f, 0.18f, 0.88f);
         }
 
         private static Color ResolveVoteStatusTextColor(VoteOverlayPlayerEntryMessage entry)
@@ -2109,7 +2199,7 @@ namespace schrader
             button.style.borderLeftWidth = 1;
             button.style.borderTopColor = new StyleColor(new Color(1f, 1f, 1f, 0.18f));
             button.style.borderRightColor = new StyleColor(new Color(1f, 1f, 1f, 0.08f));
-            button.style.borderBottomColor = new StyleColor(new Color(0f, 0f, 0f, 0.30f));
+            button.style.borderBottomColor = new StyleColor(new Color(1f, 1f, 1f, 0.10f));
             button.style.borderLeftColor = new StyleColor(new Color(1f, 1f, 1f, 0.08f));
             button.style.marginBottom = new StyleLength(new Length(8, LengthUnit.Pixel));
             button.style.unityTextAlign = TextAnchor.MiddleCenter;

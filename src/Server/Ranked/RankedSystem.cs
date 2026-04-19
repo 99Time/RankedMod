@@ -65,7 +65,6 @@ namespace schrader.Server
         private static bool teamHooksPatched = false;
         private static bool replayDebugHooksPatched = false;
         private static bool draftUiHooksPatched = false;
-        private static bool connectionApprovalHooksPatched = false;
         private static float lastSyntheticPlayerPurgeTime = -999f;
         private static float lastInvalidWarmupDummySweepTime = -999f;
         private static float lastPracticeFakePlayerSweepTime = -999f;
@@ -87,6 +86,9 @@ namespace schrader.Server
         private static readonly object goalLock = new object();
         private static readonly object playerGoalLock = new object();
         private static Dictionary<string,int> playerGoalCounts = new Dictionary<string,int>();
+        private static readonly object playerAssistLock = new object();
+        private static Dictionary<string,int> playerPrimaryAssistCounts = new Dictionary<string,int>();
+        private static Dictionary<string,int> playerSecondaryAssistCounts = new Dictionary<string,int>();
         private static readonly object matchEndLock = new object();
         private static bool rankedMatchEnding = false;
         private static bool forfeitActive = false;
@@ -103,10 +105,6 @@ namespace schrader.Server
         private static readonly object internalTeamAssignmentLock = new object();
         private const float InternalTeamAssignmentGracePeriod = 2f;
         private static Dictionary<string, InternalTeamAssignment> internalTeamAssignments = new Dictionary<string, InternalTeamAssignment>(StringComparer.OrdinalIgnoreCase);
-        private static readonly HashSet<string> explicitAdminSteamIds = new HashSet<string>(StringComparer.Ordinal)
-        {
-            "76561199046098825"
-        };
 
         private static readonly object phaseLock = new object();
         private static string lastGamePhaseName = null;
@@ -115,6 +113,7 @@ namespace schrader.Server
         private const float RankedStaleResetDelay = 3f;
         private static float lastPracticeExpiryInterceptAt = -999f;
         private const float PracticeExpiryInterceptRetryInterval = 1.5f;
+        private const int PracticeExpiryContinuationSeconds = 600;
         private static int intentionalRankedStartPhaseDepth = 0;
         private static bool draftActive = false;
         private static bool draftTeamLockActive = false;
@@ -187,7 +186,7 @@ namespace schrader.Server
             replayLeftoverFirstSeenTimes.Clear();
             lastInvalidWarmupDummySweepTime = -999f;
             lastReplayLeftoverSweepTime = -999f;
-            try { LoadMmr(); LoadReplayMemory(); TryPatchRankedMatchEndHooks(); TryPatchGameStateHooks(); TryPatchGoalHooks(); TryPatchSpawnHooks(); TryPatchTeamChangeHooks(); TryPatchReplayDebugHooks(); TryPatchDraftUiHooks(); TryPatchConnectionApprovalHooks(); } catch { }
+            try { LoadMmr(); LoadReplayMemory(); TryPatchRankedMatchEndHooks(); TryPatchGameStateHooks(); TryPatchGoalHooks(); TryPatchSpawnHooks(); TryPatchTeamChangeHooks(); TryPatchReplayDebugHooks(); TryPatchDraftUiHooks(); } catch { }
             EnforceSyntheticPlayerLockdown(force: true);
         }
 
@@ -1324,35 +1323,26 @@ namespace schrader.Server
 
                 if (rankedActive || draftActive)
                 {
-                    Debug.Log($"[{Constants.MOD_NAME}] [PRACTICE] ranked auto-start skipped: ranked flow already active.");
-                    Debug.Log($"[{Constants.MOD_NAME}] [PRACTICE] normal match start blocked when practice expires.");
+                    Debug.Log($"[{Constants.MOD_NAME}] [PRACTICE] auto-ranked bypassed because ranked flow is already active. rankedActive={rankedActive} draftActive={draftActive}");
+                    Debug.Log($"[{Constants.MOD_NAME}] [PRACTICE] native practice expiry transition blocked while ranked flow owns the state.");
                     return false;
                 }
 
                 if (rankedVoteActive)
                 {
-                    Debug.Log($"[{Constants.MOD_NAME}] [PRACTICE] ranked auto-start skipped: ranked vote already in progress.");
-                    Debug.Log($"[{Constants.MOD_NAME}] [PRACTICE] normal match start blocked when practice expires.");
-                    return false;
+                    Debug.Log($"[{Constants.MOD_NAME}] [PRACTICE] manual ranked vote is active while practice expires. Extending practice instead of auto-starting ranked.");
                 }
 
-                var autoStartReady = TryGetEligiblePlayers(out var eligible, out var reason);
-                eligible = eligible ?? new List<RankedParticipant>();
-                var redEligible = eligible.Count(participant => participant != null && participant.team == TeamResult.Red);
-                var blueEligible = eligible.Count(participant => participant != null && participant.team == TeamResult.Blue);
-                Debug.Log($"[{Constants.MOD_NAME}] [PRACTICE] eligible ranked players count per side: red={redEligible}, blue={blueEligible}.");
-
-                if (autoStartReady && StartRankedFromEligible(eligible, false))
+                if (TryContinuePracticeAfterExpiry(__instance, PracticeExpiryContinuationSeconds))
                 {
-                    Debug.Log($"[{Constants.MOD_NAME}] [PRACTICE] ranked auto-start triggered.");
+                    Debug.Log($"[{Constants.MOD_NAME}] [PRACTICE] auto-ranked path bypassed. Practice extended for {PracticeExpiryContinuationSeconds}s using native warmup phase.");
                 }
                 else
                 {
-                    var skipReason = string.IsNullOrWhiteSpace(reason) ? "ranked draft could not be started" : reason;
-                    Debug.Log($"[{Constants.MOD_NAME}] [PRACTICE] ranked auto-start skipped: {skipReason}.");
+                    Debug.LogWarning($"[{Constants.MOD_NAME}] [PRACTICE] auto-ranked path bypassed but practice extension failed. Blocking native faceoff transition to keep ranked manual-only.");
                 }
 
-                Debug.Log($"[{Constants.MOD_NAME}] [PRACTICE] normal match start blocked when practice expires.");
+                Debug.Log($"[{Constants.MOD_NAME}] [PRACTICE] repeated auto-ranked attempts disabled for this expiry event.");
                 return false;
             }
             catch (Exception ex)
@@ -1536,6 +1526,10 @@ namespace schrader.Server
 
         public static void Update()
         {
+            try { ProcessBackendNotificationQueue(); } catch { }
+            try { ProcessPendingBackendSynchronizations(); } catch { }
+            try { FlushPendingDiscordOnboardingPublishes(); } catch { }
+            try { UpdateBackendDiscordLinkReminders(); } catch { }
             try { RankedOverlayNetwork.EnsureServerHandlers(); } catch { }
             try { TryEnsureHooks(); } catch { }
             try { EnforceSyntheticPlayerLockdown(force: false); } catch { }
@@ -1646,7 +1640,7 @@ namespace schrader.Server
 
         private static void TryEnsureHooks()
         {
-            if (rankedMatchEndPatched && gameStateHooksPatched && goalHooksPatched && spawnHooksPatched && teamHooksPatched && replayDebugHooksPatched && draftUiHooksPatched && connectionApprovalHooksPatched) return;
+            if (rankedMatchEndPatched && gameStateHooksPatched && goalHooksPatched && spawnHooksPatched && teamHooksPatched && replayDebugHooksPatched && draftUiHooksPatched) return;
             var now = Time.unscaledTime;
             if (now - lastHookAttemptTime < HookRetryInterval) return;
             lastHookAttemptTime = now;
@@ -1657,7 +1651,6 @@ namespace schrader.Server
             TryPatchTeamChangeHooks();
             TryPatchReplayDebugHooks();
             TryPatchDraftUiHooks();
-            TryPatchConnectionApprovalHooks();
         }
 
         private static string GetGameRootPath()
@@ -1738,6 +1731,24 @@ namespace schrader.Server
             catch { }
 
             return false;
+        }
+
+        private static bool TryContinuePracticeAfterExpiry(object gameManagerInstance, int continuationSeconds)
+        {
+            try
+            {
+                if (gameManagerInstance == null)
+                {
+                    return false;
+                }
+
+                var gameManagerType = gameManagerInstance.GetType();
+                return TryInvokeServerSetPhase(gameManagerType, gameManagerInstance, "Warmup", continuationSeconds);
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private static void UpdateRankedVote()
@@ -2912,6 +2923,7 @@ namespace schrader.Server
                     rankedVoteStartedByName = TryGetPlayerName(player) ?? "Player";
                     rankedVoteStartedByKey = ResolvePlayerObjectKey(player, clientId) ?? TryGetPlayerId(player, clientId) ?? $"clientId:{clientId}";
                     rankedVoteStartedByClientId = clientId;
+                    Debug.Log($"[{Constants.MOD_NAME}] [PRACTICE] Manual ranked start requested. clientId={clientId} startedBy={rankedVoteStartedByName} startedByKey={rankedVoteStartedByKey}");
                     controlledTestModeInitiatorKey = rankedVoteStartedByKey;
                     controlledTestModeInitiatorClientId = clientId;
 
@@ -2948,6 +2960,8 @@ namespace schrader.Server
             try
             {
                 if (eligible == null || eligible.Count == 0) return false;
+
+                Debug.Log($"[{Constants.MOD_NAME}] [RANKED] StartRankedFromEligible invoked. path={(forcedByAdmin ? "admin" : "manual-vote")} eligibleCount={eligible.Count}");
 
                 TryPurgePracticeModeFakePlayers(force: true, reason: forcedByAdmin ? "start-ranked-admin" : "start-ranked");
                 TryPurgeInvalidWarmupDummies(force: true);
@@ -5824,6 +5838,11 @@ namespace schrader.Server
             {
                 playerGoalCounts.Clear();
             }
+            lock (playerAssistLock)
+            {
+                playerPrimaryAssistCounts.Clear();
+                playerSecondaryAssistCounts.Clear();
+            }
             lock (forfeitVotes)
             {
                 forfeitVotes.Clear();
@@ -5906,6 +5925,12 @@ namespace schrader.Server
             lock (playerGoalLock)
             {
                 playerGoalCounts.Clear();
+            }
+
+            lock (playerAssistLock)
+            {
+                playerPrimaryAssistCounts.Clear();
+                playerSecondaryAssistCounts.Clear();
             }
 
             lock (teamStateLock)
@@ -8651,7 +8676,7 @@ namespace schrader.Server
             return false;
         }
 
-        private static bool TryInvokeServerSetPhase(Type gameManagerType, object gameManager, string phaseName)
+        private static bool TryInvokeServerSetPhase(Type gameManagerType, object gameManager, string phaseName, int? timeSeconds = null)
         {
             try
             {
@@ -8659,10 +8684,18 @@ namespace schrader.Server
                 if (method == null) return false;
 
                 var parameters = method.GetParameters();
-                if (parameters.Length != 1 || !parameters[0].ParameterType.IsEnum) return false;
+                if (parameters.Length < 1 || parameters.Length > 2 || !parameters[0].ParameterType.IsEnum) return false;
 
                 var phaseValue = Enum.Parse(parameters[0].ParameterType, phaseName, true);
-                method.Invoke(gameManager, new[] { phaseValue });
+                var args = new object[parameters.Length];
+                args[0] = phaseValue;
+                if (parameters.Length == 2)
+                {
+                    var effectiveTime = timeSeconds ?? -1;
+                    args[1] = BoxIntForParameter(effectiveTime, parameters[1].ParameterType);
+                }
+
+                method.Invoke(gameManager, args);
                 return true;
             }
             catch { }

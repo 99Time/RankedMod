@@ -227,6 +227,7 @@ namespace schrader
             if (rootView.VotingPanel != null) rootView.VotingPanel.style.display = DisplayStyle.None;
             if (rootView.ApprovalPanel != null) rootView.ApprovalPanel.style.display = DisplayStyle.None;
             if (rootView.DraftPanel != null) rootView.DraftPanel.style.display = DisplayStyle.None;
+            if (rootView.DiscordOnboarding?.Panel != null) rootView.DiscordOnboarding.Panel.style.display = DisplayStyle.None;
             if (rootView.PostMatch?.Panel != null) rootView.PostMatch.Panel.style.display = DisplayStyle.None;
             rootView.Welcome.Panel.style.display = DisplayStyle.Flex;
 
@@ -345,6 +346,7 @@ namespace schrader
             leftColumn.Add(CreateCommandCard("/commands", "Show the full command list in chat."));
             leftColumn.Add(CreateCommandCard("/vr", "Start the ranked ready vote."));
             leftColumn.Add(CreateCommandCard("/y or /n", "Answer ready checks and forfeit votes."));
+            leftColumn.Add(CreateCommandCard("/link CODE", "Finish Discord verification using the code generated in Discord."));
 
             var rightColumn = CreateCommandColumn();
             rightColumn.style.marginLeft = new StyleLength(new Length(6, LengthUnit.Pixel));

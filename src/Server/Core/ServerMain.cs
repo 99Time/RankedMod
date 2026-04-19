@@ -30,11 +30,16 @@ namespace schrader
                 Debug.Log($"[{Constants.MOD_NAME}] [JOIN][SERVER] Synchronize complete received for client {clientId}.");
                 try
                 {
-                    UIChat.Instance.Server_SendSystemChatMessage($"<color=#00ff00>Welcome to SpeedRankeds</color>! Use <b>/commands</b> to display available server chat commands. <color=#66ccff>Host your own PUCK server:</color> <b>{Constants.BuildPuckLandingUrl(Constants.HOST_SOURCE_CHAT)}</b> <color=#9dc4de>(or use <b>/host</b>)</color>", clientId);
+                    UIChat.Instance.Server_SendSystemChatMessage(
+                        $"<size=18><b><color=#00ff00>Welcome to SpeedRankeds!</color></b></size>\n" +
+                        $"<size=13><color=#d8f2e6>Use <b>/commands</b> to display available server chat commands.</color></size>\n" +
+                        $"<size=13><b><color=#78d8ff>Host your own PUCK server</color></b></size>\n" +
+                        $"<size=13><color=#ffffff>{Constants.BuildPuckLandingUrl(Constants.HOST_SOURCE_CHAT)}</color> <color=#9fc4db>(or use <b>/host</b>)</color></size>",
+                        clientId);
                 }
                 catch { }
-                try { RankedOverlayNetwork.ResyncClient(clientId); } catch { }
                 try { Server.RankedSystem.HandleBackendPlayerSynchronized(clientId); } catch { }
+                try { RankedOverlayNetwork.ResyncClient(clientId); } catch { }
                 return false;
             }
         }
@@ -189,6 +194,19 @@ namespace schrader
                         return false;
                     }
 
+                    if (trimmed.Equals("/link", StringComparison.OrdinalIgnoreCase) || trimmed.StartsWith("/link ", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var linkCode = trimmed.Length > 5 ? trimmed.Substring(5).Trim() : string.Empty;
+                        if (string.IsNullOrWhiteSpace(linkCode))
+                        {
+                            SendSystemChatToClient("<size=14>Usage: /link <code></size>", clientId);
+                            return false;
+                        }
+
+                        Server.RankedSystem.StartDiscordLinkComplete(clientId, linkCode);
+                        return false;
+                    }
+
                     if (trimmed.Equals("/host", StringComparison.OrdinalIgnoreCase))
                     {
                         try
@@ -216,6 +234,11 @@ namespace schrader
                             SendCommandsOverview(player, clientId);
                         }
                         catch { }
+                        return false;
+                    }
+
+                    if (TryHandleBackendModerationCommand(player, clientId, trimmed))
+                    {
                         return false;
                     }
 
@@ -574,6 +597,24 @@ namespace schrader
                             Debug.LogError($"[{Constants.MOD_NAME}] /host failed in chat command event: {ex.Message}");
                         }
 
+                        return false;
+                    }
+
+                    if (cmd.Equals("/link", StringComparison.OrdinalIgnoreCase) || cmd.StartsWith("/link ", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var linkCode = cmd.Length > 5 ? cmd.Substring(5).Trim() : string.Empty;
+                        if (string.IsNullOrWhiteSpace(linkCode))
+                        {
+                            SendSystemChatToClient("<size=14>Usage: /link <code></size>", clientId);
+                            return false;
+                        }
+
+                        Server.RankedSystem.StartDiscordLinkComplete(clientId, linkCode);
+                        return false;
+                    }
+
+                    if (TryHandleBackendModerationCommand(null, clientId, cmd))
+                    {
                         return false;
                     }
 
@@ -1164,6 +1205,7 @@ namespace schrader
             SendCommandHelpLine(clientId, "<size=13>/ff</size> <size=12>- Start or vote on a forfeit for your team.</size>");
             SendCommandHelpLine(clientId, "<size=13>/mmr</size> <size=12>- Show your current MMR.</size>");
             SendCommandHelpLine(clientId, "<size=13>/discord</size> <size=12>- Open the Discord invite in your browser.</size>");
+            SendCommandHelpLine(clientId, "<size=13>/link &lt;code&gt;</size> <size=12>- Finish Discord verification using the code generated in Discord.</size>");
             SendCommandHelpLine(clientId, "<size=13>/host</size> <size=12>- Open the dedicated SpeedHosting PUCK page in your browser.</size>");
             SendCommandHelpLine(clientId, "<size=13>/cs</size> <size=12>- Despawn all pucks on the map.</size>");
 
@@ -1183,6 +1225,10 @@ namespace schrader
             SendCommandHelpLine(clientId, "<size=13>/ranked status publish</size> <size=12>- Fetch authoritative server activity from SpeedUP and publish the Discord status embed.</size>");
             SendCommandHelpLine(clientId, "<size=13>/fc <player|steamId|#number> <red|blue|spectator></size> <size=12>- Force a live player onto a team or back to spectator.</size>");
             SendCommandHelpLine(clientId, "<size=13>/addscore <amount> <red|blue></size> <size=12>- Adjust the real in-game score and trigger the native score phase.</size>");
+            SendCommandHelpLine(clientId, "<size=13>/mute <player|steamId|#number> <duration> <reason...></size> <size=12>- Persist a backend mute and apply it immediately to live chat.</size>");
+            SendCommandHelpLine(clientId, "<size=13>/tempban <player|steamId|#number> <duration> <reason...></size> <size=12>- Persist a backend temporary ban and immediately disconnect the live target.</size>");
+            SendCommandHelpLine(clientId, "<size=13>/unmute <player|steamId|#number> [reason...]</size> <size=12>- Clear a backend mute and update live chat permission immediately.</size>");
+            SendCommandHelpLine(clientId, "<size=13>/unban <player|steamId|#number> [reason...]</size> <size=12>- Clear a backend ban for a SteamID or live player.</size>");
             SendCommandHelpLine(clientId, "<size=13>/setnamecolor <player|steamId|#number> <color|rgb|#RRGGBB|reset></size> <size=12>- Persist a visible name color or RGB rainbow for a SteamID in UserData.</size>");
             SendCommandHelpLine(clientId, "<size=13>/setchatcolor <player|steamId|#number> <color|rgb|#RRGGBB|reset></size> <size=12>- Persist a chat body color or RGB rainbow for a SteamID in UserData.</size>");
 
@@ -1203,6 +1249,68 @@ namespace schrader
             SendCommandHelpLine(clientId, "<size=13>/replay <name|type></size> <size=12>- Replay a specific recording or pattern type.</size>");
 
             
+        }
+
+        private static bool TryHandleBackendModerationCommand(object player, ulong clientId, string trimmed)
+        {
+            if (string.IsNullOrWhiteSpace(trimmed))
+            {
+                return false;
+            }
+
+            var isTempBan = trimmed.StartsWith("/tempban", StringComparison.OrdinalIgnoreCase);
+            var isUnmute = !isTempBan && trimmed.StartsWith("/unmute", StringComparison.OrdinalIgnoreCase);
+            var isUnban = !isTempBan && !isUnmute && trimmed.StartsWith("/unban", StringComparison.OrdinalIgnoreCase);
+            var isMute = !isTempBan && !isUnmute && !isUnban && trimmed.StartsWith("/mute", StringComparison.OrdinalIgnoreCase);
+            if (!isMute && !isTempBan && !isUnmute && !isUnban)
+            {
+                return false;
+            }
+
+            var commandLength = isTempBan ? 8 : (isUnmute ? 7 : (isUnban ? 6 : 5));
+            if (trimmed.Length > commandLength && !char.IsWhiteSpace(trimmed[commandLength]))
+            {
+                return false;
+            }
+
+            if (!CanUseBackendModerationCommand(player, clientId))
+            {
+                SendCommandHelpLine(clientId, "<color=#ff6666>You must be an admin to use this command</color>");
+                return true;
+            }
+
+            string errorMessage;
+            var commandArgs = trimmed.Length > commandLength ? trimmed.Substring(commandLength).Trim() : string.Empty;
+            var started = isTempBan
+                ? Server.RankedSystem.TryStartBackendTempBan(player, clientId, commandArgs, out errorMessage)
+                : isUnmute
+                    ? Server.RankedSystem.TryStartBackendUnmute(player, clientId, commandArgs, out errorMessage)
+                    : isUnban
+                        ? Server.RankedSystem.TryStartBackendUnban(player, clientId, commandArgs, out errorMessage)
+                        : Server.RankedSystem.TryStartBackendMute(player, clientId, commandArgs, out errorMessage);
+            if (!started)
+            {
+                SendSystemChatToClient($"<size=14><color=#ff6666>{errorMessage}</color></size>", clientId);
+            }
+
+            return true;
+        }
+
+        private static bool CanUseBackendModerationCommand(object player, ulong clientId)
+        {
+            if (TryIsAdmin(player, clientId))
+            {
+                return true;
+            }
+
+            try
+            {
+                return string.Equals(TryGetPlayerId(player, clientId), OwnerSteamId, StringComparison.Ordinal);
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private static bool TryHandleStyledPlayerChat(UIChat chat, Player player, string message, ulong clientId, bool useTeamChat, bool isMuted)

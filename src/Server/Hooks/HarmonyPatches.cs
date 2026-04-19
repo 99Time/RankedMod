@@ -2,10 +2,8 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
 using System.Threading;
 using HarmonyLib;
-using Newtonsoft.Json;
 using UnityEngine;
 
 namespace schrader.Server
@@ -14,19 +12,6 @@ namespace schrader.Server
     {
         private const ulong PracticeModeFakePlayerClientIdMin = 7777777UL;
         private const ulong PracticeModeFakePlayerClientIdMax = 7777778UL;
-
-        private sealed class ConnectionApprovalPayload
-        {
-            public string Password { get; set; }
-            public string SteamId { get; set; }
-            public string SocketId { get; set; }
-            public ulong[] EnabledModIds { get; set; }
-        }
-
-        private sealed class ConnectionApprovalResponsePayload
-        {
-            public string steamId { get; set; }
-        }
 
         private static bool IsReplayPlayerObject(object player, ulong fallbackClientId = 0)
         {
@@ -284,48 +269,6 @@ namespace schrader.Server
             {
                 Debug.LogError($"[{Constants.MOD_NAME}] Draft UI hook failed: {ex.Message}");
                 draftUiHooksPatched = true;
-            }
-        }
-
-        private static void TryPatchConnectionApprovalHooks()
-        {
-            if (connectionApprovalHooksPatched) return;
-            try
-            {
-                var connectionApprovalPrefix = typeof(RankedSystem).GetMethod(nameof(ConnectionApprovalPrefix), System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
-                var approvalResponsePrefix = typeof(RankedSystem).GetMethod(nameof(ConnectionApprovalResponsePrefix), System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
-
-                var serverManagerType = FindTypeByName("ServerManager", "Puck.ServerManager");
-                var serverManagerControllerType = FindTypeByName("ServerManagerController", "Puck.ServerManagerController");
-                var harmony = new Harmony(Constants.MOD_NAME + ".connectionapproval");
-
-                if (serverManagerType != null && connectionApprovalPrefix != null)
-                {
-                    var method = serverManagerType.GetMethod("Server_ConnectionApproval", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
-                    if (method != null)
-                    {
-                        harmony.Patch(method, prefix: new HarmonyMethod(connectionApprovalPrefix));
-                        Debug.Log($"[{Constants.MOD_NAME}] Connection approval hook applied: {serverManagerType.FullName}.Server_ConnectionApproval");
-                    }
-                }
-
-                if (serverManagerControllerType != null && approvalResponsePrefix != null)
-                {
-                    var method = serverManagerControllerType.GetMethod("WebSocket_Event_OnServerConnectionApprovalResponse", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
-                    if (method != null)
-                    {
-                        harmony.Patch(method, prefix: new HarmonyMethod(approvalResponsePrefix));
-                        Debug.Log($"[{Constants.MOD_NAME}] Connection approval hook applied: {serverManagerControllerType.FullName}.WebSocket_Event_OnServerConnectionApprovalResponse");
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Debug.LogError($"[{Constants.MOD_NAME}] Connection approval hook failed: {ex.Message}");
-            }
-            finally
-            {
-                connectionApprovalHooksPatched = true;
             }
         }
 
@@ -1286,6 +1229,11 @@ namespace schrader.Server
 
                 var currentTeam = GetCurrentTeamValue(player);
 
+                if (TryRejectTeamSelectionForMandatoryVerification(player, clientId, requestedTeam, "team-select-click"))
+                {
+                    return false;
+                }
+
                 Debug.Log($"[{Constants.MOD_NAME}] Event_Client_OnPlayerSelectTeam protectActive={protectActive} clientId={clientId} current={FormatTeamValue(currentTeam)} requested={FormatTeamValue(requestedTeam)}");
                 if (IsReplayPlaybackPhaseActive())
                 {
@@ -1397,606 +1345,6 @@ namespace schrader.Server
             }
             catch { }
             return true; // allow original
-        }
-
-        private static bool ConnectionApprovalPrefix(object __instance, object __0, object __1)
-        {
-            try
-            {
-                if (!IsDedicatedServerConnectionApprovalContext())
-                {
-                    return true;
-                }
-
-                if (!TryParseConnectionApprovalRequest(__0, out var clientId, out var payload) || clientId == 0 || payload == null)
-                {
-                    return true;
-                }
-
-                Debug.Log($"[{Constants.MOD_NAME}] [ADMIN] Pre-Connection approval incoming from {clientId} ({payload.SteamId ?? "unknown"})");
-
-                var isSocketIdValid = !string.IsNullOrWhiteSpace(payload.SocketId);
-                var isSteamIdValid = !string.IsNullOrWhiteSpace(payload.SteamId);
-                var hasMissingMods = IsMissingRequiredMods(__instance, payload.EnabledModIds ?? Array.Empty<ulong>());
-
-                if (!isSocketIdValid || !isSteamIdValid || hasMissingMods)
-                {
-                    return true;
-                }
-
-                if (!IsAdminSteamId(__instance, payload.SteamId))
-                {
-                    return true;
-                }
-
-                if (!TrySetConnectionApprovalFlag(__1, "Approved", true))
-                {
-                    return true;
-                }
-
-                TrySetConnectionApprovalFlag(__1, "Pending", false);
-                TrySetConnectionApprovalFlag(__1, "Reason", null);
-                TryTriggerConnectionApprovalEvent(clientId, approved: true);
-                Debug.Log($"[{Constants.MOD_NAME}] [ADMIN] Pre-Connection approved for {clientId} ({payload.SteamId}) (admin).");
-
-                return false;
-            }
-            catch { }
-
-            return true;
-        }
-
-        private static bool ConnectionApprovalResponsePrefix(object __instance, object __0)
-        {
-            return true;
-        }
-
-        private static bool TryParseConnectionApprovalRequest(object request, out ulong clientId, out ConnectionApprovalPayload payload)
-        {
-            clientId = 0;
-            payload = null;
-
-            try
-            {
-                if (request == null)
-                {
-                    return false;
-                }
-
-                if (!TryGetMemberValue(request, "ClientNetworkId", out var clientIdValue) || !TryConvertToUlong(clientIdValue, out clientId))
-                {
-                    return false;
-                }
-
-                if (!TryGetMemberValue(request, "Payload", out var payloadValue) || !(payloadValue is byte[] payloadBytes) || payloadBytes.Length == 0)
-                {
-                    return false;
-                }
-
-                payload = JsonConvert.DeserializeObject<ConnectionApprovalPayload>(Encoding.ASCII.GetString(payloadBytes));
-                return payload != null;
-            }
-            catch { }
-
-            payload = null;
-            return false;
-        }
-
-        private static bool CanApproveConnectionIgnoringCapacity(object serverManager, ConnectionApprovalPayload payload)
-        {
-            try
-            {
-                if (payload == null)
-                {
-                    return false;
-                }
-
-                var password = ResolveServerPassword(serverManager);
-                var hasPassword = !string.IsNullOrEmpty(password);
-                var hasSteamId = !string.IsNullOrEmpty(payload.SteamId);
-                var timedOut = hasSteamId && IsTimedOutSteamId(serverManager, payload.SteamId);
-                var banned = hasSteamId && IsBannedSteamId(serverManager, payload.SteamId);
-                var missingPassword = string.IsNullOrEmpty(payload.Password) && hasPassword;
-                var validPassword = payload.Password == password || !hasPassword;
-                var missingMods = IsMissingRequiredMods(serverManager, payload.EnabledModIds ?? Array.Empty<ulong>());
-
-                return hasSteamId && !timedOut && !banned && !missingPassword && validPassword && !missingMods;
-            }
-            catch { }
-
-            return false;
-        }
-
-        private static bool IsDedicatedServerConnectionApprovalContext()
-        {
-            try
-            {
-                if (Application.isBatchMode)
-                {
-                    return true;
-                }
-
-                return SystemInfo.graphicsDeviceType == UnityEngine.Rendering.GraphicsDeviceType.Null;
-            }
-            catch { }
-
-            return false;
-        }
-
-        private static bool IsAdminSteamId(object serverManager, string steamId)
-        {
-            try
-            {
-                if (string.IsNullOrWhiteSpace(steamId))
-                {
-                    return false;
-                }
-
-                var normalizedSteamId = steamId.Trim();
-                if (TryGetLiveServerManagerAdminSteamIds(out var liveAdminSteamIds)
-                    && liveAdminSteamIds.Contains(normalizedSteamId))
-                {
-                    return true;
-                }
-
-                if (TryGetConfiguredAdminSteamIds(serverManager, out var configuredAdminSteamIds)
-                    && configuredAdminSteamIds.Contains(normalizedSteamId))
-                {
-                    return true;
-                }
-
-                return TryGetNativeAdminSteamIds(out var adminSteamIds)
-                    && adminSteamIds.Contains(normalizedSteamId);
-            }
-            catch { }
-
-            return false;
-        }
-
-        private static bool TryGetLiveServerManagerAdminSteamIds(out HashSet<string> adminSteamIds)
-        {
-            adminSteamIds = null;
-            try
-            {
-                var serverManagerType = FindTypeByName("ServerManager", "Puck.ServerManager");
-                if (serverManagerType == null)
-                {
-                    return false;
-                }
-
-                object serverManager = null;
-                var instanceProperty = serverManagerType.GetProperty("Instance", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
-                if (instanceProperty != null)
-                {
-                    serverManager = instanceProperty.GetValue(null, null);
-                }
-
-                if (serverManager == null)
-                {
-                    serverManager = GetManagerInstance(serverManagerType);
-                }
-
-                return TryGetConfiguredAdminSteamIds(serverManager, out adminSteamIds);
-            }
-            catch { }
-
-            adminSteamIds = null;
-            return false;
-        }
-
-        private static bool TryGetConfiguredAdminSteamIds(object serverManager, out HashSet<string> adminSteamIds)
-        {
-            adminSteamIds = null;
-            try
-            {
-                if (serverManager == null)
-                {
-                    return false;
-                }
-
-                if (!TryGetMemberValue(serverManager, "AdminSteamIds", out var configuredValue)
-                    && !TryGetMemberValue(serverManager, "adminSteamIds", out configuredValue))
-                {
-                    return false;
-                }
-
-                if (!(configuredValue is IEnumerable enumerable))
-                {
-                    return false;
-                }
-
-                var values = new HashSet<string>(StringComparer.Ordinal);
-                foreach (var entry in enumerable)
-                {
-                    var value = ExtractSimpleValueToString(entry);
-                    if (string.IsNullOrWhiteSpace(value))
-                    {
-                        continue;
-                    }
-
-                    values.Add(value.Trim());
-                }
-
-                if (values.Count == 0)
-                {
-                    return false;
-                }
-
-                adminSteamIds = values;
-                return true;
-            }
-            catch { }
-
-            adminSteamIds = null;
-            return false;
-        }
-
-        private static bool IsServerAtCapacity()
-        {
-            try
-            {
-                var connectedClients = Unity.Netcode.NetworkManager.Singleton?.ConnectedClientsList;
-                var serverManagerType = FindTypeByName("ServerManager", "Puck.ServerManager");
-                var serverManager = GetManagerInstance(serverManagerType);
-                if (connectedClients == null || serverManager == null)
-                {
-                    return false;
-                }
-
-                if (!TryGetMemberValue(serverManager, "Server", out var serverValue) || serverValue == null)
-                {
-                    return false;
-                }
-
-                if (!TryGetMemberValue(serverValue, "MaxPlayers", out var maxPlayersValue) || !TryConvertToIntValue(maxPlayersValue, out var maxPlayers))
-                {
-                    return false;
-                }
-
-                return connectedClients.Count >= maxPlayers;
-            }
-            catch { }
-
-            return false;
-        }
-
-        private static string ResolveServerPassword(object serverManager)
-        {
-            try
-            {
-                if (serverManager == null || !TryGetMemberValue(serverManager, "Server", out var serverValue) || serverValue == null)
-                {
-                    return string.Empty;
-                }
-
-                if (!TryGetMemberValue(serverValue, "Password", out var passwordValue))
-                {
-                    return string.Empty;
-                }
-
-                return ExtractSimpleValueToString(passwordValue) ?? string.Empty;
-            }
-            catch { }
-
-            return string.Empty;
-        }
-
-        private static bool IsTimedOutSteamId(object serverManager, string steamId)
-        {
-            try
-            {
-                if (serverManager == null || string.IsNullOrWhiteSpace(steamId))
-                {
-                    return false;
-                }
-
-                var verifyTimeouts = serverManager.GetType().GetMethod("Server_VerifyTimeouts", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
-                verifyTimeouts?.Invoke(serverManager, null);
-
-                if (!TryGetMemberValue(serverManager, "SteamIdTimeouts", out var timeoutsValue) || !(timeoutsValue is IDictionary timeouts))
-                {
-                    return false;
-                }
-
-                return timeouts.Contains(steamId.Trim());
-            }
-            catch { }
-
-            return false;
-        }
-
-        private static bool IsBannedSteamId(object serverManager, string steamId)
-        {
-            try
-            {
-                if (serverManager == null || string.IsNullOrWhiteSpace(steamId))
-                {
-                    return false;
-                }
-
-                if (!TryGetMemberValue(serverManager, "BannedSteamIds", out var bannedValue) || !(bannedValue is IEnumerable bannedIds))
-                {
-                    return false;
-                }
-
-                var normalizedSteamId = steamId.Trim();
-                foreach (var bannedId in bannedIds)
-                {
-                    if (string.Equals(ExtractSimpleValueToString(bannedId), normalizedSteamId, StringComparison.Ordinal))
-                    {
-                        return true;
-                    }
-                }
-            }
-            catch { }
-
-            return false;
-        }
-
-        private static bool IsMissingRequiredMods(object serverManager, ulong[] enabledModIds)
-        {
-            try
-            {
-                if (serverManager == null)
-                {
-                    return false;
-                }
-
-                if (!TryGetMemberValue(serverManager, "ServerConfigurationManager", out var configManager) || configManager == null)
-                {
-                    return false;
-                }
-
-                if (!TryGetMemberValue(configManager, "ClientRequiredModIds", out var requiredModsValue) || !(requiredModsValue is IEnumerable requiredMods))
-                {
-                    return false;
-                }
-
-                var enabled = new HashSet<ulong>(enabledModIds ?? Array.Empty<ulong>());
-                foreach (var requiredMod in requiredMods)
-                {
-                    if (!TryConvertToUlong(requiredMod, out var requiredModId) || enabled.Contains(requiredModId))
-                    {
-                        continue;
-                    }
-
-                    return true;
-                }
-            }
-            catch { }
-
-            return false;
-        }
-
-        private static bool UsePuckBannedSteamIds(object serverManager)
-        {
-            try
-            {
-                if (serverManager == null || !TryGetMemberValue(serverManager, "ServerConfigurationManager", out var configManager) || configManager == null)
-                {
-                    return false;
-                }
-
-                if (!TryGetMemberValue(configManager, "ServerConfiguration", out var configValue) || configValue == null)
-                {
-                    return false;
-                }
-
-                if (!TryGetMemberValue(configValue, "usePuckBannedSteamIds", out var flagValue))
-                {
-                    return false;
-                }
-
-                return flagValue is bool enabled && enabled;
-            }
-            catch { }
-
-            return false;
-        }
-
-        private static void TryRegisterPendingConnectionApproval(object serverManager, string steamId, object response)
-        {
-            try
-            {
-                if (serverManager == null || string.IsNullOrWhiteSpace(steamId))
-                {
-                    return;
-                }
-
-                if (!TryGetMemberValue(serverManager, "ConnectionApprovalRequests", out var requestsValue) || !(requestsValue is IDictionary requests))
-                {
-                    return;
-                }
-
-                var normalizedSteamId = steamId.Trim();
-                if (requests.Contains(normalizedSteamId))
-                {
-                    requests.Remove(normalizedSteamId);
-                }
-
-                requests[normalizedSteamId] = response;
-            }
-            catch { }
-        }
-
-        private static bool TryGetPendingConnectionApprovalResponse(object controllerInstance, string steamId, out object response)
-        {
-            response = null;
-            try
-            {
-                if (controllerInstance == null || string.IsNullOrWhiteSpace(steamId))
-                {
-                    return false;
-                }
-
-                if (!TryGetMemberValue(controllerInstance, "serverManager", out var serverManager) || serverManager == null)
-                {
-                    return false;
-                }
-
-                if (!TryGetMemberValue(serverManager, "ConnectionApprovalRequests", out var requestsValue) || !(requestsValue is IDictionary requests))
-                {
-                    return false;
-                }
-
-                var normalizedSteamId = steamId.Trim();
-                if (!requests.Contains(normalizedSteamId))
-                {
-                    return false;
-                }
-
-                response = requests[normalizedSteamId];
-                return response != null;
-            }
-            catch { }
-
-            response = null;
-            return false;
-        }
-
-        private static void TryRemovePendingConnectionApproval(object controllerInstance, string steamId)
-        {
-            try
-            {
-                if (controllerInstance == null || string.IsNullOrWhiteSpace(steamId))
-                {
-                    return;
-                }
-
-                if (!TryGetMemberValue(controllerInstance, "serverManager", out var serverManager) || serverManager == null)
-                {
-                    return;
-                }
-
-                if (!TryGetMemberValue(serverManager, "ConnectionApprovalRequests", out var requestsValue) || !(requestsValue is IDictionary requests))
-                {
-                    return;
-                }
-
-                var normalizedSteamId = steamId.Trim();
-                if (requests.Contains(normalizedSteamId))
-                {
-                    requests.Remove(normalizedSteamId);
-                }
-            }
-            catch { }
-        }
-
-        private static void TryEmitServerConnectionApprovalRequest(string steamId, string socketId)
-        {
-            try
-            {
-                var webSocketManagerType = FindTypeByName("WebSocketManager", "Puck.WebSocketManager");
-                var webSocketManager = GetManagerInstance(webSocketManagerType);
-                if (webSocketManager == null)
-                {
-                    return;
-                }
-
-                var emit = webSocketManager.GetType().GetMethod("Emit", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
-                if (emit == null)
-                {
-                    return;
-                }
-
-                emit.Invoke(webSocketManager, new object[]
-                {
-                    "serverConnectionApprovalRequest",
-                    new Dictionary<string, object>
-                    {
-                        { "steamId", steamId },
-                        { "socketId", socketId }
-                    },
-                    "serverConnectionApprovalResponse"
-                });
-            }
-            catch { }
-        }
-
-        private static void TryTriggerConnectionApprovalEvent(ulong clientId, bool approved)
-        {
-            try
-            {
-                var eventManagerType = FindTypeByName("EventManager", "Puck.EventManager");
-                var eventManager = GetManagerInstance(eventManagerType);
-                if (eventManager == null)
-                {
-                    return;
-                }
-
-                var triggerEvent = eventManager.GetType().GetMethod("TriggerEvent", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
-                if (triggerEvent == null)
-                {
-                    return;
-                }
-
-                triggerEvent.Invoke(eventManager, new object[]
-                {
-                    "Event_Server_ConnectionApproval",
-                    new Dictionary<string, object>
-                    {
-                        { "clientId", clientId },
-                        { "approved", approved }
-                    }
-                });
-            }
-            catch { }
-        }
-
-        private static string TryGetConnectionApprovalResponseSteamId(object message)
-        {
-            try
-            {
-                if (!(message is Dictionary<string, object> dict)
-                    || !dict.TryGetValue("response", out var responseValue)
-                    || responseValue == null)
-                {
-                    return null;
-                }
-
-                var getValueMethod = responseValue.GetType().GetMethods(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public)
-                    .FirstOrDefault(method => method.Name == "GetValue" && method.IsGenericMethodDefinition && method.GetParameters().Length == 0);
-                if (getValueMethod == null)
-                {
-                    return null;
-                }
-
-                var typedMethod = getValueMethod.MakeGenericMethod(typeof(ConnectionApprovalResponsePayload));
-                var payload = typedMethod.Invoke(responseValue, null) as ConnectionApprovalResponsePayload;
-                return payload?.steamId?.Trim();
-            }
-            catch { }
-
-            return null;
-        }
-
-        private static bool TrySetConnectionApprovalFlag(object response, string memberName, object value)
-        {
-            try
-            {
-                if (response == null || string.IsNullOrWhiteSpace(memberName))
-                {
-                    return false;
-                }
-
-                var type = response.GetType();
-                var property = type.GetProperty(memberName, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
-                if (property != null && property.CanWrite)
-                {
-                    property.SetValue(response, value, null);
-                    return true;
-                }
-
-                var field = type.GetField(memberName, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
-                if (field != null)
-                {
-                    field.SetValue(response, value);
-                    return true;
-                }
-            }
-            catch { }
-
-            return false;
         }
 
         private static bool TryGetMemberValue(object instance, string memberName, out object value)
@@ -2117,28 +1465,48 @@ namespace schrader.Server
             try
             {
                 TeamResult team = TeamResult.Unknown;
-                object scorer = null;
-                if (__args != null)
-                {
-                    foreach (var a in __args)
-                    {
-                        try
-                        {
-                            var t = ConvertTeamValue(a);
-                            if (t != TeamResult.Unknown) team = t;
-                        }
-                        catch { }
+                object goalPlayer = null;
+                object assistPlayer = null;
+                object secondAssistPlayer = null;
+                ulong goalPlayerClientId = 0;
+                ulong assistPlayerClientId = 0;
+                ulong secondAssistPlayerClientId = 0;
+                float speedAcrossLine = 0f;
+                float highestSpeedSinceStick = 0f;
 
-                        if (scorer == null)
-                        {
-                            try
-                            {
-                                var pid = TryGetPlayerId(a, 0UL);
-                                if (!string.IsNullOrEmpty(pid)) scorer = a;
-                            }
-                            catch { }
-                        }
+                if (__args != null && __args.Length >= 6 && !(__args[1] is bool))
+                {
+                    try { team = ConvertTeamValue(__args[0]); } catch { }
+                    goalPlayer = __args[2];
+                    assistPlayer = __args[3];
+                    secondAssistPlayer = __args[4];
+
+                    if (__args[5] != null)
+                    {
+                        TryReadFloatMember(__args[5], "Speed", out speedAcrossLine);
+                        TryReadFloatMember(__args[5], "ShotSpeed", out highestSpeedSinceStick);
                     }
+                }
+                else if (__args != null && __args.Length >= 11 && __args[1] is bool)
+                {
+                    try { team = ConvertTeamValue(__args[0]); } catch { }
+                    if (TryConvertToBool(__args[3], out var hasGoalPlayer) && hasGoalPlayer)
+                    {
+                        TryConvertToUlong(__args[4], out goalPlayerClientId);
+                    }
+
+                    if (TryConvertToBool(__args[5], out var hasAssistPlayer) && hasAssistPlayer)
+                    {
+                        TryConvertToUlong(__args[6], out assistPlayerClientId);
+                    }
+
+                    if (TryConvertToBool(__args[7], out var hasSecondAssistPlayer) && hasSecondAssistPlayer)
+                    {
+                        TryConvertToUlong(__args[8], out secondAssistPlayerClientId);
+                    }
+
+                    TryConvertToFloat(__args[9], out speedAcrossLine);
+                    TryConvertToFloat(__args[10], out highestSpeedSinceStick);
                 }
 
                 lock (goalLock)
@@ -2147,37 +1515,162 @@ namespace schrader.Server
                     else if (team == TeamResult.Blue) currentBlueGoals++;
                 }
 
-                // Track per-player goals when we can identify scorer
-                if (scorer != null)
+                TryResolveTrackedStatParticipant(goalPlayer, goalPlayerClientId, out var goalKey, out var goalName);
+                TryResolveTrackedStatParticipant(assistPlayer, assistPlayerClientId, out var assistKey, out var assistName);
+                TryResolveTrackedStatParticipant(secondAssistPlayer, secondAssistPlayerClientId, out var secondAssistKey, out var secondAssistName);
+
+                var goalTotal = 0;
+                if (!string.IsNullOrWhiteSpace(goalKey))
                 {
-                    try
+                    lock (playerGoalLock)
                     {
-                        var pid = TryGetPlayerId(scorer, 0UL) ?? TryGetPlayerName(scorer) ?? "unknown";
-                        var key = ResolvePlayerObjectKey(scorer, 0UL);
-                        if (string.IsNullOrEmpty(key) || key == "clientId:0")
-                        {
-                            var name = TryGetPlayerName(scorer) ?? pid;
-                            if (TryResolveSteamIdFromScoreboardByName(name, out var sid)) key = sid;
-                        }
-                        if (string.IsNullOrEmpty(key)) key = pid;
-                        lock (playerGoalLock)
-                        {
-                            if (!playerGoalCounts.TryGetValue(key, out var c)) c = 0;
-                            c++;
-                            playerGoalCounts[key] = c;
-                        }
-                        Debug.Log($"[{Constants.MOD_NAME}] Goal detected: {team}. Totals -> Red:{currentRedGoals}, Blue:{currentBlueGoals}. Scorer: {pid} (key: {key}, goals: {playerGoalCounts[key]})");
+                        IncrementTrackedStatCount(playerGoalCounts, goalKey);
+                        goalTotal = playerGoalCounts[goalKey];
                     }
-                    catch { }
                 }
-                else
+
+                var primaryAssistTotal = 0;
+                if (!string.IsNullOrWhiteSpace(assistKey))
                 {
-                    Debug.Log($"[{Constants.MOD_NAME}] Goal detected: {team}. Totals -> Red:{currentRedGoals}, Blue:{currentBlueGoals}");
+                    lock (playerAssistLock)
+                    {
+                        IncrementTrackedStatCount(playerPrimaryAssistCounts, assistKey);
+                        primaryAssistTotal = playerPrimaryAssistCounts[assistKey];
+                    }
                 }
+
+                var secondaryAssistTotal = 0;
+                if (!string.IsNullOrWhiteSpace(secondAssistKey))
+                {
+                    lock (playerAssistLock)
+                    {
+                        IncrementTrackedStatCount(playerSecondaryAssistCounts, secondAssistKey);
+                        secondaryAssistTotal = playerSecondaryAssistCounts[secondAssistKey];
+                    }
+                }
+
+                Debug.Log($"[{Constants.MOD_NAME}] [STATS] Goal event detected. team={team} redGoals={currentRedGoals} blueGoals={currentBlueGoals} scorer={goalName ?? "none"} scorerKey={goalKey ?? "none"} scorerGoals={goalTotal} primaryAssist={assistName ?? "none"} primaryAssistKey={assistKey ?? "none"} primaryAssistTotal={primaryAssistTotal} secondaryAssist={secondAssistName ?? "none"} secondaryAssistKey={secondAssistKey ?? "none"} secondaryAssistTotal={secondaryAssistTotal} speedAcrossLine={speedAcrossLine:0.00} highestSpeedSinceStick={highestSpeedSinceStick:0.00}");
             }
             catch (Exception ex)
             {
                 try { Debug.LogError($"[{Constants.MOD_NAME}] GoalScoredPostfix error: {ex.Message}"); } catch { }
+            }
+        }
+
+        private static void IncrementTrackedStatCount(Dictionary<string, int> counts, string key)
+        {
+            if (counts == null || string.IsNullOrWhiteSpace(key))
+            {
+                return;
+            }
+
+            if (!counts.TryGetValue(key, out var currentValue))
+            {
+                currentValue = 0;
+            }
+
+            counts[key] = currentValue + 1;
+        }
+
+        private static bool TryResolveTrackedStatParticipant(object player, ulong fallbackClientId, out string key, out string displayName)
+        {
+            key = null;
+            displayName = null;
+
+            try
+            {
+                var effectivePlayer = player;
+                if (effectivePlayer == null && fallbackClientId != 0)
+                {
+                    TryGetPlayerByClientId(fallbackClientId, out effectivePlayer);
+                }
+
+                if (effectivePlayer != null)
+                {
+                    displayName = StripRichTextTags(TryGetPlayerName(effectivePlayer))?.Trim();
+                    key = NormalizeResolvedPlayerKey(ResolvePlayerObjectKey(effectivePlayer, fallbackClientId));
+                }
+
+                if (string.Equals(key, "clientId:0", StringComparison.OrdinalIgnoreCase))
+                {
+                    key = null;
+                }
+
+                if (string.IsNullOrWhiteSpace(key) && fallbackClientId != 0)
+                {
+                    var resolvedClientKey = ResolveStoredIdToSteam($"clientId:{fallbackClientId}");
+                    key = string.IsNullOrWhiteSpace(resolvedClientKey)
+                        ? $"clientId:{fallbackClientId}"
+                        : resolvedClientKey;
+                }
+
+                if (string.IsNullOrWhiteSpace(displayName) && fallbackClientId != 0)
+                {
+                    displayName = $"clientId:{fallbackClientId}";
+                }
+
+                return !string.IsNullOrWhiteSpace(key) || !string.IsNullOrWhiteSpace(displayName);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool TryReadFloatMember(object instance, string memberName, out float value)
+        {
+            value = 0f;
+            if (instance == null || string.IsNullOrWhiteSpace(memberName))
+            {
+                return false;
+            }
+
+            return TryGetEntryMemberValue(instance, memberName, out var memberValue)
+                && TryConvertToFloat(memberValue, out value);
+        }
+
+        private static bool TryConvertToFloat(object value, out float result)
+        {
+            result = 0f;
+
+            try
+            {
+                if (value == null)
+                {
+                    return false;
+                }
+
+                if (value is float floatValue)
+                {
+                    result = floatValue;
+                    return true;
+                }
+
+                if (value is double doubleValue)
+                {
+                    result = (float)doubleValue;
+                    return true;
+                }
+
+                if (value is int intValue)
+                {
+                    result = intValue;
+                    return true;
+                }
+
+                if (value is long longValue)
+                {
+                    result = longValue;
+                    return true;
+                }
+
+                var stringValue = ExtractSimpleValueToString(value);
+                return !string.IsNullOrWhiteSpace(stringValue)
+                    && float.TryParse(stringValue, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out result);
+            }
+            catch
+            {
+                return false;
             }
         }
 

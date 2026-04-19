@@ -10,6 +10,8 @@ namespace schrader
         public const string ApprovalRequestState = "schrader.ranked.approval_request_state";
         public const string ScoreboardStars = "schrader.ranked.scoreboard_stars";
         public const string ScoreboardBadges = "schrader.ranked.scoreboard_badges";
+        public const string DiscordOnboardingState = "schrader.ranked.discord_onboarding_state";
+        public const string DiscordVerificationDeclined = "schrader.ranked.discord_verification_declined";
         public const string DiscordInviteOpen = "schrader.ranked.discord_invite_open";
         public const string ExternalUrlOpen = "schrader.ranked.external_url_open";
     }

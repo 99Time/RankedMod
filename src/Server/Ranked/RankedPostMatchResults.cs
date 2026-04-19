@@ -208,12 +208,26 @@ namespace schrader.Server
             var team = participant.team != TeamResult.Unknown
                 ? participant.team
                 : (scoreboard != null ? scoreboard.Team : TeamResult.Unknown);
-            var goals = scoreboard != null && scoreboard.HasGoals
-                ? scoreboard.Goals
-                : GetTrackedGoalsForParticipant(participant, resolvedId);
-            var assists = scoreboard != null && scoreboard.HasAssists ? scoreboard.Assists : 0;
-            var saves = scoreboard != null && scoreboard.HasSaves ? scoreboard.Saves : 0;
-            var shots = scoreboard != null && scoreboard.HasShots ? scoreboard.Shots : 0;
+            var trackedGoals = GetTrackedGoalsForParticipant(participant, resolvedId);
+            var trackedPrimaryAssists = GetTrackedPrimaryAssistsForParticipant(participant, resolvedId);
+            var trackedSecondaryAssists = GetTrackedSecondaryAssistsForParticipant(participant, resolvedId);
+            var trackedAssists = trackedPrimaryAssists + trackedSecondaryAssists;
+
+            var hasAuthoritativeGoals = TryGetAuthoritativeLivePlayerStat(participant, resolvedId, "Goals", out var liveGoals);
+            var hasAuthoritativeAssists = TryGetAuthoritativeLivePlayerStat(participant, resolvedId, "Assists", out var liveAssists);
+
+            var goals = hasAuthoritativeGoals
+                ? liveGoals
+                : (trackedGoals > 0
+                    ? trackedGoals
+                    : (scoreboard != null && scoreboard.HasGoals ? scoreboard.Goals : 0));
+            var assists = hasAuthoritativeAssists
+                ? liveAssists
+                : (trackedAssists > 0
+                    ? trackedAssists
+                    : (scoreboard != null && scoreboard.HasAssists ? scoreboard.Assists : 0));
+            var saves = 0;
+            var shots = 0;
             var username = ResolvePreferredParticipantDisplayName(participant, scoreboard?.DisplayName, resolvedId);
             var liveSteamId = ResolveParticipantSteamIdForUi(participant, resolvedId);
             var mmrBefore = GetAuthoritativeMmrOrDefault(participant, resolvedId, out var canonicalMmrKey);
@@ -226,6 +240,13 @@ namespace schrader.Server
             var excludedFromMmr = isGoalieParticipant;
             var performanceScore = ComputePerformanceScore(goals, assists, saves, shots, team, winner);
             var wasLateJoiner = WasApprovedLateJoinForCurrentMatch(participant, resolvedId);
+
+            if (hasAuthoritativeAssists && trackedAssists > 0 && liveAssists != trackedAssists)
+            {
+                Debug.LogWarning($"[{Constants.MOD_NAME}] [STATS] Assist total mismatch detected. identity={resolvedId ?? "none"} liveAssists={liveAssists} trackedAssists={trackedAssists} primaryTracked={trackedPrimaryAssists} secondaryTracked={trackedSecondaryAssists}");
+            }
+
+            Debug.Log($"[{Constants.MOD_NAME}] [STATS] Final player totals prepared. identity={resolvedId ?? "none"} username={username ?? "none"} steamId={liveSteamId ?? "none"} team={team} goals={goals} goalSource={(hasAuthoritativeGoals ? "player-networkvar" : (trackedGoals > 0 ? "tracked-goal-events" : "scoreboard-fallback"))} assists={assists} assistSource={(hasAuthoritativeAssists ? "player-networkvar" : (trackedAssists > 0 ? "tracked-goal-events" : "scoreboard-fallback"))} primaryAssistsTracked={trackedPrimaryAssists} secondaryAssistsTracked={trackedSecondaryAssists} shots={shots} authoritativeShots=false saves={saves} authoritativeSaves=false");
 
             Debug.Log($"[{Constants.MOD_NAME}] [POSTMATCH-DEBUG] resultEntry identity={resolvedId ?? "none"} currentTeam={team} previousTeam={ResolveHistoricalParticipantTeamForLogs(resolvedId, participant.clientId)} steamId={liveSteamId ?? "none"} exists=false");
 
@@ -507,20 +528,78 @@ namespace schrader.Server
 
         private static int GetTrackedGoalsForParticipant(RankedParticipant participant, string resolvedId)
         {
-            lock (playerGoalLock)
+            return GetTrackedCountForParticipant(playerGoalLock, playerGoalCounts, participant, resolvedId);
+        }
+
+        private static int GetTrackedPrimaryAssistsForParticipant(RankedParticipant participant, string resolvedId)
+        {
+            return GetTrackedCountForParticipant(playerAssistLock, playerPrimaryAssistCounts, participant, resolvedId);
+        }
+
+        private static int GetTrackedSecondaryAssistsForParticipant(RankedParticipant participant, string resolvedId)
+        {
+            return GetTrackedCountForParticipant(playerAssistLock, playerSecondaryAssistCounts, participant, resolvedId);
+        }
+
+        private static int GetTrackedCountForParticipant(object syncRoot, Dictionary<string, int> counts, RankedParticipant participant, string resolvedId)
+        {
+            lock (syncRoot)
             {
-                if (!string.IsNullOrWhiteSpace(resolvedId) && playerGoalCounts.TryGetValue(resolvedId, out var resolvedGoals))
+                if (counts == null)
                 {
-                    return resolvedGoals;
+                    return 0;
                 }
 
-                if (!string.IsNullOrWhiteSpace(participant?.playerId) && playerGoalCounts.TryGetValue(participant.playerId, out var playerGoals))
+                if (!string.IsNullOrWhiteSpace(resolvedId) && counts.TryGetValue(resolvedId, out var resolvedCount))
                 {
-                    return playerGoals;
+                    return resolvedCount;
+                }
+
+                var participantKey = NormalizeResolvedPlayerKey(ResolveParticipantIdToKey(participant) ?? participant?.playerId);
+                if (!string.IsNullOrWhiteSpace(participantKey) && counts.TryGetValue(participantKey, out var participantCount))
+                {
+                    return participantCount;
+                }
+
+                if (!string.IsNullOrWhiteSpace(participant?.playerId) && counts.TryGetValue(participant.playerId, out var playerCount))
+                {
+                    return playerCount;
                 }
             }
 
             return 0;
+        }
+
+        private static bool TryGetAuthoritativeLivePlayerStat(RankedParticipant participant, string resolvedId, string memberName, out int value)
+        {
+            value = 0;
+
+            var livePlayer = TryResolveLivePlayerForParticipant(participant, resolvedId);
+            return livePlayer != null
+                && TryGetEntryMemberValue(livePlayer, memberName, out var memberValue)
+                && TryConvertToInt(memberValue, out value);
+        }
+
+        private static object TryResolveLivePlayerForParticipant(RankedParticipant participant, string resolvedId)
+        {
+            if (participant != null && participant.clientId != 0 && TryGetPlayerByClientId(participant.clientId, out var playerByClientId) && playerByClientId != null)
+            {
+                return playerByClientId;
+            }
+
+            var normalizedResolvedId = NormalizeResolvedPlayerKey(resolvedId);
+            var participantKey = NormalizeResolvedPlayerKey(ResolveParticipantIdToKey(participant) ?? participant?.playerId);
+            foreach (var livePlayer in GetAllPlayers() ?? new List<object>())
+            {
+                var liveKey = NormalizeResolvedPlayerKey(ResolvePlayerObjectKey(livePlayer, 0UL));
+                if ((!string.IsNullOrWhiteSpace(normalizedResolvedId) && string.Equals(liveKey, normalizedResolvedId, StringComparison.OrdinalIgnoreCase))
+                    || (!string.IsNullOrWhiteSpace(participantKey) && string.Equals(liveKey, participantKey, StringComparison.OrdinalIgnoreCase)))
+                {
+                    return livePlayer;
+                }
+            }
+
+            return null;
         }
 
         private static int GetStoredParticipantMmr(string resolvedId)
@@ -538,7 +617,7 @@ namespace schrader.Server
         private static int ComputePerformanceScore(int goals, int assists, int saves, int shots, TeamResult team, TeamResult winner)
         {
             var winBonus = team != TeamResult.Unknown && team == winner ? MatchResultWinBonusScore : 0;
-            return (goals * 5) + (assists * 3) + (saves * 3) + shots + winBonus;
+            return (goals * 5) + (assists * 3) + winBonus;
         }
 
         private static void MarkTeamMvps(List<MatchResultComputation> computations, TeamResult winner)

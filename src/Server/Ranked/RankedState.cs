@@ -545,16 +545,9 @@ namespace schrader.Server
                     Debug.Log($"[{Constants.MOD_NAME}] [POSTMATCH] Publishing result payload.");
                     postMatchLockStarted = BeginPostMatchLock(matchResult);
                     RankedOverlayNetwork.PublishMatchResult(matchResult);
-                    var discordMatchResult = BuildDiscordMatchResultData(matchResult);
-                    if (discordMatchResult != null && TryGetCurrentServerName(out var serverName))
-                    {
-                        _ = SendMatchResultToDiscordAsync(MatchResultDiscordWebhookUrl, discordMatchResult, serverName);
-                    }
-                    else if (discordMatchResult != null)
-                    {
-                        Debug.LogWarning($"[{Constants.MOD_NAME}] [DISCORD] Skipped match result webhook because the server name could not be resolved.");
-                    }
                     ReportMatchResultToBackend(matchResult);
+                    TryGetCurrentServerName(out var serverName);
+                    TryQueueMatchResultWebhookFallback(matchResult, serverName);
                     Debug.Log($"[{Constants.MOD_NAME}] [POSTMATCH] Result payload sent.");
                     SendSystemChatToAll("<size=14><color=#66ccff>Match complete</color> post-match results are now available.</size>");
                 }

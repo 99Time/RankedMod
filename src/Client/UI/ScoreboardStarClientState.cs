@@ -124,7 +124,7 @@ namespace schrader
 
             var adminPrefix = BuildAdminPrefix(player);
             var starPrefix = hasStar ? $"<b><color={ResolveStarColorHex(starLevel)}>★</color></b>" : string.Empty;
-            var badgePrefix = hasBadge ? $"<b><color={badgeColorHex}>[{EscapeBadgeText(badgeText)}]</color></b> " : string.Empty;
+            var badgePrefix = hasBadge ? $"<b><color={badgeColorHex}>{EscapeBadgeText(badgeText)}</color></b> " : string.Empty;
             label.text = $"{adminPrefix}{starPrefix}{(hasStar ? " " : string.Empty)}{badgePrefix}<noparse>#{player.Number.Value} {player.Username.Value}</noparse>";
         }
 

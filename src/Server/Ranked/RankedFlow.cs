@@ -2255,12 +2255,6 @@ namespace schrader.Server
             }
 
             var hasJsonHit = !string.IsNullOrWhiteSpace(effectiveMmrKey) && HasStoredMmrEntry(effectiveMmrKey);
-            Debug.Log($"[{Constants.MOD_NAME}] [MMR] Draft participant = {displayName}");
-            Debug.Log($"[{Constants.MOD_NAME}] [MMR] Draft SteamID = {liveSteamId ?? "none"}");
-            Debug.Log($"[{Constants.MOD_NAME}] [MMR] Draft authoritative key = {effectiveMmrKey ?? "none"}");
-            Debug.Log($"[{Constants.MOD_NAME}] [MMR] Draft JSON hit = {hasJsonHit.ToString().ToLowerInvariant()}");
-            Debug.Log($"[{Constants.MOD_NAME}] [MMR] Draft final MMR = {mmrValue}");
-            Debug.Log($"[{Constants.MOD_NAME}] [AVATAR] Draft entry identity={participantKey} steamId={liveSteamId ?? "none"} display={displayName}");
             if (!hasJsonHit && !BotManager.IsBotKey(participantKey))
             {
                 Debug.LogWarning($"[{Constants.MOD_NAME}] [MMR] Missing draft MMR entry for real player key={effectiveMmrKey ?? "none"}");

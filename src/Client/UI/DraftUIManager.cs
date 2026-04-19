@@ -16,6 +16,7 @@ namespace schrader
         private enum OverlayUiState
         {
             None,
+            DiscordOnboarding,
             Welcome,
             TeamSelect,
             Draft,
@@ -81,15 +82,26 @@ namespace schrader
         private static MatchResultMessage cachedMatchResultState = MatchResultMessage.Hidden();
         private static bool postMatchDismissed;
         private static bool welcomePendingAcknowledgement;
+        private static bool discordOnboardingStateResolved;
+        private static bool discordOnboardingIsLinked;
+        private static bool discordOnboardingDismissed;
+        private static bool discordOnboardingFallbackActive;
+        private static string pendingDiscordLinkCommand;
+        private static float pendingDiscordLinkQueuedAt = -1f;
+        private static bool hasLoggedPendingDiscordLinkWait;
         private static float currentStateEnteredAt = -1f;
         private static float welcomeRequestedAt = -1f;
+        private static float discordOnboardingDecisionRequestedAt = -1f;
         private static float lastVisibleMatchResultReceivedAt = -1f;
         private static bool hasLoggedWelcomeFallback;
         private static bool hasLoggedPostMatchFallback;
+        private static bool hasLoggedDiscordOnboardingFallback;
         private static float currentUiOpacity;
         private static float targetUiOpacity;
         private static bool pendingHideAfterFade;
+        private static readonly bool EnableOverlayHotPathDiagnostics = false;
         private const float UiFadeSpeed = 7.5f;
+        private const float DiscordOnboardingDecisionFailsafeDelay = 1.25f;
         private const float WelcomeVisibilityFailsafeDelay = 1.5f;
         private const float PostMatchVisibilityFailsafeDelay = 2f;
         private const float LateJoinHandoffRetryInterval = 0.35f;
@@ -221,6 +233,10 @@ namespace schrader
                 OnApprovalRejectedClicked,
                 OnPickPlayerClicked,
                 OnAcceptLateJoinerClicked,
+                OnDiscordOnboardingVerifySubmitted,
+                OnDiscordOnboardingJoinClicked,
+                OnDiscordOnboardingLeaveClicked,
+                OnDiscordOnboardingCloseVerificationClicked,
                 OnWelcomeDiscordClicked,
                 OnWelcomeHostClicked,
                 OnWelcomeContinueClicked,
@@ -285,8 +301,17 @@ namespace schrader
             }
 
             welcomePendingAcknowledgement = true;
+            discordOnboardingStateResolved = false;
+            discordOnboardingIsLinked = false;
+            discordOnboardingDismissed = false;
+            discordOnboardingFallbackActive = false;
+            pendingDiscordLinkCommand = null;
+            pendingDiscordLinkQueuedAt = -1f;
+            hasLoggedPendingDiscordLinkWait = false;
             welcomeRequestedAt = -1f;
+            discordOnboardingDecisionRequestedAt = -1f;
             hasLoggedWelcomeFallback = false;
+            hasLoggedDiscordOnboardingFallback = false;
             DraftUIPlugin.Log("[CLIENT][JOIN] Local player created. Welcome flow armed with safe gameplay gating.");
             EnsureMessagingHandlers();
             EnsureViewSetup();
@@ -308,6 +333,7 @@ namespace schrader
             }
 
             eventManager.AddEventListener("Event_OnClientDisconnected", new Action<Dictionary<string, object>>(OnClientDisconnected));
+            eventManager.AddEventListener("Event_Client_OnClientStopped", new Action<Dictionary<string, object>>(OnClientDisconnected));
             disconnectListenerRegistered = true;
         }
 
@@ -330,11 +356,20 @@ namespace schrader
             lastDismissedPostMatchSignature = null;
             postMatchDismissed = false;
             welcomePendingAcknowledgement = false;
+            discordOnboardingStateResolved = false;
+            discordOnboardingIsLinked = false;
+            discordOnboardingDismissed = false;
+            discordOnboardingFallbackActive = false;
+            pendingDiscordLinkCommand = null;
+            pendingDiscordLinkQueuedAt = -1f;
+            hasLoggedPendingDiscordLinkWait = false;
             currentStateEnteredAt = -1f;
             welcomeRequestedAt = -1f;
+            discordOnboardingDecisionRequestedAt = -1f;
             lastVisibleMatchResultReceivedAt = -1f;
             hasLoggedWelcomeFallback = false;
             hasLoggedPostMatchFallback = false;
+            hasLoggedDiscordOnboardingFallback = false;
             UIInputState.Reset();
             ApplyUiState(OverlayUiState.None, forceRefresh: true);
         }
@@ -367,6 +402,7 @@ namespace schrader
                 messagingManager.RegisterNamedMessageHandler(RankedOverlayChannels.MatchResult, OnMatchResultReceived);
                 messagingManager.RegisterNamedMessageHandler(RankedOverlayChannels.ScoreboardStars, ScoreboardStarClientState.OnScoreboardStarsReceived);
                 messagingManager.RegisterNamedMessageHandler(RankedOverlayChannels.ScoreboardBadges, ScoreboardBadgeClientState.OnScoreboardBadgesReceived);
+                messagingManager.RegisterNamedMessageHandler(RankedOverlayChannels.DiscordOnboardingState, OnDiscordOnboardingStateReceived);
                 messagingManager.RegisterNamedMessageHandler(RankedOverlayChannels.DiscordInviteOpen, OnDiscordInviteOpenReceived);
                 messagingManager.RegisterNamedMessageHandler(RankedOverlayChannels.ExternalUrlOpen, OnExternalUrlOpenReceived);
                 currentMessagingManager = messagingManager;
@@ -389,6 +425,7 @@ namespace schrader
                 try { currentMessagingManager.UnregisterNamedMessageHandler(RankedOverlayChannels.MatchResult); } catch { }
                 try { currentMessagingManager.UnregisterNamedMessageHandler(RankedOverlayChannels.ScoreboardStars); } catch { }
                 try { currentMessagingManager.UnregisterNamedMessageHandler(RankedOverlayChannels.ScoreboardBadges); } catch { }
+                try { currentMessagingManager.UnregisterNamedMessageHandler(RankedOverlayChannels.DiscordOnboardingState); } catch { }
                 try { currentMessagingManager.UnregisterNamedMessageHandler(RankedOverlayChannels.DiscordInviteOpen); } catch { }
                 try { currentMessagingManager.UnregisterNamedMessageHandler(RankedOverlayChannels.ExternalUrlOpen); } catch { }
             }
@@ -606,6 +643,57 @@ namespace schrader
             }
         }
 
+        private static void OnDiscordOnboardingStateReceived(ulong senderClientId, FastBufferReader reader)
+        {
+            try
+            {
+                var message = RankedOverlayNetcode.ReadJson<DiscordOnboardingStateMessage>(ref reader) ?? DiscordOnboardingStateMessage.Unresolved();
+                var wasVerificationModalOpen = DiscordOnboardingUIRenderer.IsVerificationModalOpen(view);
+                var wasOnboardingVisible = DiscordOnboardingUIRenderer.IsOnboardingVisible(view);
+                discordOnboardingStateResolved = message.IsResolved;
+                discordOnboardingIsLinked = message.IsLinked;
+                if (discordOnboardingStateResolved)
+                {
+                    discordOnboardingFallbackActive = false;
+                }
+
+                if (discordOnboardingIsLinked)
+                {
+                    discordOnboardingDismissed = true;
+                }
+                else if (discordOnboardingStateResolved)
+                {
+                    discordOnboardingDismissed = false;
+                }
+
+                DraftUIPlugin.Log($"[CLIENT] Discord onboarding state received. resolved={discordOnboardingStateResolved} linked={discordOnboardingIsLinked} currentUi={currentUiState}");
+                if (discordOnboardingIsLinked)
+                {
+                    DraftUIPlugin.Log("[CLIENT][VERIFY] Verification success callback reached from backend linked=true update.");
+                    DiscordOnboardingUIRenderer.HideOnboarding(view);
+                    DraftUIPlugin.Log($"[CLIENT] Discord onboarding skipped/closed because backend confirmed linked state. onboardingVisibleBefore={wasOnboardingVisible} verificationModalBefore={wasVerificationModalOpen}");
+
+                    if (ShouldAwaitWelcomeFlow() || currentUiState == OverlayUiState.DiscordOnboarding || wasOnboardingVisible || wasVerificationModalOpen)
+                    {
+                        DraftUIPlugin.Log("[CLIENT] Discord onboarding success close branch triggered. closingMainOnboarding=True closingCodePopup=True");
+                        CompleteDiscordVerificationFlow("Discord onboarding auto-closed after successful verification");
+                        DraftUIPlugin.Log($"[CLIENT] Discord onboarding success close completed. onboardingVisibleNow={DiscordOnboardingUIRenderer.IsOnboardingVisible(view)} verificationModalNow={DiscordOnboardingUIRenderer.IsVerificationModalOpen(view)} currentUi={currentUiState}");
+                        return;
+                    }
+                }
+                else if (discordOnboardingStateResolved)
+                {
+                    DraftUIPlugin.Log("[CLIENT] Discord onboarding remains eligible because backend confirmed unlinked state.");
+                }
+
+                RefreshUi(forceRefresh: true);
+            }
+            catch (Exception ex)
+            {
+                DraftUIPlugin.LogError($"Failed to receive Discord onboarding state: {ex}");
+            }
+        }
+
         private static void OnDiscordInviteOpenReceived(ulong senderClientId, FastBufferReader reader)
         {
             try
@@ -636,6 +724,7 @@ namespace schrader
         {
             EnsureViewSetup();
             EnsureMessagingHandlers();
+            FlushPendingDiscordLinkCommand();
             SyncInputState();
             HandleApprovalKeyboardShortcuts();
             RefreshUi(forceRefresh: false);
@@ -667,7 +756,6 @@ namespace schrader
 
             if (nextState == OverlayUiState.Draft)
             {
-                DraftUIPlugin.Log($"[CLIENT] Draft overlay visible. Render path requested.");
                 RenderDraftFlow(forceRefresh);
                 return;
             }
@@ -714,6 +802,14 @@ namespace schrader
                             pendingHideAfterFade = false;
                             DraftUIRenderer.ShowHidden(view);
                         }
+                        break;
+                    case OverlayUiState.DiscordOnboarding:
+                        DraftUIPlugin.Log($"[CLIENT][VERIFY] Mandatory verification popup shown. resolved={discordOnboardingStateResolved} linked={discordOnboardingIsLinked}");
+                        DiscordOnboardingUIRenderer.Show(view);
+                        PrepareVisibleTransition(previousState == OverlayUiState.None);
+                        view?.Container?.BringToFront();
+                        AcquireCursor(forceResetInputs: true);
+                        EnforceGameplayUiPriority();
                         break;
                     case OverlayUiState.Welcome:
                         WelcomeUIRenderer.Show(view);
@@ -778,6 +874,28 @@ namespace schrader
                     DraftUIPlugin.Log("Welcome flow armed for the local player.");
                 }
 
+                if (ShouldAwaitDiscordOnboardingDecision())
+                {
+                    if (discordOnboardingDecisionRequestedAt < 0f)
+                    {
+                        discordOnboardingDecisionRequestedAt = Time.unscaledTime;
+                        hasLoggedDiscordOnboardingFallback = false;
+                        DraftUIPlugin.Log("Awaiting Discord onboarding state for the local player.");
+                    }
+
+                    return OverlayUiState.None;
+                }
+
+                discordOnboardingDecisionRequestedAt = -1f;
+                hasLoggedDiscordOnboardingFallback = false;
+
+                if (ShouldShowDiscordOnboarding())
+                {
+                    return view?.DiscordOnboarding?.Panel != null
+                        ? OverlayUiState.DiscordOnboarding
+                        : OverlayUiState.Welcome;
+                }
+
                 return view?.Welcome?.Panel != null
                     ? OverlayUiState.Welcome
                     : OverlayUiState.None;
@@ -785,6 +903,8 @@ namespace schrader
 
             welcomeRequestedAt = -1f;
             hasLoggedWelcomeFallback = false;
+            discordOnboardingDecisionRequestedAt = -1f;
+            hasLoggedDiscordOnboardingFallback = false;
 
             if (ShouldShowTeamSelectState())
             {
@@ -796,7 +916,8 @@ namespace schrader
 
         private static bool ShouldOwnCursor(OverlayUiState state)
         {
-            return state == OverlayUiState.Welcome
+            return state == OverlayUiState.DiscordOnboarding
+                || state == OverlayUiState.Welcome
                 || state == OverlayUiState.Draft
                 || state == OverlayUiState.PostMatch;
         }
@@ -1106,7 +1227,8 @@ namespace schrader
 
         private static void SyncApprovalPopupInteractionCursor()
         {
-            if (currentUiState == OverlayUiState.Welcome
+            if (currentUiState == OverlayUiState.DiscordOnboarding
+                || currentUiState == OverlayUiState.Welcome
                 || currentUiState == OverlayUiState.Draft
                 || currentUiState == OverlayUiState.PostMatch)
             {
@@ -1371,6 +1493,11 @@ namespace schrader
 
         private static void LogOverlayTick(OverlayUiState nextState)
         {
+            if (!EnableOverlayHotPathDiagnostics)
+            {
+                return;
+            }
+
             var signature = string.Join("|", new[]
             {
                 $"current={currentUiState}",
@@ -1641,6 +1768,35 @@ namespace schrader
             }
         }
 
+        private static void OnDiscordOnboardingVerifySubmitted(string code)
+        {
+            var trimmedCode = string.IsNullOrWhiteSpace(code) ? string.Empty : code.Trim();
+            if (string.IsNullOrWhiteSpace(trimmedCode))
+            {
+                return;
+            }
+
+            DraftUIPlugin.Log("Discord onboarding Verify submitted");
+            SendChatCommand($"/link {trimmedCode}", queueIfUnavailable: true);
+        }
+
+        private static void OnDiscordOnboardingJoinClicked()
+        {
+            OpenExternalUrl(Constants.DISCORD_INVITE_URL, Constants.DISCORD_INVITE_URL, "Discord onboarding Join button");
+        }
+
+        private static void OnDiscordOnboardingLeaveClicked()
+        {
+            DraftUIPlugin.Log("[CLIENT][VERIFY] Mandatory verification leave selected from onboarding panel.");
+            DisconnectFromMandatoryVerification("onboarding-leave", "Leave Server button");
+        }
+
+        private static void OnDiscordOnboardingCloseVerificationClicked()
+        {
+            DraftUIPlugin.Log("[CLIENT][VERIFY] Mandatory verification close selected from verification modal.");
+            DisconnectFromMandatoryVerification("verification-modal-close", "Verification modal Leave Server button");
+        }
+
         private static void OnWelcomeDiscordClicked()
         {
             OpenExternalUrl(Constants.DISCORD_INVITE_URL, Constants.DISCORD_INVITE_URL, "Welcome Discord button");
@@ -1690,17 +1846,72 @@ namespace schrader
             DismissPostMatch("Post-match UI Closed");
         }
 
-        private static void SendChatCommand(string message)
+        private static void FlushPendingDiscordLinkCommand()
+        {
+            if (string.IsNullOrWhiteSpace(pendingDiscordLinkCommand))
+            {
+                return;
+            }
+
+            if (!TrySendChatCommand(pendingDiscordLinkCommand))
+            {
+                if (!hasLoggedPendingDiscordLinkWait && pendingDiscordLinkQueuedAt >= 0f)
+                {
+                    var elapsed = Time.unscaledTime - Mathf.Max(0f, pendingDiscordLinkQueuedAt);
+                    if (elapsed >= 0.5f)
+                    {
+                        hasLoggedPendingDiscordLinkWait = true;
+                        DraftUIPlugin.Log($"Discord onboarding is still waiting for chat readiness before sending queued command after {elapsed:0.00}s.");
+                    }
+                }
+
+                return;
+            }
+
+            DraftUIPlugin.Log($"Discord onboarding queued command sent: {pendingDiscordLinkCommand}");
+            pendingDiscordLinkCommand = null;
+            pendingDiscordLinkQueuedAt = -1f;
+            hasLoggedPendingDiscordLinkWait = false;
+        }
+
+        private static bool TrySendChatCommand(string message)
+        {
+            var chat = UIChat.Instance;
+            if (!chat || uiChatSendMessageMethod == null)
+            {
+                return false;
+            }
+
+            uiChatSendMessageMethod.Invoke(chat, new object[] { message, false });
+            return true;
+        }
+
+        private static void SendChatCommand(string message, bool queueIfUnavailable = false)
         {
             try
             {
-                var chat = UIChat.Instance;
-                if (!chat || uiChatSendMessageMethod == null)
+                if (TrySendChatCommand(message))
                 {
+                    if (queueIfUnavailable)
+                    {
+                        pendingDiscordLinkCommand = null;
+                        pendingDiscordLinkQueuedAt = -1f;
+                        hasLoggedPendingDiscordLinkWait = false;
+                    }
+
                     return;
                 }
 
-                uiChatSendMessageMethod.Invoke(chat, new object[] { message, false });
+                if (queueIfUnavailable)
+                {
+                    pendingDiscordLinkCommand = message;
+                    pendingDiscordLinkQueuedAt = Time.unscaledTime;
+                    hasLoggedPendingDiscordLinkWait = false;
+                    DraftUIPlugin.Log($"Discord onboarding queued command until chat is ready: {message}");
+                    return;
+                }
+
+                DraftUIPlugin.LogError($"Unable to send UI command '{message}' because chat is not ready.");
             }
             catch (Exception ex)
             {
@@ -1753,8 +1964,9 @@ namespace schrader
 
         private static bool ShouldSuppressGameplaySelectionUi()
         {
-            return ShouldShowWelcomeScreen()
+            return ShouldAwaitWelcomeFlow()
                 || currentUiState == OverlayUiState.Welcome
+                || currentUiState == OverlayUiState.DiscordOnboarding
                 || currentUiState == OverlayUiState.Draft
                 || IsPostMatchStateLocked();
         }
@@ -1772,6 +1984,22 @@ namespace schrader
             return IsPostMatchStateLocked();
         }
 
+        private static bool ShouldAwaitDiscordOnboardingDecision()
+        {
+            return ShouldAwaitWelcomeFlow()
+                && !discordOnboardingStateResolved
+                && !discordOnboardingFallbackActive
+                && !discordOnboardingDismissed;
+        }
+
+        private static bool ShouldShowDiscordOnboarding()
+        {
+            return ShouldAwaitWelcomeFlow()
+                && discordOnboardingStateResolved
+                && !discordOnboardingIsLinked
+                && !discordOnboardingDismissed;
+        }
+
         private static bool ShouldAwaitWelcomeFlow()
         {
             return welcomePendingAcknowledgement && HasLocalPlayerContext();
@@ -1779,7 +2007,10 @@ namespace schrader
 
         private static bool ShouldShowWelcomeScreen()
         {
-            return ShouldAwaitWelcomeFlow() && view?.Welcome?.Panel != null;
+            return ShouldAwaitWelcomeFlow()
+                && !ShouldAwaitDiscordOnboardingDecision()
+                && !ShouldShowDiscordOnboarding()
+                && view?.Welcome?.Panel != null;
         }
 
         private static bool HasLocalPlayerContext()
@@ -1803,8 +2034,7 @@ namespace schrader
 
         private static bool ShouldBlockGameplayStateRpc(object state)
         {
-            return (IsPostMatchBlockingGameplayUi() || HasActiveDraftPayload() || currentUiState == OverlayUiState.Draft)
-                && ShouldBlockGameplayState(state);
+            return ShouldSuppressGameplaySelectionUi() && ShouldBlockGameplayState(state);
         }
 
         private static void EnforceGameplayUiPriority()
@@ -1883,6 +2113,91 @@ namespace schrader
             }
         }
 
+        private static void SendDiscordVerificationDeclined(string action)
+        {
+            try
+            {
+                var networkManager = NetworkManager.Singleton;
+                var messagingManager = networkManager != null && networkManager.IsClient
+                    ? networkManager.CustomMessagingManager
+                    : null;
+                if (messagingManager == null)
+                {
+                    return;
+                }
+
+                var message = new VerificationDeclinedMessage
+                {
+                    Action = string.IsNullOrWhiteSpace(action) ? "unknown" : action.Trim()
+                };
+                var capacity = RankedOverlayNetcode.EstimateCapacity(message);
+                var writer = new FastBufferWriter(capacity, Allocator.Temp);
+                try
+                {
+                    RankedOverlayNetcode.WriteJson(ref writer, message);
+                    messagingManager.SendNamedMessage(RankedOverlayChannels.DiscordVerificationDeclined, NetworkManager.ServerClientId, writer);
+                }
+                finally
+                {
+                    writer.Dispose();
+                }
+            }
+            catch (Exception ex)
+            {
+                DraftUIPlugin.LogError($"Failed to notify server about mandatory verification refusal: {ex}");
+            }
+        }
+
+        private static void DisconnectFromMandatoryVerification(string action, string sourceLabel)
+        {
+            var wasOnboardingVisible = DiscordOnboardingUIRenderer.IsOnboardingVisible(view);
+            var wasVerificationModalOpen = DiscordOnboardingUIRenderer.IsVerificationModalOpen(view);
+            DraftUIPlugin.Log($"[CLIENT][VERIFY] Leave button pressed. source={sourceLabel} action={action} resolved={discordOnboardingStateResolved} linked={discordOnboardingIsLinked} currentUi={currentUiState} onboardingVisible={wasOnboardingVisible} verificationModalVisible={wasVerificationModalOpen}");
+
+            try
+            {
+                SendDiscordVerificationDeclined(action);
+            }
+            catch (Exception ex)
+            {
+                DraftUIPlugin.LogError($"[CLIENT][VERIFY] Failed to send best-effort server verification decline before local disconnect: {ex}");
+            }
+
+            discordOnboardingDismissed = true;
+            discordOnboardingFallbackActive = false;
+            discordOnboardingDecisionRequestedAt = -1f;
+            hasLoggedDiscordOnboardingFallback = false;
+            DiscordOnboardingUIRenderer.HideOnboarding(view);
+
+            if (view?.Container != null)
+            {
+                DraftUIRenderer.ShowHidden(view);
+            }
+
+            currentUiOpacity = 0f;
+            targetUiOpacity = 0f;
+            pendingHideAfterFade = false;
+            UIInputState.isDraftUIOpen = false;
+            ReleaseCursor();
+
+            try
+            {
+                var networkManager = NetworkManager.Singleton;
+                if (networkManager != null && networkManager.IsClient)
+                {
+                    DraftUIPlugin.Log($"[CLIENT][VERIFY] Disconnect path executed via native client shutdown. action={action} source={sourceLabel}");
+                    networkManager.Shutdown(discardMessageQueue: true);
+                    return;
+                }
+
+                DraftUIPlugin.LogError($"[CLIENT][VERIFY] Native disconnect path unavailable. action={action} source={sourceLabel} hasNetworkManager={(networkManager != null)} isClient={(networkManager != null && networkManager.IsClient)}");
+            }
+            catch (Exception ex)
+            {
+                DraftUIPlugin.LogError($"[CLIENT][VERIFY] Native disconnect path failed. action={action} source={sourceLabel} error={ex}");
+            }
+        }
+
         private static void DismissPostMatch(string actionLabel)
         {
             lastDismissedPostMatchSignature = BuildMatchResultSignature(currentMatchResultState != null && currentMatchResultState.IsVisible
@@ -1931,12 +2246,51 @@ namespace schrader
 
         private static void DismissWelcomeScreen(string actionLabel)
         {
+            var localStateBeforeDismiss = GetLocalPlayerStateName();
             welcomePendingAcknowledgement = false;
             welcomeRequestedAt = -1f;
             hasLoggedWelcomeFallback = false;
-            DraftUIPlugin.Log(actionLabel);
+            DraftUIPlugin.Log($"{actionLabel}. localStateBeforeDismiss={localStateBeforeDismiss} teamSelectVisible={IsSelectionUiVisible()}");
+            TryRequestLocalPlayerStateTransition("TeamSelect", "welcome-continue");
             ApplyUiState(OverlayUiState.TeamSelect, forceRefresh: true);
             RestoreSuppressedGameplayUi();
+            RefreshUi(forceRefresh: true);
+        }
+
+        private static void CompleteDiscordVerificationFlow(string actionLabel)
+        {
+            var wasOnboardingVisible = DiscordOnboardingUIRenderer.IsOnboardingVisible(view);
+            var wasVerificationModalOpen = DiscordOnboardingUIRenderer.IsVerificationModalOpen(view);
+            welcomePendingAcknowledgement = true;
+            welcomeRequestedAt = -1f;
+            hasLoggedWelcomeFallback = false;
+            discordOnboardingDismissed = true;
+            discordOnboardingFallbackActive = false;
+            discordOnboardingDecisionRequestedAt = -1f;
+            hasLoggedDiscordOnboardingFallback = false;
+            pendingDiscordLinkCommand = null;
+            pendingDiscordLinkQueuedAt = -1f;
+            hasLoggedPendingDiscordLinkWait = false;
+            DiscordOnboardingUIRenderer.HideOnboarding(view);
+            DraftUIPlugin.Log($"[CLIENT][VERIFY] Popup close path executed. action={actionLabel} linked={discordOnboardingIsLinked} resolved={discordOnboardingStateResolved} onboardingVisibleBefore={wasOnboardingVisible} verificationModalBefore={wasVerificationModalOpen} welcomePending={welcomePendingAcknowledgement}");
+            ApplyUiState(OverlayUiState.Welcome, forceRefresh: true);
+            EnforceGameplayUiPriority();
+            RefreshUi(forceRefresh: true);
+            DraftUIPlugin.Log($"[CLIENT][VERIFY] Verification success close finished. onboardingVisibleNow={DiscordOnboardingUIRenderer.IsOnboardingVisible(view)} verificationModalNow={DiscordOnboardingUIRenderer.IsVerificationModalOpen(view)} currentUi={currentUiState} welcomePending={welcomePendingAcknowledgement} dismissed={discordOnboardingDismissed}");
+        }
+
+        private static void DismissDiscordOnboarding(string actionLabel)
+        {
+            var wasOnboardingVisible = DiscordOnboardingUIRenderer.IsOnboardingVisible(view);
+            var wasVerificationModalOpen = DiscordOnboardingUIRenderer.IsVerificationModalOpen(view);
+            discordOnboardingDismissed = true;
+            discordOnboardingFallbackActive = false;
+            discordOnboardingDecisionRequestedAt = -1f;
+            hasLoggedDiscordOnboardingFallback = false;
+            DiscordOnboardingUIRenderer.HideOnboarding(view);
+            DraftUIPlugin.Log($"{actionLabel}. onboardingVisibleBefore={wasOnboardingVisible} verificationModalBefore={wasVerificationModalOpen}");
+            ApplyUiState(OverlayUiState.Welcome, forceRefresh: true);
+            EnforceGameplayUiPriority();
             RefreshUi(forceRefresh: true);
         }
 
@@ -1988,8 +2342,29 @@ namespace schrader
 
         private static void UpdateStateFailsafes()
         {
+            UpdateDiscordOnboardingDecisionFailsafe();
             UpdateWelcomeFailsafe();
             UpdatePostMatchFailsafe();
+        }
+
+        private static void UpdateDiscordOnboardingDecisionFailsafe()
+        {
+            if (!ShouldAwaitDiscordOnboardingDecision() || discordOnboardingDecisionRequestedAt < 0f)
+            {
+                return;
+            }
+
+            var elapsed = Time.unscaledTime - Mathf.Max(0f, discordOnboardingDecisionRequestedAt);
+            if (elapsed < DiscordOnboardingDecisionFailsafeDelay)
+            {
+                return;
+            }
+
+            if (!hasLoggedDiscordOnboardingFallback)
+            {
+                hasLoggedDiscordOnboardingFallback = true;
+                DraftUIPlugin.LogError($"Discord onboarding state did not resolve after {elapsed:0.00}s. Keeping mandatory verification gate active.");
+            }
         }
 
         private static void UpdateWelcomeFailsafe()
@@ -1999,7 +2374,7 @@ namespace schrader
                 return;
             }
 
-            if (IsWelcomeOverlayVisible())
+            if (IsWelcomeFlowOverlayVisible())
             {
                 return;
             }
@@ -2054,6 +2429,7 @@ namespace schrader
             welcomeRequestedAt = -1f;
             hasLoggedWelcomeFallback = false;
             DraftUIPlugin.LogError($"UI recovery: {reason}");
+            TryRequestLocalPlayerStateTransition("TeamSelect", "failsafe-recovery");
             DraftUIRenderer.ShowHidden(view);
             currentUiOpacity = 0f;
             targetUiOpacity = 0f;
@@ -2076,7 +2452,21 @@ namespace schrader
 
         private static bool HasVisibleBlockingOverlay()
         {
-            return IsWelcomeOverlayVisible() || IsDraftOverlayVisible() || IsPostMatchOverlayVisible();
+            return IsWelcomeFlowOverlayVisible() || IsDraftOverlayVisible() || IsPostMatchOverlayVisible();
+        }
+
+        private static bool IsWelcomeFlowOverlayVisible()
+        {
+            return IsDiscordOnboardingOverlayVisible() || IsWelcomeOverlayVisible();
+        }
+
+        private static bool IsDiscordOnboardingOverlayVisible()
+        {
+            return currentUiState == OverlayUiState.DiscordOnboarding
+                && view?.Container != null
+                && view.Container.style.display == DisplayStyle.Flex
+                && view?.DiscordOnboarding?.Panel != null
+                && view.DiscordOnboarding.Panel.style.display == DisplayStyle.Flex;
         }
 
         private static bool IsWelcomeOverlayVisible()
@@ -2265,6 +2655,30 @@ namespace schrader
             catch
             {
                 localPlayer = null;
+                return false;
+            }
+        }
+
+        private static bool TryRequestLocalPlayerStateTransition(string targetStateName, string source)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(targetStateName) || playerSetStateRpcMethod == null || !TryGetLocalPlayer(out var localPlayer) || !localPlayer)
+                {
+                    DraftUIPlugin.LogError($"[CLIENT][JOIN] Could not request local player state transition. source={source} targetState={targetStateName ?? "null"} hasMethod={(playerSetStateRpcMethod != null)}");
+                    return false;
+                }
+
+                var currentStateName = localPlayer.State.Value.ToString() ?? string.Empty;
+                var stateType = localPlayer.State.Value.GetType();
+                var targetState = Enum.Parse(stateType, targetStateName, true);
+                DraftUIPlugin.Log($"[CLIENT][JOIN] Requesting native player state transition. source={source} currentState={currentStateName} targetState={targetStateName}");
+                playerSetStateRpcMethod.Invoke(localPlayer, new object[] { targetState, 0f });
+                return true;
+            }
+            catch (Exception ex)
+            {
+                DraftUIPlugin.LogError($"Failed to request local player state transition. source={source} targetState={targetStateName}: {ex}");
                 return false;
             }
         }
@@ -2484,6 +2898,11 @@ namespace schrader
 
         private static void LogCursorState(string reason)
         {
+            if (!EnableOverlayHotPathDiagnostics)
+            {
+                return;
+            }
+
             try
             {
                 var uiManager = UIManager.Instance;
@@ -2817,8 +3236,8 @@ namespace schrader
                     return true;
                 }
 
-                EnforceGameplayUiPriority();
-                return false;
+                DraftUIPlugin.Log($"[CLIENT][JOIN] Allowing native PlayerState RPC while overlay owns the screen. targetState={state} currentUi={currentUiState}");
+                return true;
             }
         }
 
@@ -2838,8 +3257,25 @@ namespace schrader
                     return true;
                 }
 
+                DraftUIPlugin.Log($"[CLIENT][JOIN] Allowing native UIManagerStateController player-state update while overlay owns the screen. state={player.State.Value} currentUi={currentUiState}");
+                return true;
+            }
+
+            [HarmonyPostfix]
+            public static void Postfix(Dictionary<string, object> message)
+            {
+                if (!ShouldSuppressGameplaySelectionUi() || message == null || !message.TryGetValue("player", out var playerObject))
+                {
+                    return;
+                }
+
+                if (!(playerObject is Player player) || !player.IsLocalPlayer || !ShouldBlockGameplayState(player.State.Value))
+                {
+                    return;
+                }
+
+                DraftUIPlugin.Log($"[CLIENT][JOIN] Hiding native selection UI behind active overlay. state={player.State.Value} currentUi={currentUiState}");
                 EnforceGameplayUiPriority();
-                return false;
             }
         }
 

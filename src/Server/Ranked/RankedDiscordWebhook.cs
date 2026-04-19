@@ -18,6 +18,7 @@ namespace schrader.Server
         private const string ServerStatusActivityApiUrl = "http://127.0.0.1:8080/api/servers/activity";
         private const string ServerStatusActivityApiBearerToken = "sr_sp1212";
         private const int ServerStatusHttpTimeoutMs = 8000;
+        private static readonly bool MatchResultWebhookEnabled = false;
         private static readonly bool ServerStatusWebhookUsesWithComponents = false;
         private static readonly bool ServerStatusWebhookUsesComponentsV2 = false;
         private static readonly HttpClient discordWebhookHttpClient = new HttpClient();
@@ -138,6 +139,32 @@ namespace schrader.Server
                 IsMVP = player.IsMVP,
                 Team = player.Team
             };
+        }
+
+        private static bool TryQueueMatchResultWebhookFallback(MatchResultMessage matchResult, string serverName)
+        {
+            if (!MatchResultWebhookEnabled)
+            {
+                Debug.Log($"[{Constants.MOD_NAME}] [DISCORD] Match result webhook skipped. mode=disabled backendPrimary=true fallbackUsed=false unsupportedPublicStatsRemoved=true");
+                return false;
+            }
+
+            var discordMatchResult = BuildDiscordMatchResultData(matchResult);
+            if (discordMatchResult == null)
+            {
+                Debug.LogWarning($"[{Constants.MOD_NAME}] [DISCORD] Match result webhook fallback skipped because no visible match result payload was available.");
+                return false;
+            }
+
+            if (string.IsNullOrWhiteSpace(serverName))
+            {
+                Debug.LogWarning($"[{Constants.MOD_NAME}] [DISCORD] Match result webhook fallback skipped because the server name could not be resolved.");
+                return false;
+            }
+
+            Debug.Log($"[{Constants.MOD_NAME}] [DISCORD] Match result webhook fallback engaged. backendPrimary=true fallbackUsed=true unsupportedPublicStatsRemoved=true");
+            _ = SendMatchResultToDiscordAsync(MatchResultDiscordWebhookUrl, discordMatchResult, serverName);
+            return true;
         }
 
         private static async Task SendMatchResultToDiscordAsync(string webhookUrl, MatchResultData data, string serverName)
@@ -845,6 +872,28 @@ namespace schrader.Server
 
             try
             {
+                if (TryGetServerNameFromConfiguration(out serverName))
+                {
+                    return true;
+                }
+
+                if (TryGetServerNameFromRuntimeServer(out serverName))
+                {
+                    return true;
+                }
+            }
+            catch { }
+
+            serverName = null;
+            return false;
+        }
+
+        private static bool TryGetServerNameFromConfiguration(out string serverName)
+        {
+            serverName = null;
+
+            try
+            {
                 var managerType = FindTypeByName("ServerConfigurationManager", "Puck.ServerConfigurationManager");
                 var manager = GetManagerInstance(managerType);
                 if (manager == null)
@@ -877,10 +926,58 @@ namespace schrader.Server
                 serverName = NormalizeVisiblePlayerName(ExtractSimpleValueToString(nameValue));
                 return !string.IsNullOrWhiteSpace(serverName);
             }
-            catch { }
+            catch
+            {
+                serverName = null;
+                return false;
+            }
+        }
 
+        private static bool TryGetServerNameFromRuntimeServer(out string serverName)
+        {
             serverName = null;
-            return false;
+
+            try
+            {
+                var managerType = FindTypeByName("ServerManager", "Puck.ServerManager");
+                var manager = GetManagerInstance(managerType);
+                if (manager == null)
+                {
+                    return false;
+                }
+
+                var flags = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+                var managerTypeResolved = manager.GetType();
+                var serverValue = managerTypeResolved.GetProperty("Server", flags)?.GetValue(manager)
+                    ?? managerTypeResolved.GetField("Server", flags)?.GetValue(manager);
+                if (serverValue == null)
+                {
+                    var serverMethod = managerTypeResolved.GetMethod("get_Server", flags, null, Type.EmptyTypes, null);
+                    if (serverMethod != null)
+                    {
+                        serverValue = serverMethod.Invoke(manager, null);
+                    }
+                }
+
+                if (serverValue == null)
+                {
+                    return false;
+                }
+
+                var serverType = serverValue.GetType();
+                var nameValue = serverType.GetProperty("Name", flags)?.GetValue(serverValue)
+                    ?? serverType.GetField("Name", flags)?.GetValue(serverValue)
+                    ?? serverType.GetProperty("name", flags)?.GetValue(serverValue)
+                    ?? serverType.GetField("name", flags)?.GetValue(serverValue);
+
+                serverName = NormalizeVisiblePlayerName(ExtractSimpleValueToString(nameValue));
+                return !string.IsNullOrWhiteSpace(serverName);
+            }
+            catch
+            {
+                serverName = null;
+                return false;
+            }
         }
 
         private static string FormatWebhookServerName(string serverName)
@@ -933,7 +1030,7 @@ namespace schrader.Server
                 return null;
             }
 
-            return $"- {FormatWebhookPlayerIdentity(player)} — G:{Mathf.Max(0, player.Goals)} A:{Mathf.Max(0, player.Assists)} S:{Mathf.Max(0, player.Saves)} Sh:{Mathf.Max(0, player.Shots)} | {FormatWebhookMmrProgress(player)}";
+            return $"- {FormatWebhookPlayerIdentity(player)} — G:{Mathf.Max(0, player.Goals)} A:{Mathf.Max(0, player.Assists)} | {FormatWebhookMmrProgress(player)}";
         }
 
         private static string FormatWebhookScore(MatchResultData data)
@@ -1022,8 +1119,6 @@ namespace schrader.Server
                 .OrderByDescending(ComputeWebhookPerformanceScore)
                 .ThenByDescending(player => player.Goals)
                 .ThenByDescending(player => player.Assists)
-                .ThenByDescending(player => player.Saves)
-                .ThenByDescending(player => player.Shots)
                 .ThenByDescending(player => player.Mmr)
                 .ThenBy(player => player.DisplayName ?? string.Empty, StringComparer.OrdinalIgnoreCase)
                 .FirstOrDefault();
@@ -1036,7 +1131,7 @@ namespace schrader.Server
                 return 0;
             }
 
-            return (player.Goals * 5) + (player.Assists * 3) + (player.Saves * 3) + player.Shots;
+            return (player.Goals * 5) + (player.Assists * 3);
         }
 
         private static void ResolveAuthoritativeFinalScore(out int redScore, out int blueScore)
@@ -1045,6 +1140,13 @@ namespace schrader.Server
             {
                 redScore = Mathf.Max(0, lastRedScore.Value);
                 blueScore = Mathf.Max(0, lastBlueScore.Value);
+                return;
+            }
+
+            if (TryGetRuntimeGameManager(out var gameManager, out var _) && TryGetScoresFromGameState(gameManager, out var liveRedScore, out var liveBlueScore))
+            {
+                redScore = Mathf.Max(0, liveRedScore);
+                blueScore = Mathf.Max(0, liveBlueScore);
                 return;
             }
 

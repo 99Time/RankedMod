@@ -14,10 +14,12 @@ namespace schrader
         private const NetworkDelivery DraftExtendedDelivery = NetworkDelivery.ReliableFragmentedSequenced;
         private const NetworkDelivery ScoreboardStarDelivery = NetworkDelivery.ReliableFragmentedSequenced;
         private const NetworkDelivery ScoreboardBadgeDelivery = NetworkDelivery.ReliableFragmentedSequenced;
+        private const NetworkDelivery DiscordOnboardingDelivery = NetworkDelivery.ReliableFragmentedSequenced;
         private static readonly Dictionary<ulong, string> lastApprovalRequestSignatureByClient = new Dictionary<ulong, string>();
         private static string lastDraftSignature;
         private static string lastDraftExtendedSignature;
         private static string lastVoteSignature;
+        private static string lastScoreboardBadgeSignature;
         private static CustomMessagingManager currentServerMessagingManager;
         private static bool serverHandlersRegistered;
 
@@ -34,6 +36,7 @@ namespace schrader
                 if (currentServerMessagingManager != null && serverHandlersRegistered)
                 {
                     try { currentServerMessagingManager.UnregisterNamedMessageHandler(RankedOverlayChannels.MatchResultDismiss); } catch { }
+                    try { currentServerMessagingManager.UnregisterNamedMessageHandler(RankedOverlayChannels.DiscordVerificationDeclined); } catch { }
                 }
 
                 currentServerMessagingManager = messagingManager;
@@ -44,6 +47,7 @@ namespace schrader
                 }
 
                 messagingManager.RegisterNamedMessageHandler(RankedOverlayChannels.MatchResultDismiss, OnMatchResultDismissReceived);
+                messagingManager.RegisterNamedMessageHandler(RankedOverlayChannels.DiscordVerificationDeclined, OnDiscordVerificationDeclinedReceived);
                 serverHandlersRegistered = true;
             }
             catch (Exception ex)
@@ -160,12 +164,27 @@ namespace schrader
 
         public static void PublishScoreboardBadges(ScoreboardBadgeStateMessage state)
         {
-            BroadcastReliable(RankedOverlayChannels.ScoreboardBadges, state ?? ScoreboardBadgeStateMessage.Empty(), ScoreboardBadgeDelivery);
+            var message = state ?? ScoreboardBadgeStateMessage.Empty();
+            var signature = BuildScoreboardBadgeSignature(message);
+            if (string.Equals(signature, lastScoreboardBadgeSignature, StringComparison.Ordinal))
+            {
+                Debug.Log($"[{Constants.MOD_NAME}] [OVERLAY] Publish skipped because ScoreboardBadgeState signature unchanged.");
+                return;
+            }
+
+            lastScoreboardBadgeSignature = signature;
+            Debug.Log($"[{Constants.MOD_NAME}] [OVERLAY] Publishing ScoreboardBadgeState. players={(message.Players?.Length ?? 0)}");
+            BroadcastReliable(RankedOverlayChannels.ScoreboardBadges, message, ScoreboardBadgeDelivery);
         }
 
         public static void PublishScoreboardBadgesToClient(ulong clientId, ScoreboardBadgeStateMessage state)
         {
             SendToClientReliable(RankedOverlayChannels.ScoreboardBadges, state ?? ScoreboardBadgeStateMessage.Empty(), clientId, ScoreboardBadgeDelivery);
+        }
+
+        public static void PublishDiscordOnboardingStateToClient(ulong clientId, DiscordOnboardingStateMessage state)
+        {
+            SendToClientReliable(RankedOverlayChannels.DiscordOnboardingState, state ?? DiscordOnboardingStateMessage.Unresolved(), clientId, DiscordOnboardingDelivery);
         }
 
         public static void PublishDiscordInviteOpenToClient(ulong clientId, string url = null)
@@ -195,6 +214,7 @@ namespace schrader
                 PublishMatchResultToClient(clientId, Server.RankedSystem.GetMatchResultStateForClient(clientId));
                 PublishScoreboardStarsToClient(clientId, Server.RankedSystem.GetScoreboardStarStateForClient(clientId));
                 PublishScoreboardBadgesToClient(clientId, Server.RankedSystem.GetScoreboardBadgeStateForClient(clientId));
+                PublishDiscordOnboardingStateToClient(clientId, Server.RankedSystem.GetDiscordOnboardingStateForClient(clientId));
                 Debug.Log($"[{Constants.MOD_NAME}] [JOIN][SERVER] Overlay resync complete for client {clientId}.");
             }
             catch (Exception ex)
@@ -213,6 +233,19 @@ namespace schrader
             catch (Exception ex)
             {
                 Debug.LogError($"[{Constants.MOD_NAME}] Failed to process post-match dismiss: {ex.Message}");
+            }
+        }
+
+        private static void OnDiscordVerificationDeclinedReceived(ulong senderClientId, FastBufferReader reader)
+        {
+            try
+            {
+                var message = RankedOverlayNetcode.ReadJson<VerificationDeclinedMessage>(ref reader) ?? new VerificationDeclinedMessage();
+                Server.RankedSystem.HandleMandatoryVerificationDeclined(senderClientId, message.Action);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[{Constants.MOD_NAME}] Failed to process mandatory verification decline: {ex.Message}");
             }
         }
 
@@ -447,6 +480,27 @@ namespace schrader
                 state.SecondsRemaining,
                 state.QueuePosition,
                 state.QueueLength);
+        }
+
+        private static string BuildScoreboardBadgeSignature(ScoreboardBadgeStateMessage state)
+        {
+            return string.Join("|",
+                (state?.Players?.Length ?? 0),
+                string.Join(",", (state?.Players ?? Array.Empty<ScoreboardBadgeEntryMessage>()).Select(BuildScoreboardBadgeEntrySignature)));
+        }
+
+        private static string BuildScoreboardBadgeEntrySignature(ScoreboardBadgeEntryMessage entry)
+        {
+            if (entry == null)
+            {
+                return string.Empty;
+            }
+
+            return string.Join("~",
+                entry.PlayerId ?? string.Empty,
+                entry.ClientId,
+                entry.BadgeText ?? string.Empty,
+                entry.ColorHex ?? string.Empty);
         }
 
         private static void LogVotePayloadDiagnostics(VoteOverlayStateMessage state, ulong? clientId, string context)

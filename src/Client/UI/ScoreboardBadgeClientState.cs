@@ -76,6 +76,7 @@ namespace schrader
 
         private static void ApplyState(ScoreboardBadgeStateMessage state)
         {
+            var appliedEntries = 0;
             lock (sync)
             {
                 badgeByPlayerId.Clear();
@@ -104,9 +105,12 @@ namespace schrader
                     {
                         badgeByClientId[entry.ClientId] = storedEntry;
                     }
+
+                    appliedEntries++;
                 }
             }
 
+            DraftUIPlugin.Log($"[CLIENT][SCOREBOARD] Scoreboard badge cache applied. entries={appliedEntries}. Refreshing visible scoreboard rows.");
             ScoreboardStarClientState.RefreshVisibleScoreboard();
         }
 

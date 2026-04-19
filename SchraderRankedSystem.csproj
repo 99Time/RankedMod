@@ -3,6 +3,7 @@
   <PropertyGroup>
     <AssemblyName>SchraderRankedSystem</AssemblyName>
     <TargetFramework>net4.8</TargetFramework>
+    <LangVersion>10.0</LangVersion>
   </PropertyGroup>
   <PropertyGroup>
     <!-- Suppress MSBuild assembly-unification warnings caused by bundling engine libs -->
