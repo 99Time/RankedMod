@@ -4,13 +4,15 @@ namespace schrader
     {
         public bool IsResolved { get; set; }
         public bool IsLinked { get; set; }
+        public bool IsPublicServer { get; set; }
 
         public static DiscordOnboardingStateMessage Unresolved()
         {
             return new DiscordOnboardingStateMessage
             {
                 IsResolved = false,
-                IsLinked = false
+                IsLinked = false,
+                IsPublicServer = false
             };
         }
     }

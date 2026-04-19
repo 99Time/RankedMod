@@ -15,6 +15,8 @@ namespace schrader
         internal sealed class TeamSectionView
         {
             public VisualElement Panel;
+            public Label TitleLabel;
+            public Label MetaLabel;
             public Label StatusLabel;
             public Label SummaryLabel;
             public Label RosterLabel;
@@ -198,6 +200,12 @@ namespace schrader
             }
 
             var view = rootView.PostMatch;
+            if (state.UsePublicPresentation)
+            {
+                RenderPublicRecap(view, state);
+                return;
+            }
+
             view.TitleLabel.text = "FINAL RESULTS";
             view.WinnerLabel.text = BuildWinningHeadline(state);
             view.WinnerLabel.style.display = string.IsNullOrWhiteSpace(view.WinnerLabel.text) ? DisplayStyle.None : DisplayStyle.Flex;
@@ -207,6 +215,10 @@ namespace schrader
                     ? new Color(0.80f, 0.90f, 1f, 1f)
                     : new Color(0.92f, 0.95f, 0.99f, 0.92f));
 
+            ResetTeamPresentation(view.RedTeam, TeamResult.Red);
+            ResetTeamPresentation(view.BlueTeam, TeamResult.Blue);
+            view.RedTeam.Panel.style.display = DisplayStyle.Flex;
+            view.BlueTeam.Panel.style.display = DisplayStyle.Flex;
             PopulateTeam(view.RedTeam, TeamResult.Red, state);
             PopulateTeam(view.BlueTeam, TeamResult.Blue, state);
         }
@@ -265,6 +277,8 @@ namespace schrader
             teamMeta.style.marginTop = new StyleLength(new Length(3, LengthUnit.Pixel));
             titleColumn.Add(teamLabel);
             titleColumn.Add(teamMeta);
+            teamView.TitleLabel = teamLabel;
+            teamView.MetaLabel = teamMeta;
 
             var headerMeta = new VisualElement();
             headerMeta.style.display = DisplayStyle.Flex;
@@ -308,6 +322,47 @@ namespace schrader
 
             parent.Add(teamPanel);
             return teamView;
+        }
+
+        private static void RenderPublicRecap(View view, MatchResultMessage state)
+        {
+            view.TitleLabel.text = "PUBLIC SESSION COMPLETE";
+            view.WinnerLabel.text = "Public server recap. Competitive ranked presentation is disabled here.";
+            view.WinnerLabel.style.display = DisplayStyle.Flex;
+            view.WinnerLabel.style.color = new StyleColor(new Color(0.86f, 0.91f, 0.97f, 0.96f));
+
+            var localPlayer = FindLocalPlayerResult(state);
+            var primaryTeam = localPlayer != null && localPlayer.Team == TeamResult.Blue ? TeamResult.Blue : TeamResult.Red;
+            var primaryView = primaryTeam == TeamResult.Blue ? view.BlueTeam : view.RedTeam;
+            var secondaryView = primaryTeam == TeamResult.Blue ? view.RedTeam : view.BlueTeam;
+
+            ResetTeamPresentation(primaryView, primaryTeam);
+            ResetTeamPresentation(secondaryView, primaryTeam == TeamResult.Blue ? TeamResult.Red : TeamResult.Blue);
+            primaryView.Panel.style.display = DisplayStyle.Flex;
+            secondaryView.Panel.style.display = DisplayStyle.None;
+
+            PopulatePublicSummary(primaryView, localPlayer, state);
+        }
+
+        private static void ResetTeamPresentation(TeamSectionView teamView, TeamResult team)
+        {
+            if (teamView == null)
+            {
+                return;
+            }
+
+            if (teamView.TitleLabel != null)
+            {
+                teamView.TitleLabel.text = FormatTeamName(team);
+                teamView.TitleLabel.style.color = new StyleColor(ReadableTeamColor(team));
+            }
+
+            if (teamView.MetaLabel != null)
+            {
+                teamView.MetaLabel.text = "Featured player and roster";
+            }
+
+            teamView.RosterLabel.style.display = DisplayStyle.Flex;
         }
 
         private static void PopulateTeam(TeamSectionView teamView, TeamResult team, MatchResultMessage state)
@@ -364,6 +419,51 @@ namespace schrader
             }
         }
 
+        private static void PopulatePublicSummary(TeamSectionView teamView, MatchResultPlayerMessage localPlayer, MatchResultMessage state)
+        {
+            if (teamView == null)
+            {
+                return;
+            }
+
+            var mvpContainer = teamView.MvpContainer;
+            var playersContainer = teamView.PlayersContainer;
+            mvpContainer.Clear();
+            playersContainer.Clear();
+
+            if (teamView.TitleLabel != null)
+            {
+                teamView.TitleLabel.text = localPlayer != null ? "YOUR PUBLIC RECAP" : "PUBLIC RECAP";
+                teamView.TitleLabel.style.color = new StyleColor(new Color(0.92f, 0.96f, 1f, 1f));
+            }
+
+            if (teamView.MetaLabel != null)
+            {
+                teamView.MetaLabel.text = localPlayer != null
+                    ? "Lightweight personal summary for this public server match"
+                    : "Lightweight public-server summary";
+            }
+
+            ApplyPillVisual(teamView.StatusLabel, new Color(0.16f, 0.33f, 0.70f, 0.90f), new Color(0.95f, 0.98f, 1f, 1f));
+            teamView.StatusLabel.text = "PUBLIC";
+
+            if (localPlayer != null)
+            {
+                teamView.SummaryLabel.text = $"{FormatTeamName(localPlayer.Team)} · {FormatVisiblePlayerName(localPlayer)}";
+                teamView.RosterLabel.text = "YOUR STATS";
+                mvpContainer.Add(CreatePublicHeroCard(localPlayer));
+                playersContainer.Add(CreatePublicStatRow(localPlayer));
+                playersContainer.Add(CreateInlineEmptyState("Competitive ranked team summary is hidden on public servers."));
+                return;
+            }
+
+            var playerCount = (state?.Players ?? Array.Empty<MatchResultPlayerMessage>()).Length;
+            teamView.SummaryLabel.text = playerCount == 1 ? "1 PLAYER RECORDED" : $"{playerCount} PLAYERS RECORDED";
+            teamView.RosterLabel.text = "SESSION SUMMARY";
+            mvpContainer.Add(CreateEmptyStateCard("Public match complete", "This server uses the lightweight public recap instead of the competitive team-vs-team scoreboard.", TeamResult.Unknown));
+            playersContainer.Add(CreateInlineEmptyState("Connect as a tracked player to receive a personal recap."));
+        }
+
         private static MatchResultPlayerMessage[] SortPlayers(MatchResultMessage state, TeamResult team)
         {
             return (state?.Players ?? Array.Empty<MatchResultPlayerMessage>())
@@ -386,6 +486,38 @@ namespace schrader
             return (player.Goals * 5)
                 + (player.Assists * 3)
                 + (player.Team == winningTeam ? 2 : 0);
+        }
+
+        private static MatchResultPlayerMessage FindLocalPlayerResult(MatchResultMessage state)
+        {
+            var players = state?.Players ?? Array.Empty<MatchResultPlayerMessage>();
+            if (players.Length == 0)
+            {
+                return null;
+            }
+
+            string localSteamId = null;
+            try
+            {
+                var manager = PlayerManager.Instance;
+                var localPlayer = manager != null ? manager.GetLocalPlayer() : null;
+                if (localPlayer)
+                {
+                    localSteamId = localPlayer.SteamId.Value.ToString();
+                }
+            }
+            catch
+            {
+            }
+
+            if (string.IsNullOrWhiteSpace(localSteamId))
+            {
+                return null;
+            }
+
+            return players.FirstOrDefault(player => player != null
+                && ((!string.IsNullOrWhiteSpace(player.SteamId) && string.Equals(player.SteamId, localSteamId, StringComparison.Ordinal))
+                    || (!string.IsNullOrWhiteSpace(player.Id) && string.Equals(player.Id, localSteamId, StringComparison.Ordinal))));
         }
 
         private static VisualElement CreateMvpCard(MatchResultPlayerMessage player, TeamResult team, bool winningTeam)
@@ -659,6 +791,53 @@ namespace schrader
         private static string FormatInlineStats(MatchResultPlayerMessage player)
         {
             return $"Goals {player?.Goals ?? 0}   ·   Assists {player?.Assists ?? 0}";
+        }
+
+        private static VisualElement CreatePublicHeroCard(MatchResultPlayerMessage player)
+        {
+            var card = new VisualElement();
+            card.style.display = DisplayStyle.Flex;
+            card.style.flexDirection = FlexDirection.Column;
+            card.style.paddingTop = new StyleLength(new Length(16, LengthUnit.Pixel));
+            card.style.paddingBottom = new StyleLength(new Length(16, LengthUnit.Pixel));
+            card.style.paddingLeft = new StyleLength(new Length(16, LengthUnit.Pixel));
+            card.style.paddingRight = new StyleLength(new Length(16, LengthUnit.Pixel));
+            card.style.backgroundColor = new StyleColor(new Color(0.10f, 0.15f, 0.22f, 0.90f));
+            card.style.borderTopLeftRadius = new StyleLength(new Length(18, LengthUnit.Pixel));
+            card.style.borderTopRightRadius = new StyleLength(new Length(18, LengthUnit.Pixel));
+            card.style.borderBottomLeftRadius = new StyleLength(new Length(18, LengthUnit.Pixel));
+            card.style.borderBottomRightRadius = new StyleLength(new Length(18, LengthUnit.Pixel));
+            card.style.borderTopWidth = 1;
+            card.style.borderRightWidth = 1;
+            card.style.borderBottomWidth = 1;
+            card.style.borderLeftWidth = 1;
+            ApplyUniformBorder(card, new Color(1f, 1f, 1f, 0.06f));
+
+            var nameLabel = CreateLabel(FormatVisiblePlayerName(player), 24, FontStyle.Bold, TextAnchor.MiddleLeft, new Color(0.98f, 0.99f, 1f, 1f));
+            var teamLabel = CreateLabel($"Team: {FormatTeamName(player?.Team ?? TeamResult.Unknown)}", 12, FontStyle.Bold, TextAnchor.MiddleLeft, new Color(0.84f, 0.90f, 0.97f, 0.92f));
+            teamLabel.style.marginTop = new StyleLength(new Length(4, LengthUnit.Pixel));
+            var summaryLabel = CreateLabel("Public-server personal recap. Competitive MMR presentation is intentionally hidden.", 11, FontStyle.Normal, TextAnchor.MiddleLeft, new Color(0.78f, 0.85f, 0.93f, 0.84f));
+            summaryLabel.style.marginTop = new StyleLength(new Length(8, LengthUnit.Pixel));
+
+            card.Add(nameLabel);
+            card.Add(teamLabel);
+            card.Add(summaryLabel);
+            return card;
+        }
+
+        private static VisualElement CreatePublicStatRow(MatchResultPlayerMessage player)
+        {
+            var row = new VisualElement();
+            row.style.display = DisplayStyle.Flex;
+            row.style.flexDirection = FlexDirection.Row;
+            row.style.flexWrap = Wrap.Wrap;
+            row.style.alignItems = Align.Center;
+
+            row.Add(CreateMetricBlock("GOALS", player?.Goals ?? 0, new Color(0.98f, 0.82f, 0.48f, 1f)));
+            row.Add(CreateMetricBlock("ASSISTS", player?.Assists ?? 0, new Color(0.62f, 0.88f, 1f, 1f)));
+            row.Add(CreateMetricBlock("SHOTS", player?.Shots ?? 0, new Color(0.72f, 0.83f, 1f, 1f)));
+            row.Add(CreateMetricBlock("SAVES", player?.Saves ?? 0, new Color(0.62f, 1f, 0.82f, 1f)));
+            return row;
         }
 
         private static VisualElement CreateMetricBlock(string label, int value, Color accent)

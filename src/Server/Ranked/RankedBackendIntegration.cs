@@ -373,7 +373,8 @@ namespace schrader.Server
                     return new DiscordOnboardingStateMessage
                     {
                         IsResolved = true,
-                        IsLinked = true
+                        IsLinked = true,
+                        IsPublicServer = true
                     };
                 }
 
@@ -400,7 +401,8 @@ namespace schrader.Server
                 return new DiscordOnboardingStateMessage
                 {
                     IsResolved = isResolved,
-                    IsLinked = isLinked
+                    IsLinked = isLinked,
+                    IsPublicServer = false
                 };
             }
             catch
@@ -642,14 +644,25 @@ namespace schrader.Server
             }
 
             RankedOverlayNetwork.PublishScoreboardBadgesToClient(clientId, GetScoreboardBadgeStateForClient(clientId));
-            if (TryGetBackendPlayerState(steamId, out var cachedState, out _, out _)
+            if (IsPublicServerMode(GetBackendConfig()))
+            {
+                RankedOverlayNetwork.PublishDiscordOnboardingStateToClient(clientId, new DiscordOnboardingStateMessage
+                {
+                    IsResolved = true,
+                    IsLinked = true,
+                    IsPublicServer = true
+                });
+                Debug.Log($"[{Constants.MOD_NAME}] [BACKEND] Backend bootstrap skipped onboarding because serverMode={PublicServerMode}. clientId={clientId} steamId={steamId}");
+            }
+            else if (TryGetBackendPlayerState(steamId, out var cachedState, out _, out _)
                 && cachedState != null
                 && (cachedState.IsDiscordLinked || !string.IsNullOrWhiteSpace(cachedState.DiscordId)))
             {
                 RankedOverlayNetwork.PublishDiscordOnboardingStateToClient(clientId, new DiscordOnboardingStateMessage
                 {
                     IsResolved = true,
-                    IsLinked = true
+                    IsLinked = true,
+                    IsPublicServer = false
                 });
                 Debug.Log($"[{Constants.MOD_NAME}] [BACKEND] Backend bootstrap skipped onboarding because cached backend state is already linked. clientId={clientId} steamId={steamId}");
             }
@@ -2082,10 +2095,10 @@ namespace schrader.Server
             config.ModerationCacheSeconds = GetEnvironmentOverrideInt(BackendModerationCacheSecondsEnvVar, config.ModerationCacheSeconds);
             config.BadgeCacheSeconds = GetEnvironmentOverrideInt(BackendBadgeCacheSecondsEnvVar, config.BadgeCacheSeconds);
 
-            var runtimeResolved = TryResolveAuthoritativeServerMode(out var rawRuntimeServerMode, out var normalizedRuntimeServerMode, out var runtimeResolutionMessage);
+            var runtimeResolved = TryResolveAuthoritativeServerMode(out var rawRuntimeServerMode, out var normalizedRuntimeServerMode, out var runtimeSourceWinner, out var runtimeResolutionMessage);
             config.ServerMode = runtimeResolved ? normalizedRuntimeServerMode : CompetitiveServerMode;
 
-            var sourceWinner = runtimeResolved ? "serverConfiguration" : "fallback-competitive";
+            var sourceWinner = runtimeResolved ? (runtimeSourceWinner ?? "serverConfiguration") : "fallback-competitive";
             var contradictionParts = new List<string>();
 
             if (backendFileDeclaredServerMode
@@ -2525,31 +2538,48 @@ namespace schrader.Server
             }
         }
 
-        private static bool TryResolveAuthoritativeServerMode(out string rawServerMode, out string normalizedServerMode, out string message)
+        private static bool TryResolveAuthoritativeServerMode(out string rawServerMode, out string normalizedServerMode, out string sourceWinner, out string message)
         {
             rawServerMode = null;
             normalizedServerMode = CompetitiveServerMode;
+            sourceWinner = null;
 
             if (!TryGetDedicatedServerConfigurationForBackend(out var configuration, out message))
             {
                 return false;
             }
 
-            if (!TryGetDynamicMemberValue(configuration, "serverMode", out var runtimeServerModeValue))
+            if (TryGetDynamicMemberValue(configuration, "serverMode", out var runtimeServerModeValue))
             {
-                message = "serverMode field missing on live ServerConfiguration.";
+                rawServerMode = ExtractDynamicMemberValueToString(runtimeServerModeValue);
+                if (!TryNormalizeServerMode(rawServerMode, out normalizedServerMode))
+                {
+                    message = $"serverMode field on live ServerConfiguration is invalid ({DescribeDynamicValue(runtimeServerModeValue)}).";
+                    normalizedServerMode = CompetitiveServerMode;
+                    return false;
+                }
+
+                sourceWinner = "serverConfiguration.serverMode";
+                message = "Resolved serverMode from live ServerConfiguration.serverMode.";
+                return true;
+            }
+
+            if (!TryGetDynamicMemberValue(configuration, "isPublic", out var legacyIsPublicValue))
+            {
+                message = "serverMode field missing on live ServerConfiguration and legacy isPublic is unavailable.";
                 return false;
             }
 
-            rawServerMode = ExtractDynamicMemberValueToString(runtimeServerModeValue);
-            if (!TryNormalizeServerMode(rawServerMode, out normalizedServerMode))
+            rawServerMode = ExtractDynamicMemberValueToString(legacyIsPublicValue);
+            if (!TryConvertDynamicMemberToBoolean(legacyIsPublicValue, out var legacyIsPublic))
             {
-                message = $"serverMode field on live ServerConfiguration is invalid ({DescribeDynamicValue(runtimeServerModeValue)}).";
-                normalizedServerMode = CompetitiveServerMode;
+                message = $"serverMode field missing on live ServerConfiguration and legacy isPublic could not be parsed ({DescribeDynamicValue(legacyIsPublicValue)}).";
                 return false;
             }
 
-            message = "Resolved serverMode from live ServerConfiguration.";
+            normalizedServerMode = legacyIsPublic ? PublicServerMode : CompetitiveServerMode;
+            sourceWinner = "serverConfiguration.isPublic-legacy";
+            message = $"Resolved serverMode from legacy live ServerConfiguration.isPublic={legacyIsPublic}.";
             return true;
         }
 
@@ -2643,6 +2673,50 @@ namespace schrader.Server
 
             var stringValue = normalizedValue.ToString();
             return string.IsNullOrWhiteSpace(stringValue) ? null : stringValue.Trim();
+        }
+
+        private static bool TryConvertDynamicMemberToBoolean(object value, out bool parsed)
+        {
+            parsed = false;
+            var normalizedValue = UnwrapDynamicToken(value);
+            if (normalizedValue == null)
+            {
+                return false;
+            }
+
+            switch (normalizedValue)
+            {
+                case bool booleanValue:
+                    parsed = booleanValue;
+                    return true;
+                case int intValue:
+                    parsed = intValue != 0;
+                    return true;
+                case long longValue:
+                    parsed = longValue != 0;
+                    return true;
+                case uint uintValue:
+                    parsed = uintValue != 0;
+                    return true;
+                case ulong ulongValue:
+                    parsed = ulongValue != 0;
+                    return true;
+                case string stringValue:
+                    if (bool.TryParse(stringValue, out var parsedBoolean))
+                    {
+                        parsed = parsedBoolean;
+                        return true;
+                    }
+
+                    if (int.TryParse(stringValue, out var parsedInt))
+                    {
+                        parsed = parsedInt != 0;
+                        return true;
+                    }
+                    break;
+            }
+
+            return false;
         }
 
         private static string DescribeDynamicValue(object value)

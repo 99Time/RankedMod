@@ -16,6 +16,8 @@ namespace schrader
             public VisualElement Panel;
             public VisualElement Hero;
             public VisualElement LogoFrame;
+            public Label TitleLabel;
+            public Label SubtitleLabel;
             public VisualElement RulesSection;
             public VisualElement CommandsSection;
             public VisualElement ButtonRow;
@@ -107,10 +109,12 @@ namespace schrader
 
             var titleLabel = CreateLabel("Welcome to SpeedRankeds", 24, FontStyle.Bold, TextAnchor.MiddleCenter, new Color(0.98f, 0.99f, 1f, 1f));
             titleLabel.style.marginTop = new StyleLength(new Length(10, LengthUnit.Pixel));
+            view.TitleLabel = titleLabel;
 
             var subtitleLabel = CreateLabel("Learn the essentials, then choose Spectator, Red, or Blue.", 11, FontStyle.Normal, TextAnchor.MiddleCenter, new Color(0.80f, 0.88f, 0.95f, 0.90f));
             subtitleLabel.style.marginTop = new StyleLength(new Length(5, LengthUnit.Pixel));
             subtitleLabel.style.maxWidth = 460;
+            view.SubtitleLabel = subtitleLabel;
 
             hero.Add(logoFrame);
             hero.Add(titleLabel);
@@ -208,6 +212,28 @@ namespace schrader
             rootView.Root.Add(panel);
             view.Panel = panel;
             rootView.Welcome = view;
+        }
+
+        public static void ApplyServerMode(DraftUIRenderer.View rootView, bool isPublicServer)
+        {
+            if (rootView?.Welcome == null)
+            {
+                return;
+            }
+
+            if (rootView.Welcome.TitleLabel != null)
+            {
+                rootView.Welcome.TitleLabel.text = isPublicServer
+                    ? "Welcome to SpeedRankeds Public"
+                    : "Welcome to SpeedRankeds";
+            }
+
+            if (rootView.Welcome.SubtitleLabel != null)
+            {
+                rootView.Welcome.SubtitleLabel.text = isPublicServer
+                    ? "Jump in, choose Spectator, Red, or Blue, and play. Discord verification is not required on this server."
+                    : "Learn the essentials, then choose Spectator, Red, or Blue.";
+            }
         }
 
         public static void Show(DraftUIRenderer.View rootView)

@@ -42,6 +42,7 @@ namespace schrader.Server
 
         private static MatchResultMessage BuildMatchResultMessage(TeamResult winner)
         {
+            var usePublicPresentation = IsPublicServerMode(GetBackendConfig());
             var finalParticipants = ResolveFinalMatchResultParticipants();
 
             var scoreboardStats = CaptureScoreboardStats();
@@ -73,6 +74,7 @@ namespace schrader.Server
             {
                 IsVisible = true,
                 WinningTeam = winner,
+                UsePublicPresentation = usePublicPresentation,
                 Players = orderedPlayers
             };
         }

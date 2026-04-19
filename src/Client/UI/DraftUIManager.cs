@@ -82,6 +82,7 @@ namespace schrader
         private static MatchResultMessage cachedMatchResultState = MatchResultMessage.Hidden();
         private static bool postMatchDismissed;
         private static bool welcomePendingAcknowledgement;
+        private static bool publicServerModeActive;
         private static bool discordOnboardingStateResolved;
         private static bool discordOnboardingIsLinked;
         private static bool discordOnboardingDismissed;
@@ -301,6 +302,7 @@ namespace schrader
             }
 
             welcomePendingAcknowledgement = true;
+            publicServerModeActive = false;
             discordOnboardingStateResolved = false;
             discordOnboardingIsLinked = false;
             discordOnboardingDismissed = false;
@@ -356,6 +358,7 @@ namespace schrader
             lastDismissedPostMatchSignature = null;
             postMatchDismissed = false;
             welcomePendingAcknowledgement = false;
+            publicServerModeActive = false;
             discordOnboardingStateResolved = false;
             discordOnboardingIsLinked = false;
             discordOnboardingDismissed = false;
@@ -628,7 +631,7 @@ namespace schrader
                 localVoteAccepted = false;
                 localVoteRejected = false;
 
-                DraftUIPlugin.Log($"[CLIENT] Post-match payload received. Visible={currentMatchResultState.IsVisible} Winner={currentMatchResultState.WinningTeam} Players={(currentMatchResultState.Players?.Length ?? 0)}");
+                DraftUIPlugin.Log($"[CLIENT] Post-match payload received. Visible={currentMatchResultState.IsVisible} Winner={currentMatchResultState.WinningTeam} publicPresentation={currentMatchResultState.UsePublicPresentation} Players={(currentMatchResultState.Players?.Length ?? 0)}");
                 if (currentMatchResultState.IsVisible)
                 {
                     EnsureViewSetup();
@@ -650,6 +653,7 @@ namespace schrader
                 var message = RankedOverlayNetcode.ReadJson<DiscordOnboardingStateMessage>(ref reader) ?? DiscordOnboardingStateMessage.Unresolved();
                 var wasVerificationModalOpen = DiscordOnboardingUIRenderer.IsVerificationModalOpen(view);
                 var wasOnboardingVisible = DiscordOnboardingUIRenderer.IsOnboardingVisible(view);
+                publicServerModeActive = message.IsPublicServer;
                 discordOnboardingStateResolved = message.IsResolved;
                 discordOnboardingIsLinked = message.IsLinked;
                 if (discordOnboardingStateResolved)
@@ -666,8 +670,17 @@ namespace schrader
                     discordOnboardingDismissed = false;
                 }
 
-                DraftUIPlugin.Log($"[CLIENT] Discord onboarding state received. resolved={discordOnboardingStateResolved} linked={discordOnboardingIsLinked} currentUi={currentUiState}");
-                if (discordOnboardingIsLinked)
+                DraftUIPlugin.Log($"[CLIENT] Discord onboarding state received. resolved={discordOnboardingStateResolved} linked={discordOnboardingIsLinked} publicServer={publicServerModeActive} currentUi={currentUiState}");
+                if (publicServerModeActive)
+                {
+                    DraftUIPlugin.Log("[CLIENT] Public server onboarding branch activated. Skipping competitive verification UI and routing to Welcome.");
+                    if (ShouldAwaitWelcomeFlow() || currentUiState == OverlayUiState.DiscordOnboarding || wasOnboardingVisible || wasVerificationModalOpen)
+                    {
+                        ActivatePublicWelcomeFlow("Public server onboarding auto-closed into Welcome");
+                        return;
+                    }
+                }
+                else if (discordOnboardingIsLinked)
                 {
                     DraftUIPlugin.Log("[CLIENT][VERIFY] Verification success callback reached from backend linked=true update.");
                     DiscordOnboardingUIRenderer.HideOnboarding(view);
@@ -812,6 +825,7 @@ namespace schrader
                         EnforceGameplayUiPriority();
                         break;
                     case OverlayUiState.Welcome:
+                        WelcomeUIRenderer.ApplyServerMode(view, publicServerModeActive);
                         WelcomeUIRenderer.Show(view);
                         PrepareVisibleTransition(previousState == OverlayUiState.None);
                         view?.Container?.BringToFront();
@@ -1541,6 +1555,7 @@ namespace schrader
             var signature = string.Join("|",
                 currentMatchResultState.IsVisible,
                 currentMatchResultState.WinningTeam,
+                currentMatchResultState.UsePublicPresentation,
                 playerSignature);
 
             if (!forceRefresh && string.Equals(signature, lastPostMatchRenderSignature, StringComparison.Ordinal))
@@ -1549,7 +1564,7 @@ namespace schrader
             }
 
             lastPostMatchRenderSignature = signature;
-            DraftUIPlugin.Log($"[CLIENT] POST_MATCH render requested. Winner={currentMatchResultState.WinningTeam} Players={(currentMatchResultState.Players?.Length ?? 0)}");
+            DraftUIPlugin.Log($"[CLIENT] POST_MATCH render requested. Winner={currentMatchResultState.WinningTeam} publicPresentation={currentMatchResultState.UsePublicPresentation} Players={(currentMatchResultState.Players?.Length ?? 0)}");
             PostMatchUIRenderer.Render(view, currentMatchResultState);
         }
 
@@ -1987,6 +2002,7 @@ namespace schrader
         private static bool ShouldAwaitDiscordOnboardingDecision()
         {
             return ShouldAwaitWelcomeFlow()
+                && !publicServerModeActive
                 && !discordOnboardingStateResolved
                 && !discordOnboardingFallbackActive
                 && !discordOnboardingDismissed;
@@ -1995,6 +2011,7 @@ namespace schrader
         private static bool ShouldShowDiscordOnboarding()
         {
             return ShouldAwaitWelcomeFlow()
+                && !publicServerModeActive
                 && discordOnboardingStateResolved
                 && !discordOnboardingIsLinked
                 && !discordOnboardingDismissed;
@@ -2241,6 +2258,7 @@ namespace schrader
             return string.Join("|",
                 state.IsVisible,
                 state.WinningTeam,
+                state.UsePublicPresentation,
                 playerSignature);
         }
 
@@ -2254,6 +2272,27 @@ namespace schrader
             TryRequestLocalPlayerStateTransition("TeamSelect", "welcome-continue");
             ApplyUiState(OverlayUiState.TeamSelect, forceRefresh: true);
             RestoreSuppressedGameplayUi();
+            RefreshUi(forceRefresh: true);
+        }
+
+        private static void ActivatePublicWelcomeFlow(string actionLabel)
+        {
+            var wasOnboardingVisible = DiscordOnboardingUIRenderer.IsOnboardingVisible(view);
+            var wasVerificationModalOpen = DiscordOnboardingUIRenderer.IsVerificationModalOpen(view);
+            welcomePendingAcknowledgement = true;
+            welcomeRequestedAt = -1f;
+            hasLoggedWelcomeFallback = false;
+            discordOnboardingDismissed = true;
+            discordOnboardingFallbackActive = false;
+            discordOnboardingDecisionRequestedAt = -1f;
+            hasLoggedDiscordOnboardingFallback = false;
+            pendingDiscordLinkCommand = null;
+            pendingDiscordLinkQueuedAt = -1f;
+            hasLoggedPendingDiscordLinkWait = false;
+            DiscordOnboardingUIRenderer.HideOnboarding(view);
+            DraftUIPlugin.Log($"[CLIENT][PUBLIC] Welcome path executed. action={actionLabel} onboardingVisibleBefore={wasOnboardingVisible} verificationModalBefore={wasVerificationModalOpen} welcomePending={welcomePendingAcknowledgement}");
+            ApplyUiState(OverlayUiState.Welcome, forceRefresh: true);
+            EnforceGameplayUiPriority();
             RefreshUi(forceRefresh: true);
         }
 
@@ -3299,6 +3338,7 @@ namespace schrader
             cachedMatchResultState = MatchResultMessage.Hidden();
             postMatchDismissed = false;
             welcomePendingAcknowledgement = false;
+            publicServerModeActive = false;
             currentStateEnteredAt = -1f;
             welcomeRequestedAt = -1f;
             lastVisibleMatchResultReceivedAt = -1f;

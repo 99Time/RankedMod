@@ -6,6 +6,7 @@ namespace schrader
     {
         public bool IsVisible;
         public TeamResult WinningTeam;
+        public bool UsePublicPresentation;
         public MatchResultPlayerMessage[] Players;
 
         public static MatchResultMessage Hidden()
@@ -13,6 +14,7 @@ namespace schrader
             return new MatchResultMessage
             {
                 IsVisible = false,
+                UsePublicPresentation = false,
                 Players = Array.Empty<MatchResultPlayerMessage>()
             };
         }
