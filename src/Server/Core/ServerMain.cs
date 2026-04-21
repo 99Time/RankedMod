@@ -6,6 +6,7 @@ using System.Reflection;
 using Unity.Netcode;
 using Newtonsoft.Json;
 using System.Linq;
+using System.Globalization;
 
 namespace schrader
 {
@@ -18,7 +19,71 @@ namespace schrader
         private static bool serverInstanceRankedActive = true;
         private const float ManualPuckSpawnCooldownSeconds = 4.0f;
         private const int ManualPuckSpawnHardCap = 30;
+        private static readonly int TrainingOpenWorldIceLayer = LayerMask.NameToLayer("Ice");
+        private static readonly Vector3 TrainingOpenWorldAnchorPosition = Vector3.right * 200f;
+        private static readonly Vector3 TrainingOpenWorldFallbackSpawnPosition = TrainingOpenWorldAnchorPosition + Vector3.up * 5f;
+        private static readonly Quaternion TrainingOpenWorldSpawnRotation = Quaternion.Euler(0f, 180f, 0f);
+        private static readonly Vector3 TrainingOpenWorldFloorSize = new Vector3(128f, 2f, 128f);
+        private const float TrainingDebugTargetMatchThreshold = 0.5f;
+        private const float TrainingDebugPostMoveShiftThreshold = 0.25f;
+        private const float TrainingDebugLateShiftThreshold = 0.5f;
         private static readonly Dictionary<string, float> manualPuckSpawnTimes = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
+        private static readonly Dictionary<ulong, TrainingOpenWorldState> trainingOpenWorldStateByClient = new Dictionary<ulong, TrainingOpenWorldState>();
+        private static GameObject trainingOpenWorldFloorObject;
+        private static readonly FieldInfo HoverRaycastOffsetField = typeof(Hover).GetField("raycastOffset", BindingFlags.Instance | BindingFlags.NonPublic);
+        private static readonly FieldInfo HoverRaycastDistanceField = typeof(Hover).GetField("raycastDistance", BindingFlags.Instance | BindingFlags.NonPublic);
+        private static readonly FieldInfo HoverRaycastLayerMaskField = typeof(Hover).GetField("raycastLayerMask", BindingFlags.Instance | BindingFlags.NonPublic);
+
+        private sealed class TrainingOpenWorldState
+        {
+            public Vector3 ReturnPosition;
+            public Quaternion ReturnRotation;
+            public bool IsActive;
+            public Vector3 OpenWorldPosition;
+            public Quaternion OpenWorldRotation;
+            public bool LastRespawnRedirectApplied;
+            public bool LastTeleportApplied;
+            public Vector3 LastRedirectPosition;
+            public Quaternion LastRedirectRotation;
+        }
+
+        private sealed class TrainingFloorSnapshot
+        {
+            public bool Exists;
+            public string Name;
+            public Vector3 Position;
+            public string ColliderType;
+            public bool HasCollider;
+            public bool IsTrigger;
+            public Vector3 ColliderBoundsSize;
+            public float ColliderTopY;
+            public float ColliderBottomY;
+            public int Layer;
+        }
+
+        private sealed class TrainingBodySnapshot
+        {
+            public ulong ClientId;
+            public string PlayerName;
+            public string BodyComponentName;
+            public bool HasBody;
+            public bool HasRigidbody;
+            public Vector3 TransformPosition;
+            public Quaternion TransformRotation;
+            public Vector3 RigidbodyPosition;
+            public Quaternion RigidbodyRotation;
+            public bool HasHover;
+            public bool IsGrounded;
+            public float HoverTargetDistance;
+            public Vector3 HoverRaycastOffset;
+            public Vector3 HoverRayOrigin;
+            public float HoverRaycastDistance;
+            public int HoverRaycastLayerMask;
+            public bool HoverRaycastHit;
+            public string HoverRaycastHitObjectName;
+            public int HoverRaycastHitLayer;
+            public float HoverRaycastHitDistance;
+        }
 
         [HarmonyPatch(typeof(UIChatController), "Event_Server_OnSynchronizeComplete")]
         public class UIChatControllerPatch
@@ -29,6 +94,7 @@ namespace schrader
                 ulong clientId = (ulong)message["clientId"];
 
                 Debug.Log($"[{Constants.MOD_NAME}] [JOIN][SERVER] Synchronize complete received for client {clientId}.");
+                ClearTrainingOpenWorldState(clientId, destroySharedFloorWhenUnused: true);
                 try
                 {
                     UIChat.Instance.Server_SendSystemChatMessage(
@@ -42,6 +108,113 @@ namespace schrader
                 try { Server.RankedSystem.HandleBackendPlayerSynchronized(clientId); } catch { }
                 try { RankedOverlayNetwork.ResyncClient(clientId); } catch { }
                 return false;
+            }
+        }
+
+        [HarmonyPatch(typeof(Player), "OnNetworkDespawn")]
+        public class PlayerOnNetworkDespawnPatch
+        {
+            [HarmonyPrefix]
+            public static void Prefix(Player __instance)
+            {
+                if (__instance == null)
+                {
+                    return;
+                }
+
+                ClearTrainingOpenWorldState(__instance.OwnerClientId, destroySharedFloorWhenUnused: true);
+            }
+        }
+
+        [HarmonyPatch(typeof(Player), "Server_RespawnCharacter")]
+        public class PlayerServerRespawnCharacterPatch
+        {
+            [HarmonyPrefix]
+            public static void Prefix(Player __instance, ref Vector3 position, ref Quaternion rotation)
+            {
+                if (!Server.RankedSystem.IsTrainingServerModeActive() || __instance == null || !NetworkManager.Singleton.IsServer)
+                {
+                    return;
+                }
+
+                if (!trainingOpenWorldStateByClient.TryGetValue(__instance.OwnerClientId, out var openWorldState) || openWorldState == null || !openWorldState.IsActive)
+                {
+                    return;
+                }
+
+                openWorldState.LastRespawnRedirectApplied = true;
+                openWorldState.LastRedirectPosition = openWorldState.OpenWorldPosition;
+                openWorldState.LastRedirectRotation = openWorldState.OpenWorldRotation;
+                position = openWorldState.OpenWorldPosition;
+                rotation = openWorldState.OpenWorldRotation;
+            }
+
+            [HarmonyPostfix]
+            public static void Postfix(Player __instance)
+            {
+                if (!Server.RankedSystem.IsTrainingServerModeActive() || __instance == null || !NetworkManager.Singleton.IsServer)
+                {
+                    return;
+                }
+
+                if (!trainingOpenWorldStateByClient.TryGetValue(__instance.OwnerClientId, out var openWorldState) || openWorldState == null || !openWorldState.IsActive)
+                {
+                    return;
+                }
+
+                openWorldState.LastTeleportApplied = true;
+                var playerBody = __instance.PlayerBody;
+                if (playerBody == null)
+                {
+                    return;
+                }
+
+                playerBody.Server_Teleport(openWorldState.OpenWorldPosition, openWorldState.OpenWorldRotation);
+            }
+        }
+
+        [HarmonyPatch(typeof(PlayerBodyV2), "FixedUpdate")]
+        public class PlayerBodyV2FixedUpdatePatch
+        {
+            private const float TrainingOpenWorldManualTeleportDistanceThreshold = 0.05f;
+            private const float TrainingOpenWorldManualTeleportRotationThreshold = 0.5f;
+
+            [HarmonyPrefix]
+            public static void Prefix(PlayerBodyV2 __instance)
+            {
+                if (!Server.RankedSystem.IsTrainingServerModeActive() || __instance == null || !NetworkManager.Singleton.IsServer)
+                {
+                    return;
+                }
+
+                var player = __instance.Player;
+                if (player == null)
+                {
+                    return;
+                }
+
+                if (!trainingOpenWorldStateByClient.TryGetValue(player.OwnerClientId, out var openWorldState) || openWorldState == null || !openWorldState.IsActive)
+                {
+                    return;
+                }
+
+                if (__instance.Rigidbody == null)
+                {
+                    return;
+                }
+
+                var transformPosition = __instance.transform.position;
+                var rigidbodyPosition = __instance.Rigidbody.position;
+                var transformRotation = __instance.transform.rotation;
+                var rigidbodyRotation = __instance.Rigidbody.rotation;
+
+                if (Vector3.Distance(transformPosition, rigidbodyPosition) < TrainingOpenWorldManualTeleportDistanceThreshold
+                    && Quaternion.Angle(transformRotation, rigidbodyRotation) < TrainingOpenWorldManualTeleportRotationThreshold)
+                {
+                    return;
+                }
+
+                __instance.Server_Teleport(transformPosition, transformRotation);
             }
         }
 
@@ -238,6 +411,31 @@ namespace schrader
                         return false;
                     }
 
+                    if (Server.RankedSystem.IsTrainingServerModeActive()
+                        && (trimmed.Equals("/openworld", StringComparison.OrdinalIgnoreCase)
+                            || trimmed.Equals("/return", StringComparison.OrdinalIgnoreCase)
+                            || trimmed.Equals("/tp", StringComparison.OrdinalIgnoreCase)
+                            || trimmed.StartsWith("/tp ", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        HandleTrainingOpenWorldCommand(player, clientId, trimmed);
+                        return false;
+                    }
+
+                    if (trimmed.Equals("/tp", StringComparison.OrdinalIgnoreCase)
+                        || trimmed.StartsWith("/tp ", StringComparison.OrdinalIgnoreCase))
+                    {
+                        SendSystemChatToClient(Server.ChatStyle.Message(Server.ChatStyle.AdminModule, "The /tp command is only available when serverMode=training.", Server.ChatTone.Warning), clientId);
+                        return false;
+                    }
+
+                    if (Server.RankedSystem.IsTrainingServerModeActive()
+                        && (trimmed.Equals("/training", StringComparison.OrdinalIgnoreCase)
+                            || trimmed.StartsWith("/training ", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        HandleTrainingCommand(player, clientId, trimmed);
+                        return false;
+                    }
+
                     if (TryHandleBackendModerationCommand(player, clientId, trimmed))
                     {
                         return false;
@@ -369,6 +567,12 @@ namespace schrader
                                     if (!TryIsAdmin(player, clientId))
                                     {
                                         SendCommandHelpLine(clientId, Server.ChatStyle.Message(Server.ChatStyle.AdminModule, "You must be an admin to use this command.", Server.ChatTone.Error, 13));
+                                        return false;
+                                    }
+
+                                    if (Server.RankedSystem.IsTrainingServerModeActive())
+                                    {
+                                        SendSystemChatToClient(Server.ChatStyle.Message(Server.ChatStyle.RankedModule, "Ranked cannot be force-started while serverMode=training.", Server.ChatTone.Warning), clientId);
                                         return false;
                                     }
 
@@ -1123,6 +1327,7 @@ namespace schrader
                 }
 
                 harmony.UnpatchSelf();
+                try { ClearAllTrainingOpenWorldState(); } catch { }
                 try
                 {
                     if (updaterGo != null)
@@ -1133,7 +1338,6 @@ namespace schrader
                     }
                 }
                 catch { }
-
                 try { DraftStateBridge.Shutdown(); } catch { }
 
                 Debug.Log($"[{Constants.MOD_NAME}] Disabled");
@@ -1206,8 +1410,16 @@ namespace schrader
             SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/s", "Spawn a puck on the server. Blocked during matches, goals and replays."));
             SendCommandHelpLine(clientId, Server.ChatStyle.HelpHeading("General"));
             SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/commands", "Show this full command list."));
-            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/vr", "Start a ranked ready vote."));
-            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/vs", "Alias for /vr. Normal start is disabled here."));
+            if (Server.RankedSystem.IsTrainingServerModeActive())
+            {
+                SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/vr", "Disabled in training mode."));
+                SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/vs", "Disabled in training mode."));
+            }
+            else
+            {
+                SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/vr", "Start a ranked ready vote."));
+                SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/vs", "Alias for /vr. Normal start is disabled here."));
+            }
             SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/votesinglegoalie", "Start a shared-goalie vote if you are the only active goalie."));
             SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/y or /n", "Vote yes or no in ready checks, shared-goalie votes and forfeit votes."));
             SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/ff", "Start or vote on a forfeit for your team."));
@@ -1216,6 +1428,16 @@ namespace schrader
                 SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/link CODE", "Finish Discord verification using the code generated in Discord."));
             SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/host", "Open the dedicated SpeedHosting PUCK page in your browser."));
             SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/cs", "Despawn all pucks on the map."));
+
+            if (Server.RankedSystem.IsTrainingServerModeActive())
+            {
+                SendCommandHelpLine(clientId, Server.ChatStyle.HelpHeading("Training", "#78d8ff"));
+                SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/training", "Show the training command set and the client-side training asset workflow."));
+                SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/training puck", "Spawn a training puck at your blade or camera."));
+                SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/training clear", "Despawn all pucks on the map."));
+                SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/openworld or /return", "Respawn into or out of the training open-world anchor using a training-only respawn override."));
+                SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/traininghide <on|off|toggle|status>", "Client-local: hide or restore other player renderers during training."));
+            }
 
 
             
@@ -1239,8 +1461,6 @@ namespace schrader
             SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/unban <player|steamId|#number> [reason...]", "Clear a backend ban for a SteamID or live player."));
             SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/setnamecolor <player|steamId|#number> <color|rgb|#RRGGBB|reset>", "Persist a visible name color or RGB rainbow for a SteamID in UserData."));
             SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/setchatcolor <player|steamId|#number> <color|rgb|#RRGGBB|reset>", "Persist a chat body color or RGB rainbow for a SteamID in UserData."));
-
-
             SendCommandHelpLine(clientId, Server.ChatStyle.HelpHeading("Draft / Captains"));
             SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/draft", "Show the current draft status in chat."));
             SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/draftui", "Explain the automatic ranked overlay and text fallback."));
@@ -1302,6 +1522,602 @@ namespace schrader
             }
 
             return true;
+        }
+
+        private static void HandleTrainingCommand(object player, ulong clientId, string trimmed)
+        {
+            if (!Server.RankedSystem.IsTrainingServerModeActive())
+            {
+                SendSystemChatToClient(Server.ChatStyle.Message(Server.ChatStyle.AdminModule, "Training commands are only available when serverMode=training.", Server.ChatTone.Warning), clientId);
+                return;
+            }
+
+            var parts = (trimmed ?? string.Empty).Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            var subcommand = parts.Length >= 2 ? parts[1].ToLowerInvariant() : "help";
+
+            switch (subcommand)
+            {
+                case "help":
+                    SendTrainingCommandsOverview(player, clientId);
+                    return;
+                case "puck":
+                    HandleServerSpawnPuckCommand(player, clientId);
+                    return;
+                case "clear":
+                case "clearpucks":
+                    HandleServerDespawnPucksCommand(clientId);
+                    return;
+                default:
+                    SendSystemChatToClient(Server.ChatStyle.Usage("/training [help|puck|clear]"), clientId);
+                    return;
+            }
+        }
+
+        private static void SendTrainingCommandsOverview(object player, ulong clientId)
+        {
+            SendCommandHelpLine(clientId, "<size=15><b>Training Commands</b></size>");
+            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/training puck", "Spawn a puck at your blade or camera using the server-authoritative puck spawn path."));
+            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/training clear", "Despawn all pucks on the map."));
+            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/openworld or /return", "Respawn into or out of the training open-world anchor using a training-only respawn override."));
+            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/tp x y z [yaw]", "Training-only authoritative teleport for your current player body with debug telemetry."));
+            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/traininghide <on|off|toggle|status>", "Client-local command: hide or restore other player renderers during training."));
+            SendCommandHelpLine(clientId, "<size=12><color=#9dc4de>[training reset]</color> Stage 2 now redirects game respawns to the training anchor while open world is active. Client training visuals load locally from the deployed bundle when present.</size>");
+
+            if (!TryIsAdmin(player, clientId))
+            {
+                return;
+            }
+
+            SendCommandHelpLine(clientId, Server.ChatStyle.HelpHeading("Training Admin", "#ffcc66"));
+            SendCommandHelpLine(clientId, "<size=12><color=#ffcc66>[training admin]</color> Stage 2 keeps the player's normal claim intact and redirects character respawns to a fixed training anchor only while open world is active.</size>");
+        }
+
+        private static void HandleTrainingOpenWorldCommand(object player, ulong clientId, string trimmed)
+        {
+            if (!Server.RankedSystem.IsTrainingServerModeActive())
+            {
+                SendSystemChatToClient(Server.ChatStyle.Message(Server.ChatStyle.AdminModule, "Open-world commands are only available when serverMode=training.", Server.ChatTone.Warning), clientId);
+                return;
+            }
+
+            if (string.Equals(trimmed, "/openworld", StringComparison.OrdinalIgnoreCase))
+            {
+                ActivateTrainingOpenWorld(clientId);
+                return;
+            }
+
+            if (string.Equals(trimmed, "/return", StringComparison.OrdinalIgnoreCase))
+            {
+                ReturnFromTrainingOpenWorld(clientId);
+                return;
+            }
+
+            if (string.Equals(trimmed, "/tp", StringComparison.OrdinalIgnoreCase)
+                || trimmed.StartsWith("/tp ", StringComparison.OrdinalIgnoreCase))
+            {
+                HandleTrainingTeleportCommand(player, clientId, trimmed);
+                return;
+            }
+
+            SendSystemChatToClient(Server.ChatStyle.Usage("/openworld or /return or /tp x y z [yaw]"), clientId);
+        }
+
+        private static void ActivateTrainingOpenWorld(ulong clientId)
+        {
+            if (!TryGetTrainingPlayerForClient(clientId, out var player, out var playerBody))
+            {
+                SendSystemChatToClient(Server.ChatStyle.Message(Server.ChatStyle.AdminModule, "Your player body is not ready yet. Try /openworld again in a moment.", Server.ChatTone.Warning), clientId);
+                return;
+            }
+
+            if (trainingOpenWorldStateByClient.TryGetValue(clientId, out var existingState) && existingState != null && existingState.IsActive)
+            {
+                SendSystemChatToClient(Server.ChatStyle.Message(Server.ChatStyle.RankedModule, "You are already in the training open world. Use /return to go back.", Server.ChatTone.Info), clientId);
+                return;
+            }
+
+            EnsureTrainingOpenWorldFloor();
+
+            var openWorldPosition = ResolveTrainingOpenWorldSpawnPosition(playerBody);
+
+            var beforeSnapshot = CaptureTrainingBodySnapshot(player, playerBody);
+            var openWorldState = new TrainingOpenWorldState
+            {
+                ReturnPosition = playerBody.Rigidbody != null ? playerBody.Rigidbody.position : playerBody.transform.position,
+                ReturnRotation = playerBody.Rigidbody != null ? playerBody.Rigidbody.rotation : playerBody.transform.rotation,
+                OpenWorldPosition = openWorldPosition,
+                OpenWorldRotation = TrainingOpenWorldSpawnRotation,
+                IsActive = true
+            };
+
+            ResetTrainingOpenWorldDebugFlags(openWorldState);
+            trainingOpenWorldStateByClient[clientId] = openWorldState;
+
+            SendTrainingMovementTelemetryStart(
+                clientId,
+                "/openworld",
+                beforeSnapshot,
+                $"path=Server_RespawnCharacter request; redirectExpected=yes; teleportExpected=yes; anchor={FormatVector3(TrainingOpenWorldAnchorPosition)}",
+                openWorldState.OpenWorldPosition,
+                openWorldState.OpenWorldRotation);
+
+            ForceTrainingOpenWorldRespawn(player, openWorldState.OpenWorldPosition, openWorldState.OpenWorldRotation, "openworld-command");
+
+            SendTrainingDebugLine(
+                clientId,
+                $"/openworld touched=Server_RespawnCharacter; redirectApplied={FormatBool(openWorldState.LastRespawnRedirectApplied)}; teleportApplied={FormatBool(openWorldState.LastTeleportApplied)}; redirectTarget={FormatVector3(openWorldState.LastRedirectPosition)} rot={FormatQuaternion(openWorldState.LastRedirectRotation)}");
+            ScheduleTrainingMovementTelemetryPostAction(clientId, "/openworld", openWorldState.OpenWorldPosition, openWorldState.OpenWorldRotation);
+            SendSystemChatToClient(Server.ChatStyle.Message(Server.ChatStyle.RankedModule, "Respawned into the training open world anchor.", Server.ChatTone.Success), clientId);
+        }
+
+        private static void ReturnFromTrainingOpenWorld(ulong clientId)
+        {
+            if (!trainingOpenWorldStateByClient.TryGetValue(clientId, out var state) || state == null || !state.IsActive)
+            {
+                SendSystemChatToClient(Server.ChatStyle.Message(Server.ChatStyle.AdminModule, "You are not currently in the training open world.", Server.ChatTone.Warning), clientId);
+                return;
+            }
+
+            if (!TryGetTrainingPlayerForClient(clientId, out var player, out _))
+            {
+                ClearTrainingOpenWorldState(clientId, destroySharedFloorWhenUnused: true);
+                SendSystemChatToClient(Server.ChatStyle.Message(Server.ChatStyle.AdminModule, "Your player body is not ready yet. Try /return again in a moment.", Server.ChatTone.Warning), clientId);
+                return;
+            }
+
+            var beforeSnapshot = CaptureTrainingBodySnapshot(player, player.PlayerBody);
+            SendTrainingMovementTelemetryStart(
+                clientId,
+                "/return",
+                beforeSnapshot,
+                $"path=Server_RespawnCharacter direct; redirectExpected=no; teleportExpected=no; anchor=stored-return-snapshot",
+                state.ReturnPosition,
+                state.ReturnRotation);
+
+            trainingOpenWorldStateByClient.Remove(clientId);
+            player.Server_RespawnCharacter(state.ReturnPosition, state.ReturnRotation, ResolveTrainingOpenWorldRole(player, player.PlayerPosition));
+            SendTrainingDebugLine(clientId, "/return touched=Server_RespawnCharacter; redirectApplied=no; teleportApplied=no");
+            ScheduleTrainingMovementTelemetryPostAction(clientId, "/return", state.ReturnPosition, state.ReturnRotation);
+            ClearTrainingOpenWorldState(clientId, destroySharedFloorWhenUnused: true);
+            SendSystemChatToClient(Server.ChatStyle.Message(Server.ChatStyle.RankedModule, "Returned from the training open world.", Server.ChatTone.Success), clientId);
+        }
+
+        private static void HandleTrainingTeleportCommand(object player, ulong clientId, string trimmed)
+        {
+            if (!Server.RankedSystem.IsTrainingServerModeActive())
+            {
+                SendSystemChatToClient(Server.ChatStyle.Message(Server.ChatStyle.AdminModule, "The /tp command is only available when serverMode=training.", Server.ChatTone.Warning), clientId);
+                return;
+            }
+
+            if (!TryGetTrainingPlayerForClient(clientId, out _, out var playerBody) || playerBody == null)
+            {
+                SendSystemChatToClient(Server.ChatStyle.Message(Server.ChatStyle.AdminModule, "Your player body is not ready yet. Try /tp again in a moment.", Server.ChatTone.Warning), clientId);
+                return;
+            }
+
+            var parts = (trimmed ?? string.Empty).Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length != 4 && parts.Length != 5)
+            {
+                SendSystemChatToClient(Server.ChatStyle.Usage("/tp x y z [yaw]"), clientId);
+                return;
+            }
+
+            if (!TryParseTrainingFloat(parts[1], out var x)
+                || !TryParseTrainingFloat(parts[2], out var y)
+                || !TryParseTrainingFloat(parts[3], out var z))
+            {
+                SendSystemChatToClient(Server.ChatStyle.Message(Server.ChatStyle.AdminModule, "Invalid /tp coordinates. Use numeric values like /tp 200 5 0.", Server.ChatTone.Error), clientId);
+                return;
+            }
+
+            var targetPosition = new Vector3(x, y, z);
+            var targetRotation = playerBody.Rigidbody != null ? playerBody.Rigidbody.rotation : playerBody.transform.rotation;
+            if (parts.Length == 5)
+            {
+                if (!TryParseTrainingFloat(parts[4], out var yaw))
+                {
+                    SendSystemChatToClient(Server.ChatStyle.Message(Server.ChatStyle.AdminModule, "Invalid /tp yaw. Use a numeric angle like /tp 200 5 0 180.", Server.ChatTone.Error), clientId);
+                    return;
+                }
+
+                targetRotation = Quaternion.Euler(0f, yaw, 0f);
+            }
+
+            var beforeSnapshot = CaptureTrainingBodySnapshot(player as Player, playerBody);
+            SendTrainingMovementTelemetryStart(
+                clientId,
+                "/tp",
+                beforeSnapshot,
+                $"path=PlayerBodyV2.Server_Teleport direct; redirectExpected=no; teleportExpected=yes; input={FormatVector3(targetPosition)}",
+                targetPosition,
+                targetRotation);
+
+            playerBody.Server_Teleport(targetPosition, targetRotation);
+            SendTrainingDebugLine(clientId, "/tp touched=PlayerBodyV2.Server_Teleport; redirectApplied=no; teleportApplied=yes");
+            ScheduleTrainingMovementTelemetryPostAction(clientId, "/tp", targetPosition, targetRotation);
+            SendSystemChatToClient(Server.ChatStyle.Message(Server.ChatStyle.RankedModule, $"Training teleport requested to {FormatVector3(targetPosition)}.", Server.ChatTone.Success), clientId);
+        }
+
+        private static void EnsureTrainingOpenWorldFloor()
+        {
+            if (trainingOpenWorldFloorObject != null)
+            {
+                return;
+            }
+
+            var floorObject = new GameObject($"{Constants.MOD_NAME}.TrainingOpenWorldFloor");
+            floorObject.transform.position = new Vector3(
+                TrainingOpenWorldAnchorPosition.x,
+                -(TrainingOpenWorldFloorSize.y * 0.5f),
+                TrainingOpenWorldAnchorPosition.z);
+
+            var collider = floorObject.AddComponent<BoxCollider>();
+            collider.size = TrainingOpenWorldFloorSize;
+            collider.isTrigger = false;
+
+            if (TrainingOpenWorldIceLayer >= 0)
+            {
+                floorObject.layer = TrainingOpenWorldIceLayer;
+            }
+
+            trainingOpenWorldFloorObject = floorObject;
+        }
+
+        private static void ClearTrainingOpenWorldState(ulong clientId, bool destroySharedFloorWhenUnused)
+        {
+            trainingOpenWorldStateByClient.Remove(clientId);
+
+            if (!destroySharedFloorWhenUnused || trainingOpenWorldStateByClient.Count > 0)
+            {
+                return;
+            }
+
+            if (trainingOpenWorldFloorObject != null)
+            {
+                UnityEngine.Object.Destroy(trainingOpenWorldFloorObject);
+                trainingOpenWorldFloorObject = null;
+            }
+        }
+
+        private static Vector3 ResolveTrainingOpenWorldSpawnPosition(PlayerBodyV2 playerBody)
+        {
+            var floorSnapshot = CaptureTrainingFloorSnapshot();
+            if (floorSnapshot == null || !floorSnapshot.Exists || !floorSnapshot.HasCollider)
+            {
+                return TrainingOpenWorldFallbackSpawnPosition;
+            }
+
+            var targetY = TrainingOpenWorldFallbackSpawnPosition.y;
+            if (playerBody != null && TryGetHoverRaycastDebug(playerBody, out var raycastOffset, out var raycastDistance, out _, out var hoverTargetDistance, out _, out _, out _))
+            {
+                var preferredGroundDistance = hoverTargetDistance > 0f
+                    ? Mathf.Min(hoverTargetDistance, Mathf.Max(0.05f, raycastDistance - 0.05f))
+                    : 1f;
+                targetY = floorSnapshot.ColliderTopY + preferredGroundDistance - raycastOffset.y;
+                targetY = Mathf.Max(floorSnapshot.ColliderTopY + 0.01f, targetY);
+            }
+
+            return new Vector3(TrainingOpenWorldAnchorPosition.x, targetY, TrainingOpenWorldAnchorPosition.z);
+        }
+
+        private static void ForceTrainingOpenWorldRespawn(Player player, Vector3 targetPosition, Quaternion targetRotation, string reason)
+        {
+            if (player == null)
+            {
+                return;
+            }
+
+            try
+            {
+                player.Server_RespawnCharacter(targetPosition, targetRotation, ResolveTrainingOpenWorldRole(player, player.PlayerPosition));
+                Debug.Log($"[{Constants.MOD_NAME}] [TRAINING][OPENWORLD] Forced respawn to {targetPosition} for client {player.OwnerClientId}. reason={reason}");
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[{Constants.MOD_NAME}] [TRAINING][OPENWORLD] Failed to force respawn for client {player.OwnerClientId}. reason={reason} error={ex.Message}");
+            }
+        }
+
+        private static void ResetTrainingOpenWorldDebugFlags(TrainingOpenWorldState state)
+        {
+            if (state == null)
+            {
+                return;
+            }
+
+            state.LastRespawnRedirectApplied = false;
+            state.LastTeleportApplied = false;
+            state.LastRedirectPosition = Vector3.zero;
+            state.LastRedirectRotation = Quaternion.identity;
+        }
+
+        private static void SendTrainingMovementTelemetryStart(ulong clientId, string actionName, TrainingBodySnapshot snapshot, string pathSummary, Vector3 targetPosition, Quaternion targetRotation)
+        {
+            if (!Server.RankedSystem.IsTrainingServerModeActive())
+            {
+                return;
+            }
+
+            var floorSnapshot = CaptureTrainingFloorSnapshot();
+
+            SendTrainingDebugLine(clientId, $"{actionName} clientId={clientId} player={snapshot?.PlayerName ?? "n/a"} body={snapshot?.BodyComponentName ?? "null"} rb={FormatBool(snapshot != null && snapshot.HasRigidbody)}");
+            SendTrainingDebugLine(clientId, $"{actionName} floor {FormatTrainingFloorSnapshot(floorSnapshot, snapshot)}");
+
+            if (snapshot == null || !snapshot.HasBody)
+            {
+                SendTrainingDebugLine(clientId, $"{actionName} old body snapshot unavailable");
+            }
+            else
+            {
+                SendTrainingDebugLine(clientId, $"{actionName} old tfPos={FormatVector3(snapshot.TransformPosition)} rbPos={FormatSnapshotPosition(snapshot)} drift={FormatDistance(GetSnapshotDriftDistance(snapshot))}");
+                SendTrainingDebugLine(clientId, $"{actionName} old tfRot={FormatQuaternion(snapshot.TransformRotation)} rbRot={FormatSnapshotRotation(snapshot)}");
+                SendTrainingDebugLine(clientId, $"{actionName} old grounded={FormatBool(snapshot.IsGrounded)} hover={FormatTrainingHoverSnapshot(snapshot)}");
+            }
+
+            SendTrainingDebugLine(clientId, $"{actionName} {pathSummary}");
+            SendTrainingDebugLine(clientId, $"{actionName} target tfPos={FormatVector3(targetPosition)} rbPos={FormatVector3(targetPosition)} rot={FormatQuaternion(targetRotation)}");
+        }
+
+        private static void ScheduleTrainingMovementTelemetryPostAction(ulong clientId, string actionName, Vector3 targetPosition, Quaternion targetRotation)
+        {
+            if (!Server.RankedSystem.IsTrainingServerModeActive())
+            {
+                return;
+            }
+
+            ScheduleUpdaterAction(0.15f, () =>
+            {
+                var earlySnapshot = CaptureTrainingBodySnapshot(clientId);
+                ScheduleUpdaterAction(0.45f, () => SendTrainingMovementTelemetryFinal(clientId, actionName, targetPosition, targetRotation, earlySnapshot));
+                ScheduleUpdaterAction(1.25f, () => SendTrainingMovementTelemetryLate(clientId, actionName, targetPosition));
+            });
+        }
+
+        private static void SendTrainingMovementTelemetryFinal(ulong clientId, string actionName, Vector3 targetPosition, Quaternion targetRotation, TrainingBodySnapshot earlySnapshot)
+        {
+            if (!Server.RankedSystem.IsTrainingServerModeActive())
+            {
+                return;
+            }
+
+            var finalSnapshot = CaptureTrainingBodySnapshot(clientId);
+            if (finalSnapshot == null || !finalSnapshot.HasBody)
+            {
+                SendTrainingDebugLine(clientId, $"{actionName} final body snapshot unavailable");
+                return;
+            }
+
+            var tfDistance = Vector3.Distance(finalSnapshot.TransformPosition, targetPosition);
+            var rbDistance = finalSnapshot.HasRigidbody ? Vector3.Distance(finalSnapshot.RigidbodyPosition, targetPosition) : tfDistance;
+            var transformMatch = tfDistance <= TrainingDebugTargetMatchThreshold;
+            var rigidbodyMatch = rbDistance <= TrainingDebugTargetMatchThreshold;
+            var shiftAfterMove = GetMovementDelta(earlySnapshot, finalSnapshot);
+            var overwriteDetected = shiftAfterMove > TrainingDebugPostMoveShiftThreshold;
+
+            SendTrainingDebugLine(clientId, $"{actionName} final tfPos={FormatVector3(finalSnapshot.TransformPosition)} rbPos={FormatSnapshotPosition(finalSnapshot)} tfRot={FormatQuaternion(finalSnapshot.TransformRotation)} rbRot={FormatSnapshotRotation(finalSnapshot)}");
+            SendTrainingDebugLine(clientId, $"{actionName} final grounded={FormatBool(finalSnapshot.IsGrounded)} hover={FormatTrainingHoverSnapshot(finalSnapshot)}");
+            SendTrainingDebugLine(clientId, $"{actionName} match tf={FormatBool(transformMatch)}({FormatDistance(tfDistance)}) rb={FormatBool(rigidbodyMatch)}({FormatDistance(rbDistance)}) drift={FormatDistance(GetSnapshotDriftDistance(finalSnapshot))} shiftAfterMove={FormatDistance(shiftAfterMove)} overwrite={FormatBool(overwriteDetected)} targetRot={FormatQuaternion(targetRotation)}");
+        }
+
+        private static void SendTrainingMovementTelemetryLate(ulong clientId, string actionName, Vector3 targetPosition)
+        {
+            if (!Server.RankedSystem.IsTrainingServerModeActive())
+            {
+                return;
+            }
+
+            var lateSnapshot = CaptureTrainingBodySnapshot(clientId);
+            if (lateSnapshot == null || !lateSnapshot.HasBody)
+            {
+                SendTrainingDebugLine(clientId, $"{actionName} late body snapshot unavailable");
+                return;
+            }
+
+            var lateDistance = lateSnapshot.HasRigidbody ? Vector3.Distance(lateSnapshot.RigidbodyPosition, targetPosition) : Vector3.Distance(lateSnapshot.TransformPosition, targetPosition);
+            var lateOverwriteDetected = lateDistance > TrainingDebugLateShiftThreshold;
+            SendTrainingDebugLine(clientId, $"{actionName} late tfPos={FormatVector3(lateSnapshot.TransformPosition)} rbPos={FormatSnapshotPosition(lateSnapshot)} grounded={FormatBool(lateSnapshot.IsGrounded)} lateDistance={FormatDistance(lateDistance)} lateOverwrite={FormatBool(lateOverwriteDetected)} hover={FormatTrainingHoverSnapshot(lateSnapshot)}");
+        }
+
+        private static TrainingBodySnapshot CaptureTrainingBodySnapshot(ulong clientId)
+        {
+            var player = TryResolveTrainingPlayer(clientId);
+            if (player == null)
+            {
+                return null;
+            }
+
+            return CaptureTrainingBodySnapshot(player, player.PlayerBody);
+        }
+
+        private static TrainingBodySnapshot CaptureTrainingBodySnapshot(Player player, PlayerBodyV2 playerBody)
+        {
+            if (player == null)
+            {
+                return null;
+            }
+
+            var snapshot = new TrainingBodySnapshot
+            {
+                ClientId = player.OwnerClientId,
+                PlayerName = player.Username.Value.ToString(),
+                HasBody = playerBody != null,
+                BodyComponentName = playerBody != null ? playerBody.GetType().Name : "null",
+                HasRigidbody = playerBody != null && playerBody.Rigidbody != null
+            };
+
+            if (playerBody != null)
+            {
+                snapshot.TransformPosition = playerBody.transform.position;
+                snapshot.TransformRotation = playerBody.transform.rotation;
+                if (playerBody.Rigidbody != null)
+                {
+                    snapshot.RigidbodyPosition = playerBody.Rigidbody.position;
+                    snapshot.RigidbodyRotation = playerBody.Rigidbody.rotation;
+                }
+
+                snapshot.HasHover = playerBody.Hover != null;
+                if (snapshot.HasHover)
+                {
+                    snapshot.IsGrounded = playerBody.Hover.IsGrounded;
+                }
+
+                if (TryGetHoverRaycastDebug(playerBody, out var raycastOffset, out var raycastDistance, out var raycastLayerMask, out var hoverTargetDistance, out var raycastOrigin, out var raycastHit, out var raycastHitInfo))
+                {
+                    snapshot.HoverTargetDistance = hoverTargetDistance;
+                    snapshot.HoverRaycastOffset = raycastOffset;
+                    snapshot.HoverRayOrigin = raycastOrigin;
+                    snapshot.HoverRaycastDistance = raycastDistance;
+                    snapshot.HoverRaycastLayerMask = raycastLayerMask.value;
+                    snapshot.HoverRaycastHit = raycastHit;
+                    if (raycastHit)
+                    {
+                        snapshot.HoverRaycastHitDistance = raycastHitInfo.distance;
+                        snapshot.HoverRaycastHitObjectName = raycastHitInfo.collider != null ? raycastHitInfo.collider.gameObject.name : string.Empty;
+                        snapshot.HoverRaycastHitLayer = raycastHitInfo.collider != null ? raycastHitInfo.collider.gameObject.layer : -1;
+                    }
+                }
+            }
+
+            if (string.IsNullOrWhiteSpace(snapshot.PlayerName))
+            {
+                snapshot.PlayerName = "Player";
+            }
+
+            return snapshot;
+        }
+
+        private static TrainingFloorSnapshot CaptureTrainingFloorSnapshot()
+        {
+            if (trainingOpenWorldFloorObject == null)
+            {
+                return null;
+            }
+
+            var collider = trainingOpenWorldFloorObject.GetComponent<Collider>();
+            var snapshot = new TrainingFloorSnapshot
+            {
+                Exists = true,
+                Name = trainingOpenWorldFloorObject.name,
+                Position = trainingOpenWorldFloorObject.transform.position,
+                ColliderType = collider != null ? collider.GetType().Name : "none",
+                HasCollider = collider != null,
+                IsTrigger = collider != null && collider.isTrigger,
+                Layer = trainingOpenWorldFloorObject.layer
+            };
+
+            if (collider != null)
+            {
+                snapshot.ColliderBoundsSize = collider.bounds.size;
+                snapshot.ColliderTopY = collider.bounds.max.y;
+                snapshot.ColliderBottomY = collider.bounds.min.y;
+            }
+
+            return snapshot;
+        }
+
+        private static bool TryGetHoverRaycastDebug(PlayerBodyV2 playerBody, out Vector3 raycastOffset, out float raycastDistance, out LayerMask raycastLayerMask, out float hoverTargetDistance, out Vector3 raycastOrigin, out bool raycastHit, out RaycastHit raycastHitInfo)
+        {
+            raycastOffset = Vector3.zero;
+            raycastDistance = 0f;
+            raycastLayerMask = default(LayerMask);
+            hoverTargetDistance = 0f;
+            raycastOrigin = Vector3.zero;
+            raycastHit = false;
+            raycastHitInfo = default(RaycastHit);
+
+            var hover = playerBody != null ? playerBody.Hover : null;
+            if (hover == null)
+            {
+                return false;
+            }
+
+            hoverTargetDistance = hover.TargetDistance;
+
+            try
+            {
+                if (HoverRaycastOffsetField != null)
+                {
+                    raycastOffset = (Vector3)HoverRaycastOffsetField.GetValue(hover);
+                }
+
+                if (HoverRaycastDistanceField != null)
+                {
+                    raycastDistance = (float)HoverRaycastDistanceField.GetValue(hover);
+                }
+
+                if (HoverRaycastLayerMaskField != null)
+                {
+                    raycastLayerMask = (LayerMask)HoverRaycastLayerMaskField.GetValue(hover);
+                }
+            }
+            catch
+            {
+                return false;
+            }
+
+            if (raycastDistance <= 0f)
+            {
+                return true;
+            }
+
+            raycastOrigin = playerBody.transform.position + raycastOffset;
+            raycastHit = Physics.Raycast(raycastOrigin, Vector3.down, out raycastHitInfo, raycastDistance, raycastLayerMask);
+            return true;
+        }
+
+        private static Player TryResolveTrainingPlayer(ulong clientId)
+        {
+            try
+            {
+                var playerManager = PlayerManager.Instance;
+                return playerManager != null ? playerManager.GetPlayerByClientId(clientId) : null;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[{Constants.MOD_NAME}] Failed to resolve training player for client {clientId}: {ex.Message}");
+                return null;
+            }
+        }
+
+        private static void ClearAllTrainingOpenWorldState()
+        {
+            trainingOpenWorldStateByClient.Clear();
+            if (trainingOpenWorldFloorObject != null)
+            {
+                UnityEngine.Object.Destroy(trainingOpenWorldFloorObject);
+                trainingOpenWorldFloorObject = null;
+            }
+        }
+
+        private static bool TryGetTrainingPlayerForClient(ulong clientId, out Player player, out PlayerBodyV2 playerBody)
+        {
+            player = null;
+            playerBody = null;
+
+            try
+            {
+                player = TryResolveTrainingPlayer(clientId);
+                playerBody = player != null ? player.PlayerBody : null;
+                return player != null && playerBody != null;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[{Constants.MOD_NAME}] Failed to resolve training player for client {clientId}: {ex.Message}");
+                player = null;
+                playerBody = null;
+                return false;
+            }
+        }
+
+        private static PlayerRole ResolveTrainingOpenWorldRole(Player player, PlayerPosition playerPosition)
+        {
+            if (player != null && player.Role.Value != PlayerRole.None)
+            {
+                return player.Role.Value;
+            }
+
+            return playerPosition != null ? playerPosition.Role : PlayerRole.Attacker;
         }
 
         private static bool CanUseBackendModerationCommand(object player, ulong clientId)
@@ -1525,6 +2341,151 @@ namespace schrader
             SendCommandHelpLine(clientId, $"<size=12><color=#9dc4de>[ranked status]</color> {message}</size>");
         }
 
+        private static void SendTrainingDebugLine(ulong clientId, string message)
+        {
+            if (!Server.RankedSystem.IsTrainingServerModeActive() || string.IsNullOrWhiteSpace(message))
+            {
+                return;
+            }
+
+            try { Debug.Log($"[{Constants.MOD_NAME}] [TRAINING][DBG] clientId={clientId} {StripRichTextTags(message)}"); } catch { }
+            SendCommandHelpLine(clientId, $"<size=12><color=#78d8ff>[training dbg]</color> {message}</size>");
+        }
+
+        private static bool TryParseTrainingFloat(string value, out float result)
+        {
+            if (float.TryParse(value, NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.InvariantCulture, out result))
+            {
+                return true;
+            }
+
+            return float.TryParse(value, NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.CurrentCulture, out result);
+        }
+
+        private static string FormatVector3(Vector3 value) => $"({value.x:0.00},{value.y:0.00},{value.z:0.00})";
+
+        private static string FormatQuaternion(Quaternion value)
+        {
+            var euler = value.eulerAngles;
+            return $"({euler.x:0.0},{euler.y:0.0},{euler.z:0.0})";
+        }
+
+        private static string FormatSnapshotPosition(TrainingBodySnapshot snapshot)
+        {
+            return snapshot != null && snapshot.HasRigidbody ? FormatVector3(snapshot.RigidbodyPosition) : "n/a";
+        }
+
+        private static string FormatSnapshotRotation(TrainingBodySnapshot snapshot)
+        {
+            return snapshot != null && snapshot.HasRigidbody ? FormatQuaternion(snapshot.RigidbodyRotation) : "n/a";
+        }
+
+        private static string FormatTrainingFloorSnapshot(TrainingFloorSnapshot floorSnapshot, TrainingBodySnapshot bodySnapshot)
+        {
+            if (floorSnapshot == null || !floorSnapshot.Exists)
+            {
+                return "missing";
+            }
+
+            var maskMatchesFloor = bodySnapshot != null && bodySnapshot.HasHover && DoesLayerMaskContainLayer(bodySnapshot.HoverRaycastLayerMask, floorSnapshot.Layer);
+            return $"name={floorSnapshot.Name} pos={FormatVector3(floorSnapshot.Position)} collider={floorSnapshot.ColliderType} trigger={FormatBool(floorSnapshot.IsTrigger)} layer={FormatLayer(floorSnapshot.Layer)} maskHasFloor={FormatBool(maskMatchesFloor)} topY={FormatDistance(floorSnapshot.ColliderTopY)} size={FormatVector3(floorSnapshot.ColliderBoundsSize)}";
+        }
+
+        private static string FormatTrainingHoverSnapshot(TrainingBodySnapshot snapshot)
+        {
+            if (snapshot == null || !snapshot.HasHover)
+            {
+                return "n/a";
+            }
+
+            var hitText = snapshot.HoverRaycastHit
+                ? $"yes obj={snapshot.HoverRaycastHitObjectName ?? "?"} layer={FormatLayer(snapshot.HoverRaycastHitLayer)} dist={FormatDistance(snapshot.HoverRaycastHitDistance)}"
+                : "no";
+            return $"target={FormatDistance(snapshot.HoverTargetDistance)} rayOrigin={FormatVector3(snapshot.HoverRayOrigin)} rayOffset={FormatVector3(snapshot.HoverRaycastOffset)} rayDist={FormatDistance(snapshot.HoverRaycastDistance)} mask={DescribeLayerMask(snapshot.HoverRaycastLayerMask)} hit={hitText}";
+        }
+
+        private static string FormatLayer(int layer)
+        {
+            if (layer < 0)
+            {
+                return "n/a";
+            }
+
+            var layerName = LayerMask.LayerToName(layer);
+            return string.IsNullOrWhiteSpace(layerName) ? layer.ToString(CultureInfo.InvariantCulture) : $"{layer}({layerName})";
+        }
+
+        private static string DescribeLayerMask(int layerMaskValue)
+        {
+            if (layerMaskValue == 0)
+            {
+                return "0(none)";
+            }
+
+            var names = new List<string>();
+            for (var layer = 0; layer < 32; layer++)
+            {
+                if ((layerMaskValue & (1 << layer)) == 0)
+                {
+                    continue;
+                }
+
+                names.Add(FormatLayer(layer));
+            }
+
+            return names.Count == 0 ? layerMaskValue.ToString(CultureInfo.InvariantCulture) : string.Join(",", names);
+        }
+
+        private static bool DoesLayerMaskContainLayer(int layerMaskValue, int layer)
+        {
+            if (layer < 0 || layer >= 32)
+            {
+                return false;
+            }
+
+            return (layerMaskValue & (1 << layer)) != 0;
+        }
+
+        private static string FormatBool(bool value) => value ? "yes" : "no";
+
+        private static string FormatDistance(float value) => value.ToString("0.00", CultureInfo.InvariantCulture);
+
+        private static float GetSnapshotDriftDistance(TrainingBodySnapshot snapshot)
+        {
+            if (snapshot == null || !snapshot.HasRigidbody)
+            {
+                return 0f;
+            }
+
+            return Vector3.Distance(snapshot.TransformPosition, snapshot.RigidbodyPosition);
+        }
+
+        private static float GetMovementDelta(TrainingBodySnapshot before, TrainingBodySnapshot after)
+        {
+            if (before == null || after == null)
+            {
+                return 0f;
+            }
+
+            if (before.HasRigidbody && after.HasRigidbody)
+            {
+                return Vector3.Distance(before.RigidbodyPosition, after.RigidbodyPosition);
+            }
+
+            return Vector3.Distance(before.TransformPosition, after.TransformPosition);
+        }
+
+        private static void ScheduleUpdaterAction(float delaySeconds, Action action)
+        {
+            if (action == null)
+            {
+                return;
+            }
+
+            EnsureUpdater();
+            try { updaterInstance?.Schedule(delaySeconds, action); } catch { }
+        }
+
         private static Type FindTypeByName(params string[] names)
         {
             try { return Server.ReflectionUtils.FindTypeByName(names); } catch { return null; }
@@ -1558,8 +2519,46 @@ namespace schrader
 
         private class RankedSystemUpdater : MonoBehaviour
         {
+            private sealed class ScheduledAction
+            {
+                public float ExecuteAt;
+                public Action Callback;
+            }
+
+            private readonly List<ScheduledAction> scheduledActions = new List<ScheduledAction>();
+
+            public void Schedule(float delaySeconds, Action callback)
+            {
+                if (callback == null)
+                {
+                    return;
+                }
+
+                scheduledActions.Add(new ScheduledAction
+                {
+                    ExecuteAt = Time.unscaledTime + Mathf.Max(0f, delaySeconds),
+                    Callback = callback
+                });
+            }
+
             private void Update()
             {
+                if (scheduledActions.Count > 0)
+                {
+                    var now = Time.unscaledTime;
+                    for (var index = scheduledActions.Count - 1; index >= 0; index--)
+                    {
+                        var scheduledAction = scheduledActions[index];
+                        if (scheduledAction == null || scheduledAction.ExecuteAt > now)
+                        {
+                            continue;
+                        }
+
+                        scheduledActions.RemoveAt(index);
+                        try { scheduledAction.Callback?.Invoke(); } catch { }
+                    }
+                }
+
                 try { Server.RankedSystem.Update(); } catch { }
             }
         }

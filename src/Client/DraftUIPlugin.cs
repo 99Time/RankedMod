@@ -36,6 +36,7 @@ namespace schrader
 
                     DraftUIPlugin.Log("Patching methods...");
                     harmony.PatchAll();
+                    TrainingClientRuntime.Initialize();
                     DraftUIPlugin.Log("All patched! Patched methods:");
                     LogAllPatchedMethods();
 
@@ -72,6 +73,7 @@ namespace schrader
             {
                 DraftUIPlugin.Log("Disabling...");
                 harmony.UnpatchSelf();
+                TrainingClientRuntime.Shutdown();
                 DraftUIManager.Shutdown();
                 DraftUIPlugin.Log("Disabled! Goodbye!");
                 return true;

@@ -263,6 +263,7 @@ namespace schrader.Server
                     Id = resolvedId,
                     SteamId = liveSteamId,
                     Username = username,
+                    PlayerNumber = ResolveParticipantPlayerNumber(participant),
                     IsSharedGoalie = isSharedGoalie,
                     ExcludedFromMmr = excludedFromMmr,
                     Team = team,

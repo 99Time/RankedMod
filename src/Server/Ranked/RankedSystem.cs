@@ -1814,6 +1814,12 @@ namespace schrader.Server
             eligible = new List<RankedParticipant>();
             reason = "not enough players";
 
+            if (IsTrainingServerMode(GetBackendConfig()))
+            {
+                reason = "ranked start is disabled while serverMode=training";
+                return false;
+            }
+
             if (!controlledTestModeEnabled)
             {
                 return TryGetEligiblePlayers(out eligible, out reason);
@@ -2906,6 +2912,8 @@ namespace schrader.Server
                         var connectedClientCount = NetworkManager.Singleton?.ConnectedClientsIds?.Count ?? 0;
                         Debug.Log($"[{Constants.MOD_NAME}] [VOTE][DEBUG] Vote start command received. clientId={clientId} controlledTest={controlledTestModeEnabled} rankedActive={rankedActive} rankedVoteActive={rankedVoteActive} connectedClients={connectedClientCount}");
 
+                    if (IsTrainingServerMode(GetBackendConfig())) { SendSystemChatToClient(ChatStyle.Message(ChatStyle.RankedModule, "Ranked start is disabled while serverMode=training.", ChatTone.Warning), clientId); return; }
+
                     if (rankedActive) { SendSystemChatToClient(ChatStyle.Message(ChatStyle.RankedModule, "Ranked is already active.", ChatTone.Warning), clientId); return; }
                     if (singleGoalieVoteActive) { SendSystemChatToClient(ChatStyle.Message(ChatStyle.RankedModule, "Wait for the shared-goalie vote to finish first.", ChatTone.Warning), clientId); return; }
                     if (rankedVoteActive) { SendSystemChatToClient(ChatStyle.Message(ChatStyle.RankedModule, "A ready vote is already in progress.", ChatTone.Warning), clientId); return; }
@@ -2957,6 +2965,12 @@ namespace schrader.Server
         {
             try
             {
+                if (IsTrainingServerMode(GetBackendConfig()))
+                {
+                    Debug.Log($"[{Constants.MOD_NAME}] [TRAINING] Blocked ranked start because serverMode=training. forcedByAdmin={forcedByAdmin}");
+                    return false;
+                }
+
                 if (eligible == null || eligible.Count == 0) return false;
 
                 Debug.Log($"[{Constants.MOD_NAME}] [RANKED] StartRankedFromEligible invoked. path={(forcedByAdmin ? "admin" : "manual-vote")} eligibleCount={eligible.Count}");
@@ -9080,6 +9094,12 @@ namespace schrader.Server
         {
             try
             {
+                if (IsTrainingServerMode(GetBackendConfig()))
+                {
+                    SendSystemChatToAll(ChatStyle.Message(ChatStyle.RankedModule, "Ranked cannot be force-started while serverMode=training.", ChatTone.Warning));
+                    return;
+                }
+
                 if (!StartRankedFromEligible(participants, true))
                 {
                     SendSystemChatToAll(ChatStyle.Message(ChatStyle.RankedModule, "Admin start failed: could not initialize the captain draft.", ChatTone.Error));

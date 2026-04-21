@@ -18,6 +18,9 @@ namespace schrader.Server
     public static partial class RankedSystem
     {
         private const string BackendConfigFileName = "schrader_backend_config.json";
+        private const string DefaultServerConfigurationRelativePath = "./server_configuration.json";
+        private const string PuckServerConfigurationCommandLineArg = "--serverConfigurationPath";
+        private const string PuckServerConfigurationEnvVar = "PUCK_SERVER_CONFIGURATION";
         private const string BackendBaseUrlEnvVar = "SCHRADER_BACKEND_BASE_URL";
         private const string BackendApiKeyEnvVar = "SCHRADER_BACKEND_API_KEY";
         private const string BackendPlayerStatePathEnvVar = "SCHRADER_BACKEND_PLAYER_STATE_PATH";
@@ -43,6 +46,7 @@ namespace schrader.Server
         private const int DefaultBackendBadgeCacheSeconds = 300;
         private const string CompetitiveServerMode = "competitive";
         private const string PublicServerMode = "public";
+        private const string TrainingServerMode = "training";
         private static readonly TimeSpan BackendDiscordReminderInitialDelay = TimeSpan.Zero;
         private static readonly TimeSpan BackendDiscordReminderInterval = TimeSpan.FromMinutes(10);
         private static readonly TimeSpan BackendDiscordLinkConsistencyGrace = TimeSpan.FromSeconds(15);
@@ -368,13 +372,14 @@ namespace schrader.Server
             try
             {
                 var config = GetBackendConfig();
-                if (IsPublicServerMode(config))
+                if (IsOnboardingBypassedServerMode(config))
                 {
                     return new DiscordOnboardingStateMessage
                     {
                         IsResolved = true,
                         IsLinked = true,
-                        IsPublicServer = true
+                        IsPublicServer = IsPublicServerMode(config),
+                        IsTrainingServer = IsTrainingServerMode(config)
                     };
                 }
 
@@ -402,7 +407,8 @@ namespace schrader.Server
                 {
                     IsResolved = isResolved,
                     IsLinked = isLinked,
-                    IsPublicServer = false
+                    IsPublicServer = false,
+                    IsTrainingServer = false
                 };
             }
             catch
@@ -415,9 +421,10 @@ namespace schrader.Server
         {
             try
             {
-                if (IsPublicServerMode(GetBackendConfig()))
+                var config = GetBackendConfig();
+                if (IsOnboardingBypassedServerMode(config))
                 {
-                    Debug.Log($"[{Constants.MOD_NAME}] [BACKEND][VERIFY] Ignoring verification refusal because serverMode={PublicServerMode}. clientId={clientId} action={action ?? "unknown"}");
+                    Debug.Log($"[{Constants.MOD_NAME}] [BACKEND][VERIFY] Ignoring verification refusal because serverMode={config?.ServerMode ?? CompetitiveServerMode}. clientId={clientId} action={action ?? "unknown"}");
                     return;
                 }
 
@@ -644,15 +651,17 @@ namespace schrader.Server
             }
 
             RankedOverlayNetwork.PublishScoreboardBadgesToClient(clientId, GetScoreboardBadgeStateForClient(clientId));
-            if (IsPublicServerMode(GetBackendConfig()))
+            var config = GetBackendConfig();
+            if (IsOnboardingBypassedServerMode(config))
             {
                 RankedOverlayNetwork.PublishDiscordOnboardingStateToClient(clientId, new DiscordOnboardingStateMessage
                 {
                     IsResolved = true,
                     IsLinked = true,
-                    IsPublicServer = true
+                    IsPublicServer = IsPublicServerMode(config),
+                    IsTrainingServer = IsTrainingServerMode(config)
                 });
-                Debug.Log($"[{Constants.MOD_NAME}] [BACKEND] Backend bootstrap skipped onboarding because serverMode={PublicServerMode}. clientId={clientId} steamId={steamId}");
+                Debug.Log($"[{Constants.MOD_NAME}] [BACKEND] Backend bootstrap skipped onboarding because serverMode={config?.ServerMode ?? CompetitiveServerMode}. clientId={clientId} steamId={steamId}");
             }
             else if (TryGetBackendPlayerState(steamId, out var cachedState, out _, out _)
                 && cachedState != null
@@ -662,7 +671,8 @@ namespace schrader.Server
                 {
                     IsResolved = true,
                     IsLinked = true,
-                    IsPublicServer = false
+                    IsPublicServer = false,
+                    IsTrainingServer = false
                 });
                 Debug.Log($"[{Constants.MOD_NAME}] [BACKEND] Backend bootstrap skipped onboarding because cached backend state is already linked. clientId={clientId} steamId={steamId}");
             }
@@ -1834,11 +1844,11 @@ namespace schrader.Server
             isLinked = false;
             resolutionReason = "steamid-invalid";
 
-            if (IsPublicServerMode(GetBackendConfig()))
+            if (IsOnboardingBypassedServerMode(GetBackendConfig()))
             {
                 isResolved = true;
                 isLinked = true;
-                resolutionReason = "public-mode";
+                resolutionReason = "non-competitive-mode";
                 return;
             }
 
@@ -1897,7 +1907,7 @@ namespace schrader.Server
 
         private static bool IsMandatoryVerificationBlockedState(object state)
         {
-            if (IsPublicServerMode(GetBackendConfig()))
+            if (IsOnboardingBypassedServerMode(GetBackendConfig()))
             {
                 return false;
             }
@@ -1943,7 +1953,7 @@ namespace schrader.Server
         {
             try
             {
-                if (IsPublicServerMode(GetBackendConfig()))
+                if (IsOnboardingBypassedServerMode(GetBackendConfig()))
                 {
                     return false;
                 }
@@ -2133,6 +2143,11 @@ namespace schrader.Server
             return config != null && config.Enabled && IsCompetitiveServerMode(config) && !string.IsNullOrWhiteSpace(config.BaseUrl);
         }
 
+        public static bool IsTrainingServerModeActive()
+        {
+            return IsTrainingServerMode(GetBackendConfig());
+        }
+
         private static string NormalizeServerMode(string configuredMode)
         {
             if (TryNormalizeServerMode(configuredMode, out var normalizedMode))
@@ -2169,6 +2184,12 @@ namespace schrader.Server
                 return true;
             }
 
+            if (string.Equals(trimmedMode, TrainingServerMode, StringComparison.OrdinalIgnoreCase))
+            {
+                normalizedMode = TrainingServerMode;
+                return true;
+            }
+
             return false;
         }
 
@@ -2179,7 +2200,17 @@ namespace schrader.Server
 
         private static bool IsCompetitiveServerMode(BackendConfig config)
         {
-            return !IsPublicServerMode(config);
+            return string.Equals(config?.ServerMode, CompetitiveServerMode, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsTrainingServerMode(BackendConfig config)
+        {
+            return string.Equals(config?.ServerMode, TrainingServerMode, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsOnboardingBypassedServerMode(BackendConfig config)
+        {
+            return IsPublicServerMode(config) || IsTrainingServerMode(config);
         }
 
         private static string BuildConfiguredUrl(string baseUrl, string configuredPath, string steamId)
@@ -2544,8 +2575,19 @@ namespace schrader.Server
             normalizedServerMode = CompetitiveServerMode;
             sourceWinner = null;
 
+            if (TryResolveServerModeFromActiveServerConfigurationJson(out rawServerMode, out normalizedServerMode, out sourceWinner, out message, out var explicitServerModeMissingFromJson))
+            {
+                return true;
+            }
+
+            if (!explicitServerModeMissingFromJson)
+            {
+                return false;
+            }
+
             if (!TryGetDedicatedServerConfigurationForBackend(out var configuration, out message))
             {
+                message = $"Explicit serverMode missing in active server config JSON and {message}";
                 return false;
             }
 
@@ -2560,27 +2602,172 @@ namespace schrader.Server
                 }
 
                 sourceWinner = "serverConfiguration.serverMode";
-                message = "Resolved serverMode from live ServerConfiguration.serverMode.";
+                message = "Explicit serverMode was missing in active server config JSON. Resolved serverMode from live ServerConfiguration.serverMode.";
                 return true;
             }
 
             if (!TryGetDynamicMemberValue(configuration, "isPublic", out var legacyIsPublicValue))
             {
-                message = "serverMode field missing on live ServerConfiguration and legacy isPublic is unavailable.";
+                message = "Explicit serverMode missing in active server config JSON, live ServerConfiguration.serverMode unavailable, and legacy isPublic is unavailable.";
                 return false;
             }
 
             rawServerMode = ExtractDynamicMemberValueToString(legacyIsPublicValue);
             if (!TryConvertDynamicMemberToBoolean(legacyIsPublicValue, out var legacyIsPublic))
             {
-                message = $"serverMode field missing on live ServerConfiguration and legacy isPublic could not be parsed ({DescribeDynamicValue(legacyIsPublicValue)}).";
+                message = $"Explicit serverMode missing in active server config JSON, live ServerConfiguration.serverMode unavailable, and legacy isPublic could not be parsed ({DescribeDynamicValue(legacyIsPublicValue)}).";
                 return false;
             }
 
             normalizedServerMode = legacyIsPublic ? PublicServerMode : CompetitiveServerMode;
             sourceWinner = "serverConfiguration.isPublic-legacy";
-            message = $"Resolved serverMode from legacy live ServerConfiguration.isPublic={legacyIsPublic}.";
+            message = $"Explicit serverMode missing in active server config JSON and live ServerConfiguration.serverMode unavailable. Resolved serverMode from legacy live ServerConfiguration.isPublic={legacyIsPublic}.";
             return true;
+        }
+
+        private static bool TryResolveServerModeFromActiveServerConfigurationJson(out string rawServerMode, out string normalizedServerMode, out string sourceWinner, out string message, out bool explicitServerModeMissing)
+        {
+            rawServerMode = null;
+            normalizedServerMode = CompetitiveServerMode;
+            sourceWinner = null;
+            explicitServerModeMissing = false;
+
+            if (!TryReadActiveServerConfigurationJson(out var json, out var jsonSourceKind, out var jsonSourcePath, out message))
+            {
+                return false;
+            }
+
+            JObject jsonRoot;
+            try
+            {
+                jsonRoot = JObject.Parse(json);
+            }
+            catch (Exception ex)
+            {
+                message = $"Active server config JSON could not be parsed from {DescribeActiveServerConfigurationSource(jsonSourceKind, jsonSourcePath)}: {ex.Message}";
+                return false;
+            }
+
+            if (!TryGetDynamicMemberValue(jsonRoot, "serverMode", out var explicitServerModeValue))
+            {
+                explicitServerModeMissing = true;
+                message = $"Explicit serverMode is missing from active server config JSON ({DescribeActiveServerConfigurationSource(jsonSourceKind, jsonSourcePath)}).";
+                return false;
+            }
+
+            rawServerMode = ExtractDynamicMemberValueToString(explicitServerModeValue);
+            if (!TryNormalizeServerMode(rawServerMode, out normalizedServerMode))
+            {
+                message = $"Explicit serverMode in active server config JSON is invalid ({DescribeDynamicValue(explicitServerModeValue)}) from {DescribeActiveServerConfigurationSource(jsonSourceKind, jsonSourcePath)}.";
+                normalizedServerMode = CompetitiveServerMode;
+                return false;
+            }
+
+            sourceWinner = string.Equals(jsonSourceKind, "env", StringComparison.OrdinalIgnoreCase)
+                ? "serverConfigJson.env.serverMode"
+                : "serverConfigJson.file.serverMode";
+            message = $"Resolved serverMode from active server config JSON ({DescribeActiveServerConfigurationSource(jsonSourceKind, jsonSourcePath)}).";
+            return true;
+        }
+
+        private static bool TryReadActiveServerConfigurationJson(out string json, out string sourceKind, out string sourcePath, out string message)
+        {
+            json = null;
+            sourceKind = null;
+            sourcePath = null;
+
+            try
+            {
+                var environmentJson = Environment.GetEnvironmentVariable(PuckServerConfigurationEnvVar);
+                if (!string.IsNullOrWhiteSpace(environmentJson))
+                {
+                    json = environmentJson;
+                    sourceKind = "env";
+                    sourcePath = PuckServerConfigurationEnvVar;
+                    message = $"Read active server configuration JSON from environment variable {PuckServerConfigurationEnvVar}.";
+                    return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                message = $"Failed to read environment variable {PuckServerConfigurationEnvVar}: {ex.Message}";
+                return false;
+            }
+
+            if (!TryResolveActiveServerConfigurationPath(out sourcePath, out message))
+            {
+                return false;
+            }
+
+            try
+            {
+                if (!File.Exists(sourcePath))
+                {
+                    message = $"Active server configuration file was not found at {sourcePath}.";
+                    return false;
+                }
+
+                json = File.ReadAllText(sourcePath);
+                sourceKind = "file";
+                message = $"Read active server configuration JSON from file {sourcePath}.";
+                return true;
+            }
+            catch (Exception ex)
+            {
+                message = $"Failed to read active server configuration file {sourcePath}: {ex.Message}";
+                return false;
+            }
+        }
+
+        private static bool TryResolveActiveServerConfigurationPath(out string resolvedPath, out string message)
+        {
+            resolvedPath = null;
+
+            try
+            {
+                var configuredPath = DefaultServerConfigurationRelativePath;
+                var commandLineArgs = Environment.GetCommandLineArgs() ?? Array.Empty<string>();
+                for (var i = 0; i < commandLineArgs.Length; i++)
+                {
+                    if (!string.Equals(commandLineArgs[i], PuckServerConfigurationCommandLineArg, StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+
+                    if (i + 1 >= commandLineArgs.Length || string.IsNullOrWhiteSpace(commandLineArgs[i + 1]))
+                    {
+                        message = $"Command line argument {PuckServerConfigurationCommandLineArg} was provided without a path value.";
+                        return false;
+                    }
+
+                    configuredPath = commandLineArgs[i + 1];
+                    break;
+                }
+
+                resolvedPath = Uri.UnescapeDataString(new Uri(Path.GetFullPath(configuredPath)).AbsolutePath);
+                message = $"Resolved active server configuration path from {PuckServerConfigurationCommandLineArg}: {resolvedPath}";
+                return true;
+            }
+            catch (Exception ex)
+            {
+                message = $"Failed to resolve active server configuration path: {ex.Message}";
+                return false;
+            }
+        }
+
+        private static string DescribeActiveServerConfigurationSource(string sourceKind, string sourcePath)
+        {
+            if (string.Equals(sourceKind, "env", StringComparison.OrdinalIgnoreCase))
+            {
+                return $"env:{sourcePath ?? PuckServerConfigurationEnvVar}";
+            }
+
+            if (!string.IsNullOrWhiteSpace(sourcePath))
+            {
+                return sourcePath;
+            }
+
+            return sourceKind ?? "unknown-source";
         }
 
         private static bool TryGetDedicatedServerConfigurationForBackend(out object configuration, out string message)

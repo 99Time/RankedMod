@@ -5,6 +5,7 @@ namespace schrader
         public bool IsResolved { get; set; }
         public bool IsLinked { get; set; }
         public bool IsPublicServer { get; set; }
+        public bool IsTrainingServer { get; set; }
 
         public static DiscordOnboardingStateMessage Unresolved()
         {
@@ -12,7 +13,8 @@ namespace schrader
             {
                 IsResolved = false,
                 IsLinked = false,
-                IsPublicServer = false
+                IsPublicServer = false,
+                IsTrainingServer = false
             };
         }
     }

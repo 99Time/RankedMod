@@ -83,10 +83,14 @@ namespace schrader
         private static bool postMatchDismissed;
         private static bool welcomePendingAcknowledgement;
         private static bool publicServerModeActive;
+        private static bool trainingServerModeActive;
         private static bool discordOnboardingStateResolved;
         private static bool discordOnboardingIsLinked;
         private static bool discordOnboardingDismissed;
         private static bool discordOnboardingFallbackActive;
+        private static bool trainingHideOtherPlayersEnabled;
+        private static bool trainingVisibilityRefreshPending;
+        private static string lastTrainingVisibilitySignature;
         private static string pendingDiscordLinkCommand;
         private static float pendingDiscordLinkQueuedAt = -1f;
         private static bool hasLoggedPendingDiscordLinkWait;
@@ -303,10 +307,15 @@ namespace schrader
 
             welcomePendingAcknowledgement = true;
             publicServerModeActive = false;
+            trainingServerModeActive = false;
             discordOnboardingStateResolved = false;
             discordOnboardingIsLinked = false;
             discordOnboardingDismissed = false;
             discordOnboardingFallbackActive = false;
+            trainingHideOtherPlayersEnabled = false;
+            trainingVisibilityRefreshPending = true;
+            lastTrainingVisibilitySignature = null;
+            TrainingClientRuntime.SetTrainingServerMode(false);
             pendingDiscordLinkCommand = null;
             pendingDiscordLinkQueuedAt = -1f;
             hasLoggedPendingDiscordLinkWait = false;
@@ -359,10 +368,15 @@ namespace schrader
             postMatchDismissed = false;
             welcomePendingAcknowledgement = false;
             publicServerModeActive = false;
+            trainingServerModeActive = false;
             discordOnboardingStateResolved = false;
             discordOnboardingIsLinked = false;
             discordOnboardingDismissed = false;
             discordOnboardingFallbackActive = false;
+            trainingHideOtherPlayersEnabled = false;
+            trainingVisibilityRefreshPending = true;
+            lastTrainingVisibilitySignature = null;
+            TrainingClientRuntime.SetTrainingServerMode(false);
             pendingDiscordLinkCommand = null;
             pendingDiscordLinkQueuedAt = -1f;
             hasLoggedPendingDiscordLinkWait = false;
@@ -654,8 +668,12 @@ namespace schrader
                 var wasVerificationModalOpen = DiscordOnboardingUIRenderer.IsVerificationModalOpen(view);
                 var wasOnboardingVisible = DiscordOnboardingUIRenderer.IsOnboardingVisible(view);
                 publicServerModeActive = message.IsPublicServer;
+                trainingServerModeActive = message.IsTrainingServer;
+                TrainingClientRuntime.SetTrainingServerMode(trainingServerModeActive);
                 discordOnboardingStateResolved = message.IsResolved;
                 discordOnboardingIsLinked = message.IsLinked;
+                trainingVisibilityRefreshPending = true;
+                lastTrainingVisibilitySignature = null;
                 if (discordOnboardingStateResolved)
                 {
                     discordOnboardingFallbackActive = false;
@@ -670,13 +688,13 @@ namespace schrader
                     discordOnboardingDismissed = false;
                 }
 
-                DraftUIPlugin.Log($"[CLIENT] Discord onboarding state received. resolved={discordOnboardingStateResolved} linked={discordOnboardingIsLinked} publicServer={publicServerModeActive} currentUi={currentUiState}");
-                if (publicServerModeActive)
+                DraftUIPlugin.Log($"[CLIENT] Discord onboarding state received. resolved={discordOnboardingStateResolved} linked={discordOnboardingIsLinked} publicServer={publicServerModeActive} trainingServer={trainingServerModeActive} currentUi={currentUiState}");
+                if (IsOnboardingBypassedServerModeActive())
                 {
-                    DraftUIPlugin.Log("[CLIENT] Public server onboarding branch activated. Skipping competitive verification UI and routing to Welcome.");
+                    DraftUIPlugin.Log($"[CLIENT] Non-competitive onboarding branch activated. mode={(trainingServerModeActive ? "training" : "public")}. Skipping competitive verification UI and routing to Welcome.");
                     if (ShouldAwaitWelcomeFlow() || currentUiState == OverlayUiState.DiscordOnboarding || wasOnboardingVisible || wasVerificationModalOpen)
                     {
-                        ActivatePublicWelcomeFlow("Public server onboarding auto-closed into Welcome");
+                        ActivatePublicWelcomeFlow($"{(trainingServerModeActive ? "Training" : "Public")} server onboarding auto-closed into Welcome");
                         return;
                     }
                 }
@@ -737,6 +755,7 @@ namespace schrader
         {
             EnsureViewSetup();
             EnsureMessagingHandlers();
+            RefreshTrainingVisibilityIfNeeded();
             FlushPendingDiscordLinkCommand();
             SyncInputState();
             HandleApprovalKeyboardShortcuts();
@@ -825,7 +844,7 @@ namespace schrader
                         EnforceGameplayUiPriority();
                         break;
                     case OverlayUiState.Welcome:
-                        WelcomeUIRenderer.ApplyServerMode(view, publicServerModeActive);
+                        WelcomeUIRenderer.ApplyServerMode(view, publicServerModeActive, trainingServerModeActive);
                         WelcomeUIRenderer.Show(view);
                         PrepareVisibleTransition(previousState == OverlayUiState.None);
                         view?.Container?.BringToFront();
@@ -1541,6 +1560,7 @@ namespace schrader
                 .Select(player => string.Join("~",
                     player?.Id ?? string.Empty,
                     player?.Username ?? string.Empty,
+                    player?.PlayerNumber ?? 0,
                     player?.IsSharedGoalie ?? false,
                     player?.ExcludedFromMmr ?? false,
                     player?.Team ?? TeamResult.Unknown,
@@ -2002,7 +2022,7 @@ namespace schrader
         private static bool ShouldAwaitDiscordOnboardingDecision()
         {
             return ShouldAwaitWelcomeFlow()
-                && !publicServerModeActive
+                && !IsOnboardingBypassedServerModeActive()
                 && !discordOnboardingStateResolved
                 && !discordOnboardingFallbackActive
                 && !discordOnboardingDismissed;
@@ -2011,10 +2031,15 @@ namespace schrader
         private static bool ShouldShowDiscordOnboarding()
         {
             return ShouldAwaitWelcomeFlow()
-                && !publicServerModeActive
+                && !IsOnboardingBypassedServerModeActive()
                 && discordOnboardingStateResolved
                 && !discordOnboardingIsLinked
                 && !discordOnboardingDismissed;
+        }
+
+        private static bool IsOnboardingBypassedServerModeActive()
+        {
+            return publicServerModeActive || trainingServerModeActive;
         }
 
         private static bool ShouldAwaitWelcomeFlow()
@@ -2243,6 +2268,7 @@ namespace schrader
                 .Select(player => string.Join("~",
                     player?.Id ?? string.Empty,
                     player?.Username ?? string.Empty,
+                    player?.PlayerNumber ?? 0,
                     player?.IsSharedGoalie ?? false,
                     player?.ExcludedFromMmr ?? false,
                     player?.Team ?? TeamResult.Unknown,
@@ -2290,10 +2316,119 @@ namespace schrader
             pendingDiscordLinkQueuedAt = -1f;
             hasLoggedPendingDiscordLinkWait = false;
             DiscordOnboardingUIRenderer.HideOnboarding(view);
-            DraftUIPlugin.Log($"[CLIENT][PUBLIC] Welcome path executed. action={actionLabel} onboardingVisibleBefore={wasOnboardingVisible} verificationModalBefore={wasVerificationModalOpen} welcomePending={welcomePendingAcknowledgement}");
+            DraftUIPlugin.Log($"[CLIENT][MODE] Welcome path executed. action={actionLabel} onboardingVisibleBefore={wasOnboardingVisible} verificationModalBefore={wasVerificationModalOpen} welcomePending={welcomePendingAcknowledgement}");
             ApplyUiState(OverlayUiState.Welcome, forceRefresh: true);
             EnforceGameplayUiPriority();
             RefreshUi(forceRefresh: true);
+        }
+
+        private static void RefreshTrainingVisibilityIfNeeded()
+        {
+            var shouldHideOtherPlayers = trainingServerModeActive && trainingHideOtherPlayersEnabled;
+            var remotePlayerCount = 0;
+
+            try
+            {
+                foreach (var player in Resources.FindObjectsOfTypeAll<Player>())
+                {
+                    if (!player || !player.gameObject.scene.IsValid() || player.IsLocalPlayer)
+                    {
+                        continue;
+                    }
+
+                    remotePlayerCount++;
+                    foreach (var renderer in player.GetComponentsInChildren<Renderer>(true))
+                    {
+                        if (!renderer)
+                        {
+                            continue;
+                        }
+
+                        renderer.forceRenderingOff = shouldHideOtherPlayers;
+                    }
+                }
+
+                var signature = $"{shouldHideOtherPlayers}:{remotePlayerCount}";
+                if (!trainingVisibilityRefreshPending && string.Equals(lastTrainingVisibilitySignature, signature, StringComparison.Ordinal))
+                {
+                    return;
+                }
+
+                lastTrainingVisibilitySignature = signature;
+                trainingVisibilityRefreshPending = false;
+            }
+            catch (Exception ex)
+            {
+                DraftUIPlugin.LogError($"[CLIENT][TRAINING] Failed to refresh other-player visibility: {ex}");
+            }
+        }
+
+        private static void AddLocalTrainingChatMessage(string message)
+        {
+            try
+            {
+                var chat = UIChat.Instance;
+                if (!chat)
+                {
+                    return;
+                }
+
+                chat.AddChatMessage($"<color=#78d8ff>[Training]</color> {message}");
+            }
+            catch (Exception ex)
+            {
+                DraftUIPlugin.LogError($"[CLIENT][TRAINING] Failed to add local chat message: {ex}");
+            }
+        }
+
+        private static bool TryHandleLocalTrainingChatCommand(string message)
+        {
+            var trimmed = message?.Trim();
+            if (string.IsNullOrWhiteSpace(trimmed)
+                || !(trimmed.Equals("/traininghide", StringComparison.OrdinalIgnoreCase)
+                    || trimmed.StartsWith("/traininghide ", StringComparison.OrdinalIgnoreCase)))
+            {
+                return false;
+            }
+
+            if (!trainingServerModeActive)
+            {
+                return false;
+            }
+
+            var parts = trimmed.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            var action = parts.Length >= 2 ? parts[1].ToLowerInvariant() : "toggle";
+            switch (action)
+            {
+                case "on":
+                    trainingHideOtherPlayersEnabled = true;
+                    trainingVisibilityRefreshPending = true;
+                    lastTrainingVisibilitySignature = null;
+                    AddLocalTrainingChatMessage("Other player renderers hidden on this client.");
+                    return true;
+                case "off":
+                    trainingHideOtherPlayersEnabled = false;
+                    trainingVisibilityRefreshPending = true;
+                    lastTrainingVisibilitySignature = null;
+                    AddLocalTrainingChatMessage("Other player renderers restored on this client.");
+                    return true;
+                case "toggle":
+                    trainingHideOtherPlayersEnabled = !trainingHideOtherPlayersEnabled;
+                    trainingVisibilityRefreshPending = true;
+                    lastTrainingVisibilitySignature = null;
+                    AddLocalTrainingChatMessage(trainingHideOtherPlayersEnabled
+                        ? "Other player renderers hidden on this client."
+                        : "Other player renderers restored on this client.");
+                    return true;
+                case "status":
+                    AddLocalTrainingChatMessage(trainingHideOtherPlayersEnabled
+                        ? "Other player renderers are currently hidden on this client."
+                        : "Other player renderers are currently visible on this client.");
+                    return true;
+                default:
+                    AddLocalTrainingChatMessage("Usage: /traininghide <on|off|toggle|status>");
+                    return true;
+            }
         }
 
         private static void CompleteDiscordVerificationFlow(string actionLabel)
@@ -3053,9 +3188,26 @@ namespace schrader
                     }
                 }
 
+                trainingVisibilityRefreshPending = true;
+                lastTrainingVisibilitySignature = null;
                 RefreshUi(forceRefresh: true);
             }
         }
+
+            [HarmonyPatch(typeof(UIChat), "Client_SendClientChatMessage")]
+            public static class UiChatClientSendClientChatMessagePatch
+            {
+                [HarmonyPrefix]
+                public static bool Prefix(string message)
+                {
+                    if (TryHandleLocalTrainingChatCommand(message))
+                    {
+                        return false;
+                    }
+
+                    return !TrainingClientRuntime.TryHandleLocalChatCommand(message);
+                }
+            }
 
         [HarmonyPatch(typeof(UIManager), "Start")]
         public static class UiManagerStartPatch
@@ -3339,6 +3491,11 @@ namespace schrader
             postMatchDismissed = false;
             welcomePendingAcknowledgement = false;
             publicServerModeActive = false;
+            trainingServerModeActive = false;
+            trainingHideOtherPlayersEnabled = false;
+            trainingVisibilityRefreshPending = true;
+            lastTrainingVisibilitySignature = null;
+            TrainingClientRuntime.SetTrainingServerMode(false);
             currentStateEnteredAt = -1f;
             welcomeRequestedAt = -1f;
             lastVisibleMatchResultReceivedAt = -1f;

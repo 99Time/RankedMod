@@ -214,7 +214,7 @@ namespace schrader
             rootView.Welcome = view;
         }
 
-        public static void ApplyServerMode(DraftUIRenderer.View rootView, bool isPublicServer)
+        public static void ApplyServerMode(DraftUIRenderer.View rootView, bool isPublicServer, bool isTrainingServer)
         {
             if (rootView?.Welcome == null)
             {
@@ -223,14 +223,18 @@ namespace schrader
 
             if (rootView.Welcome.TitleLabel != null)
             {
-                rootView.Welcome.TitleLabel.text = isPublicServer
+                rootView.Welcome.TitleLabel.text = isTrainingServer
+                    ? "Welcome to SpeedRankeds Training"
+                    : isPublicServer
                     ? "Welcome to SpeedRankeds Public"
                     : "Welcome to SpeedRankeds";
             }
 
             if (rootView.Welcome.SubtitleLabel != null)
             {
-                rootView.Welcome.SubtitleLabel.text = isPublicServer
+                rootView.Welcome.SubtitleLabel.text = isTrainingServer
+                    ? "Training mode is in a production-safe rebuild. Use /training, /openworld, and /return for the current server-authoritative tools. Training visuals now load locally when puckobjects is deployed with the client mod."
+                    : isPublicServer
                     ? "Jump in, choose Spectator, Red, or Blue, and play. Discord verification is not required on this server."
                     : "Learn the essentials, then choose Spectator, Red, or Blue.";
             }

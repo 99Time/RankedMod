@@ -5,6 +5,7 @@ namespace schrader
         public string Id;
         public string SteamId;
         public string Username;
+        public int PlayerNumber;
         public bool IsSharedGoalie;
         public bool ExcludedFromMmr;
         public TeamResult Team;
