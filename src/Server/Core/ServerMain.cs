@@ -413,26 +413,9 @@ namespace schrader
 
                     if (Server.RankedSystem.IsTrainingServerModeActive()
                         && (trimmed.Equals("/openworld", StringComparison.OrdinalIgnoreCase)
-                            || trimmed.Equals("/return", StringComparison.OrdinalIgnoreCase)
-                            || trimmed.Equals("/tp", StringComparison.OrdinalIgnoreCase)
-                            || trimmed.StartsWith("/tp ", StringComparison.OrdinalIgnoreCase)))
+                            || trimmed.Equals("/return", StringComparison.OrdinalIgnoreCase)))
                     {
                         HandleTrainingOpenWorldCommand(player, clientId, trimmed);
-                        return false;
-                    }
-
-                    if (trimmed.Equals("/tp", StringComparison.OrdinalIgnoreCase)
-                        || trimmed.StartsWith("/tp ", StringComparison.OrdinalIgnoreCase))
-                    {
-                        SendSystemChatToClient(Server.ChatStyle.Message(Server.ChatStyle.AdminModule, "The /tp command is only available when serverMode=training.", Server.ChatTone.Warning), clientId);
-                        return false;
-                    }
-
-                    if (Server.RankedSystem.IsTrainingServerModeActive()
-                        && (trimmed.Equals("/training", StringComparison.OrdinalIgnoreCase)
-                            || trimmed.StartsWith("/training ", StringComparison.OrdinalIgnoreCase)))
-                    {
-                        HandleTrainingCommand(player, clientId, trimmed);
                         return false;
                     }
 
@@ -1432,11 +1415,8 @@ namespace schrader
             if (Server.RankedSystem.IsTrainingServerModeActive())
             {
                 SendCommandHelpLine(clientId, Server.ChatStyle.HelpHeading("Training", "#78d8ff"));
-                SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/training", "Show the training command set and the client-side training asset workflow."));
-                SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/training puck", "Spawn a training puck at your blade or camera."));
-                SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/training clear", "Despawn all pucks on the map."));
-                SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/openworld or /return", "Respawn into or out of the training open-world anchor using a training-only respawn override."));
-                SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/traininghide <on|off|toggle|status>", "Client-local: hide or restore other player renderers during training."));
+                SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/openworld", "Respawn into the dedicated training anchor. The server owns the move, floor and grounded validation."));
+                SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/return", "Respawn back to the saved authoritative return pose and leave training open world."));
             }
 
 
@@ -1524,54 +1504,6 @@ namespace schrader
             return true;
         }
 
-        private static void HandleTrainingCommand(object player, ulong clientId, string trimmed)
-        {
-            if (!Server.RankedSystem.IsTrainingServerModeActive())
-            {
-                SendSystemChatToClient(Server.ChatStyle.Message(Server.ChatStyle.AdminModule, "Training commands are only available when serverMode=training.", Server.ChatTone.Warning), clientId);
-                return;
-            }
-
-            var parts = (trimmed ?? string.Empty).Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
-            var subcommand = parts.Length >= 2 ? parts[1].ToLowerInvariant() : "help";
-
-            switch (subcommand)
-            {
-                case "help":
-                    SendTrainingCommandsOverview(player, clientId);
-                    return;
-                case "puck":
-                    HandleServerSpawnPuckCommand(player, clientId);
-                    return;
-                case "clear":
-                case "clearpucks":
-                    HandleServerDespawnPucksCommand(clientId);
-                    return;
-                default:
-                    SendSystemChatToClient(Server.ChatStyle.Usage("/training [help|puck|clear]"), clientId);
-                    return;
-            }
-        }
-
-        private static void SendTrainingCommandsOverview(object player, ulong clientId)
-        {
-            SendCommandHelpLine(clientId, "<size=15><b>Training Commands</b></size>");
-            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/training puck", "Spawn a puck at your blade or camera using the server-authoritative puck spawn path."));
-            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/training clear", "Despawn all pucks on the map."));
-            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/openworld or /return", "Respawn into or out of the training open-world anchor using a training-only respawn override."));
-            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/tp x y z [yaw]", "Training-only authoritative teleport for your current player body with debug telemetry."));
-            SendCommandHelpLine(clientId, Server.ChatStyle.HelpCommand("/traininghide <on|off|toggle|status>", "Client-local command: hide or restore other player renderers during training."));
-            SendCommandHelpLine(clientId, "<size=12><color=#9dc4de>[training reset]</color> Stage 2 now redirects game respawns to the training anchor while open world is active. Client training visuals load locally from the deployed bundle when present.</size>");
-
-            if (!TryIsAdmin(player, clientId))
-            {
-                return;
-            }
-
-            SendCommandHelpLine(clientId, Server.ChatStyle.HelpHeading("Training Admin", "#ffcc66"));
-            SendCommandHelpLine(clientId, "<size=12><color=#ffcc66>[training admin]</color> Stage 2 keeps the player's normal claim intact and redirects character respawns to a fixed training anchor only while open world is active.</size>");
-        }
-
         private static void HandleTrainingOpenWorldCommand(object player, ulong clientId, string trimmed)
         {
             if (!Server.RankedSystem.IsTrainingServerModeActive())
@@ -1592,14 +1524,7 @@ namespace schrader
                 return;
             }
 
-            if (string.Equals(trimmed, "/tp", StringComparison.OrdinalIgnoreCase)
-                || trimmed.StartsWith("/tp ", StringComparison.OrdinalIgnoreCase))
-            {
-                HandleTrainingTeleportCommand(player, clientId, trimmed);
-                return;
-            }
-
-            SendSystemChatToClient(Server.ChatStyle.Usage("/openworld or /return or /tp x y z [yaw]"), clientId);
+            SendSystemChatToClient(Server.ChatStyle.Usage("/openworld or /return"), clientId);
         }
 
         private static void ActivateTrainingOpenWorld(ulong clientId)
@@ -1641,6 +1566,8 @@ namespace schrader
                 openWorldState.OpenWorldPosition,
                 openWorldState.OpenWorldRotation);
 
+            RankedOverlayNetwork.PublishTrainingOpenWorldPoseToClient(clientId, true, openWorldState.OpenWorldPosition, openWorldState.OpenWorldRotation, "openworld");
+
             ForceTrainingOpenWorldRespawn(player, openWorldState.OpenWorldPosition, openWorldState.OpenWorldRotation, "openworld-command");
 
             SendTrainingDebugLine(
@@ -1674,69 +1601,15 @@ namespace schrader
                 state.ReturnPosition,
                 state.ReturnRotation);
 
-            trainingOpenWorldStateByClient.Remove(clientId);
+            RankedOverlayNetwork.PublishTrainingOpenWorldPoseToClient(clientId, false, state.ReturnPosition, state.ReturnRotation, "return");
+
+            state.IsActive = false;
+            ResetTrainingOpenWorldDebugFlags(state);
             player.Server_RespawnCharacter(state.ReturnPosition, state.ReturnRotation, ResolveTrainingOpenWorldRole(player, player.PlayerPosition));
             SendTrainingDebugLine(clientId, "/return touched=Server_RespawnCharacter; redirectApplied=no; teleportApplied=no");
             ScheduleTrainingMovementTelemetryPostAction(clientId, "/return", state.ReturnPosition, state.ReturnRotation);
             ClearTrainingOpenWorldState(clientId, destroySharedFloorWhenUnused: true);
             SendSystemChatToClient(Server.ChatStyle.Message(Server.ChatStyle.RankedModule, "Returned from the training open world.", Server.ChatTone.Success), clientId);
-        }
-
-        private static void HandleTrainingTeleportCommand(object player, ulong clientId, string trimmed)
-        {
-            if (!Server.RankedSystem.IsTrainingServerModeActive())
-            {
-                SendSystemChatToClient(Server.ChatStyle.Message(Server.ChatStyle.AdminModule, "The /tp command is only available when serverMode=training.", Server.ChatTone.Warning), clientId);
-                return;
-            }
-
-            if (!TryGetTrainingPlayerForClient(clientId, out _, out var playerBody) || playerBody == null)
-            {
-                SendSystemChatToClient(Server.ChatStyle.Message(Server.ChatStyle.AdminModule, "Your player body is not ready yet. Try /tp again in a moment.", Server.ChatTone.Warning), clientId);
-                return;
-            }
-
-            var parts = (trimmed ?? string.Empty).Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length != 4 && parts.Length != 5)
-            {
-                SendSystemChatToClient(Server.ChatStyle.Usage("/tp x y z [yaw]"), clientId);
-                return;
-            }
-
-            if (!TryParseTrainingFloat(parts[1], out var x)
-                || !TryParseTrainingFloat(parts[2], out var y)
-                || !TryParseTrainingFloat(parts[3], out var z))
-            {
-                SendSystemChatToClient(Server.ChatStyle.Message(Server.ChatStyle.AdminModule, "Invalid /tp coordinates. Use numeric values like /tp 200 5 0.", Server.ChatTone.Error), clientId);
-                return;
-            }
-
-            var targetPosition = new Vector3(x, y, z);
-            var targetRotation = playerBody.Rigidbody != null ? playerBody.Rigidbody.rotation : playerBody.transform.rotation;
-            if (parts.Length == 5)
-            {
-                if (!TryParseTrainingFloat(parts[4], out var yaw))
-                {
-                    SendSystemChatToClient(Server.ChatStyle.Message(Server.ChatStyle.AdminModule, "Invalid /tp yaw. Use a numeric angle like /tp 200 5 0 180.", Server.ChatTone.Error), clientId);
-                    return;
-                }
-
-                targetRotation = Quaternion.Euler(0f, yaw, 0f);
-            }
-
-            var beforeSnapshot = CaptureTrainingBodySnapshot(player as Player, playerBody);
-            SendTrainingMovementTelemetryStart(
-                clientId,
-                "/tp",
-                beforeSnapshot,
-                $"path=PlayerBodyV2.Server_Teleport direct; redirectExpected=no; teleportExpected=yes; input={FormatVector3(targetPosition)}",
-                targetPosition,
-                targetRotation);
-
-            playerBody.Server_Teleport(targetPosition, targetRotation);
-            SendTrainingDebugLine(clientId, "/tp touched=PlayerBodyV2.Server_Teleport; redirectApplied=no; teleportApplied=yes");
-            ScheduleTrainingMovementTelemetryPostAction(clientId, "/tp", targetPosition, targetRotation);
-            SendSystemChatToClient(Server.ChatStyle.Message(Server.ChatStyle.RankedModule, $"Training teleport requested to {FormatVector3(targetPosition)}.", Server.ChatTone.Success), clientId);
         }
 
         private static void EnsureTrainingOpenWorldFloor()
@@ -2350,16 +2223,6 @@ namespace schrader
 
             try { Debug.Log($"[{Constants.MOD_NAME}] [TRAINING][DBG] clientId={clientId} {StripRichTextTags(message)}"); } catch { }
             SendCommandHelpLine(clientId, $"<size=12><color=#78d8ff>[training dbg]</color> {message}</size>");
-        }
-
-        private static bool TryParseTrainingFloat(string value, out float result)
-        {
-            if (float.TryParse(value, NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.InvariantCulture, out result))
-            {
-                return true;
-            }
-
-            return float.TryParse(value, NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.CurrentCulture, out result);
         }
 
         private static string FormatVector3(Vector3 value) => $"({value.x:0.00},{value.y:0.00},{value.z:0.00})";

@@ -233,7 +233,7 @@ namespace schrader
             if (rootView.Welcome.SubtitleLabel != null)
             {
                 rootView.Welcome.SubtitleLabel.text = isTrainingServer
-                    ? "Training mode is in a production-safe rebuild. Use /training, /openworld, and /return for the current server-authoritative tools. Training visuals now load locally when puckobjects is deployed with the client mod."
+                    ? "Training mode runs a minimal dedicated flow. Use /openworld to enter the remote training anchor and /return to respawn back. Training visuals load locally only when puckobjects is deployed with the client mod."
                     : isPublicServer
                     ? "Jump in, choose Spectator, Red, or Blue, and play. Discord verification is not required on this server."
                     : "Learn the essentials, then choose Spectator, Red, or Blue.";

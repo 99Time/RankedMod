@@ -88,9 +88,6 @@ namespace schrader
         private static bool discordOnboardingIsLinked;
         private static bool discordOnboardingDismissed;
         private static bool discordOnboardingFallbackActive;
-        private static bool trainingHideOtherPlayersEnabled;
-        private static bool trainingVisibilityRefreshPending;
-        private static string lastTrainingVisibilitySignature;
         private static string pendingDiscordLinkCommand;
         private static float pendingDiscordLinkQueuedAt = -1f;
         private static bool hasLoggedPendingDiscordLinkWait;
@@ -312,9 +309,6 @@ namespace schrader
             discordOnboardingIsLinked = false;
             discordOnboardingDismissed = false;
             discordOnboardingFallbackActive = false;
-            trainingHideOtherPlayersEnabled = false;
-            trainingVisibilityRefreshPending = true;
-            lastTrainingVisibilitySignature = null;
             TrainingClientRuntime.SetTrainingServerMode(false);
             pendingDiscordLinkCommand = null;
             pendingDiscordLinkQueuedAt = -1f;
@@ -373,9 +367,6 @@ namespace schrader
             discordOnboardingIsLinked = false;
             discordOnboardingDismissed = false;
             discordOnboardingFallbackActive = false;
-            trainingHideOtherPlayersEnabled = false;
-            trainingVisibilityRefreshPending = true;
-            lastTrainingVisibilitySignature = null;
             TrainingClientRuntime.SetTrainingServerMode(false);
             pendingDiscordLinkCommand = null;
             pendingDiscordLinkQueuedAt = -1f;
@@ -422,6 +413,7 @@ namespace schrader
                 messagingManager.RegisterNamedMessageHandler(RankedOverlayChannels.DiscordOnboardingState, OnDiscordOnboardingStateReceived);
                 messagingManager.RegisterNamedMessageHandler(RankedOverlayChannels.DiscordInviteOpen, OnDiscordInviteOpenReceived);
                 messagingManager.RegisterNamedMessageHandler(RankedOverlayChannels.ExternalUrlOpen, OnExternalUrlOpenReceived);
+                messagingManager.RegisterNamedMessageHandler(RankedOverlayChannels.TrainingOpenWorldPose, OnTrainingOpenWorldPoseReceived);
                 currentMessagingManager = messagingManager;
                 handlersRegistered = true;
             }
@@ -445,6 +437,7 @@ namespace schrader
                 try { currentMessagingManager.UnregisterNamedMessageHandler(RankedOverlayChannels.DiscordOnboardingState); } catch { }
                 try { currentMessagingManager.UnregisterNamedMessageHandler(RankedOverlayChannels.DiscordInviteOpen); } catch { }
                 try { currentMessagingManager.UnregisterNamedMessageHandler(RankedOverlayChannels.ExternalUrlOpen); } catch { }
+                try { currentMessagingManager.UnregisterNamedMessageHandler(RankedOverlayChannels.TrainingOpenWorldPose); } catch { }
             }
 
             currentMessagingManager = null;
@@ -672,8 +665,6 @@ namespace schrader
                 TrainingClientRuntime.SetTrainingServerMode(trainingServerModeActive);
                 discordOnboardingStateResolved = message.IsResolved;
                 discordOnboardingIsLinked = message.IsLinked;
-                trainingVisibilityRefreshPending = true;
-                lastTrainingVisibilitySignature = null;
                 if (discordOnboardingStateResolved)
                 {
                     discordOnboardingFallbackActive = false;
@@ -751,11 +742,26 @@ namespace schrader
             }
         }
 
+        private static void OnTrainingOpenWorldPoseReceived(ulong senderClientId, FastBufferReader reader)
+        {
+            try
+            {
+                var message = RankedOverlayNetcode.ReadJson<TrainingOpenWorldPoseMessage>(ref reader) ?? new TrainingOpenWorldPoseMessage();
+                var targetPosition = new Vector3(message.PositionX, message.PositionY, message.PositionZ);
+                var targetRotation = Quaternion.Euler(message.RotationEulerX, message.RotationEulerY, message.RotationEulerZ);
+                TrainingClientRuntime.SetAuthoritativeTrainingPose(message.IsOpenWorldActive, targetPosition, targetRotation, message.Reason);
+                DraftUIPlugin.Log($"[CLIENT][TRAINING] Received authoritative training pose. active={(message.IsOpenWorldActive ? "yes" : "no")} pos={targetPosition} rot={targetRotation.eulerAngles} reason={message.Reason ?? string.Empty}");
+            }
+            catch (Exception ex)
+            {
+                DraftUIPlugin.LogError($"Failed to receive training pose sync: {ex}");
+            }
+        }
+
         private static void UpdateOverlay()
         {
             EnsureViewSetup();
             EnsureMessagingHandlers();
-            RefreshTrainingVisibilityIfNeeded();
             FlushPendingDiscordLinkCommand();
             SyncInputState();
             HandleApprovalKeyboardShortcuts();
@@ -2322,113 +2328,9 @@ namespace schrader
             RefreshUi(forceRefresh: true);
         }
 
-        private static void RefreshTrainingVisibilityIfNeeded()
-        {
-            var shouldHideOtherPlayers = trainingServerModeActive && trainingHideOtherPlayersEnabled;
-            var remotePlayerCount = 0;
-
-            try
-            {
-                foreach (var player in Resources.FindObjectsOfTypeAll<Player>())
-                {
-                    if (!player || !player.gameObject.scene.IsValid() || player.IsLocalPlayer)
-                    {
-                        continue;
-                    }
-
-                    remotePlayerCount++;
-                    foreach (var renderer in player.GetComponentsInChildren<Renderer>(true))
-                    {
-                        if (!renderer)
-                        {
-                            continue;
-                        }
-
-                        renderer.forceRenderingOff = shouldHideOtherPlayers;
-                    }
-                }
-
-                var signature = $"{shouldHideOtherPlayers}:{remotePlayerCount}";
-                if (!trainingVisibilityRefreshPending && string.Equals(lastTrainingVisibilitySignature, signature, StringComparison.Ordinal))
-                {
-                    return;
-                }
-
-                lastTrainingVisibilitySignature = signature;
-                trainingVisibilityRefreshPending = false;
-            }
-            catch (Exception ex)
-            {
-                DraftUIPlugin.LogError($"[CLIENT][TRAINING] Failed to refresh other-player visibility: {ex}");
-            }
-        }
-
-        private static void AddLocalTrainingChatMessage(string message)
-        {
-            try
-            {
-                var chat = UIChat.Instance;
-                if (!chat)
-                {
-                    return;
-                }
-
-                chat.AddChatMessage($"<color=#78d8ff>[Training]</color> {message}");
-            }
-            catch (Exception ex)
-            {
-                DraftUIPlugin.LogError($"[CLIENT][TRAINING] Failed to add local chat message: {ex}");
-            }
-        }
-
         private static bool TryHandleLocalTrainingChatCommand(string message)
         {
-            var trimmed = message?.Trim();
-            if (string.IsNullOrWhiteSpace(trimmed)
-                || !(trimmed.Equals("/traininghide", StringComparison.OrdinalIgnoreCase)
-                    || trimmed.StartsWith("/traininghide ", StringComparison.OrdinalIgnoreCase)))
-            {
-                return false;
-            }
-
-            if (!trainingServerModeActive)
-            {
-                return false;
-            }
-
-            var parts = trimmed.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
-            var action = parts.Length >= 2 ? parts[1].ToLowerInvariant() : "toggle";
-            switch (action)
-            {
-                case "on":
-                    trainingHideOtherPlayersEnabled = true;
-                    trainingVisibilityRefreshPending = true;
-                    lastTrainingVisibilitySignature = null;
-                    AddLocalTrainingChatMessage("Other player renderers hidden on this client.");
-                    return true;
-                case "off":
-                    trainingHideOtherPlayersEnabled = false;
-                    trainingVisibilityRefreshPending = true;
-                    lastTrainingVisibilitySignature = null;
-                    AddLocalTrainingChatMessage("Other player renderers restored on this client.");
-                    return true;
-                case "toggle":
-                    trainingHideOtherPlayersEnabled = !trainingHideOtherPlayersEnabled;
-                    trainingVisibilityRefreshPending = true;
-                    lastTrainingVisibilitySignature = null;
-                    AddLocalTrainingChatMessage(trainingHideOtherPlayersEnabled
-                        ? "Other player renderers hidden on this client."
-                        : "Other player renderers restored on this client.");
-                    return true;
-                case "status":
-                    AddLocalTrainingChatMessage(trainingHideOtherPlayersEnabled
-                        ? "Other player renderers are currently hidden on this client."
-                        : "Other player renderers are currently visible on this client.");
-                    return true;
-                default:
-                    AddLocalTrainingChatMessage("Usage: /traininghide <on|off|toggle|status>");
-                    return true;
-            }
+            return false;
         }
 
         private static void CompleteDiscordVerificationFlow(string actionLabel)
@@ -3188,8 +3090,6 @@ namespace schrader
                     }
                 }
 
-                trainingVisibilityRefreshPending = true;
-                lastTrainingVisibilitySignature = null;
                 RefreshUi(forceRefresh: true);
             }
         }
@@ -3492,9 +3392,6 @@ namespace schrader
             welcomePendingAcknowledgement = false;
             publicServerModeActive = false;
             trainingServerModeActive = false;
-            trainingHideOtherPlayersEnabled = false;
-            trainingVisibilityRefreshPending = true;
-            lastTrainingVisibilitySignature = null;
             TrainingClientRuntime.SetTrainingServerMode(false);
             currentStateEnteredAt = -1f;
             welcomeRequestedAt = -1f;

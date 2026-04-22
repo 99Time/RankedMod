@@ -203,6 +203,22 @@ namespace schrader
             }, clientId);
         }
 
+        public static void PublishTrainingOpenWorldPoseToClient(ulong clientId, bool isOpenWorldActive, Vector3 position, Quaternion rotation, string reason)
+        {
+            var euler = rotation.eulerAngles;
+            SendToClientReliable(RankedOverlayChannels.TrainingOpenWorldPose, new TrainingOpenWorldPoseMessage
+            {
+                IsOpenWorldActive = isOpenWorldActive,
+                PositionX = position.x,
+                PositionY = position.y,
+                PositionZ = position.z,
+                RotationEulerX = euler.x,
+                RotationEulerY = euler.y,
+                RotationEulerZ = euler.z,
+                Reason = string.IsNullOrWhiteSpace(reason) ? string.Empty : reason.Trim()
+            }, clientId, DiscordOnboardingDelivery);
+        }
+
         public static void ResyncClient(ulong clientId)
         {
             try

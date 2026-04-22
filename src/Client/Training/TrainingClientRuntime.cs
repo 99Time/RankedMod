@@ -50,6 +50,21 @@ namespace schrader
             controller?.SetTrainingServerMode(active);
         }
 
+        public static void SetAuthoritativeTrainingPose(bool isOpenWorldActive, Vector3 position, Quaternion rotation, string reason)
+        {
+            if (DraftUIPlugin.IsDedicatedServer())
+            {
+                return;
+            }
+
+            if (controller == null)
+            {
+                Initialize();
+            }
+
+            controller?.SetAuthoritativeTrainingPose(isOpenWorldActive, position, rotation, reason);
+        }
+
         public static bool TryHandleLocalChatCommand(string message)
         {
             return controller != null && controller.TryHandleLocalChatCommand(message);
@@ -61,7 +76,12 @@ namespace schrader
             private const float ExternalTrainingSuppressionIntervalSeconds = 1f;
             private const float TrainingBundleRetryIntervalSeconds = 1f;
             private const float TrainingRepresentationLogIntervalSeconds = 0.5f;
-            private static readonly Vector3 TrainingOpenWorldVisualRootPosition = new Vector3(200f, 0.05f, 0f);
+            private const float TrainingPoseReconcileIntervalSeconds = 0.1f;
+            private const float TrainingPosePendingDurationSeconds = 3f;
+            private const float TrainingPoseSatisfiedDistanceThreshold = 1.5f;
+            private const float TrainingPoseReconcileDistanceThreshold = 5f;
+            private const float TrainingPoseSatisfiedAngleThreshold = 8f;
+            private static readonly Vector3 TrainingOpenWorldVisualRootPosition = new Vector3(200f, 0f, 0f);
 
             private bool trainingServerModeActive;
             private bool trainingWelcomeSent;
@@ -77,6 +97,14 @@ namespace schrader
             private ulong lastObservedLocalBodyNetworkObjectId;
             private ulong lastObservedLocalCameraNetworkObjectId;
             private string lastObservedLocalRepresentationSignature;
+            private bool hasPendingAuthoritativePose;
+            private bool pendingOpenWorldActive;
+            private Vector3 pendingAuthoritativePosition;
+            private Quaternion pendingAuthoritativeRotation = Quaternion.identity;
+            private string pendingAuthoritativeReason;
+            private float pendingAuthoritativePoseExpiresAt = -999f;
+            private float lastAuthoritativePoseApplyAt = -999f;
+            private ulong lastAuthoritativePoseBodyNetworkObjectId;
 
             private void Update()
             {
@@ -88,6 +116,7 @@ namespace schrader
                 SuppressExternalTrainingModIfNeeded();
                 EnsureTrainingWelcomeShown();
                 EnsureTrainingOpenWorldVisualsLoaded();
+                ReconcileAuthoritativeTrainingPoseIfNeeded();
                 ObserveLocalPlayerRepresentation();
             }
 
@@ -115,6 +144,7 @@ namespace schrader
                 lastObservedLocalBodyNetworkObjectId = 0;
                 lastObservedLocalCameraNetworkObjectId = 0;
                 lastObservedLocalRepresentationSignature = null;
+                ClearPendingAuthoritativeTrainingPose();
 
                 if (!active)
                 {
@@ -125,41 +155,23 @@ namespace schrader
                 SuppressExternalTrainingModIfNeeded(force: true);
             }
 
+            public void SetAuthoritativeTrainingPose(bool isOpenWorldActive, Vector3 position, Quaternion rotation, string reason)
+            {
+                hasPendingAuthoritativePose = true;
+                pendingOpenWorldActive = isOpenWorldActive;
+                pendingAuthoritativePosition = position;
+                pendingAuthoritativeRotation = rotation;
+                pendingAuthoritativeReason = string.IsNullOrWhiteSpace(reason) ? string.Empty : reason.Trim();
+                pendingAuthoritativePoseExpiresAt = Time.unscaledTime + TrainingPosePendingDurationSeconds;
+                lastAuthoritativePoseApplyAt = -999f;
+                lastAuthoritativePoseBodyNetworkObjectId = 0;
+
+                DraftUIPlugin.Log($"[CLIENT][TRAINING] Queued authoritative pose reconcile. active={(pendingOpenWorldActive ? "yes" : "no")} targetPos={FormatVector3(pendingAuthoritativePosition)} targetRot={FormatQuaternion(pendingAuthoritativeRotation)} reason={pendingAuthoritativeReason}");
+            }
+
             public bool TryHandleLocalChatCommand(string message)
             {
-                if (!trainingServerModeActive)
-                {
-                    return false;
-                }
-
-                var trimmed = message?.Trim();
-                if (string.IsNullOrWhiteSpace(trimmed))
-                {
-                    return false;
-                }
-
-                switch (trimmed.ToLowerInvariant())
-                {
-                    case "/modhelp":
-                        AddChatMessage("Stage 2 training reset active. /openworld and /return now use the game's official respawn flow into the training anchor.");
-                        AddChatMessage("Training visuals load locally from the deployed puckobjects bundle when it is present.");
-                        AddChatMessage("Available now: /training, /training puck, /training clear, /openworld, /return, and /traininghide.");
-                        return true;
-                    case "/clearobjects":
-                    case "/co":
-                    case "/p1":
-                    case "/spawnzigzag":
-                    case "/szz":
-                    case "/targeteasy":
-                    case "/target":
-                    case "/targethard":
-                    case "/randomgates":
-                    case "/rg":
-                        AddChatMessage("Legacy client-side training props are temporarily disabled during the training map reset.");
-                        return true;
-                    default:
-                        return false;
-                }
+                return false;
             }
 
             private void EnsureTrainingWelcomeShown()
@@ -169,8 +181,8 @@ namespace schrader
                     return;
                 }
 
-                AddChatMessage("Training mode active. Stage 2 now respawns players into the training open-world anchor through the game's official position flow.");
-                AddChatMessage("Client training visuals now load locally from puckobjects when that bundle is deployed next to the client mod assembly.");
+                AddChatMessage("Training mode active. Use /openworld to enter the dedicated training anchor and /return to go back.");
+                AddChatMessage("Training visuals are client-only and load from puckobjects when that bundle is deployed next to the client mod assembly.");
                 trainingWelcomeSent = true;
             }
 
@@ -453,6 +465,60 @@ namespace schrader
                 }
             }
 
+            private void ReconcileAuthoritativeTrainingPoseIfNeeded()
+            {
+                if (!hasPendingAuthoritativePose)
+                {
+                    return;
+                }
+
+                if (Time.unscaledTime > pendingAuthoritativePoseExpiresAt)
+                {
+                    DraftUIPlugin.Log($"[CLIENT][TRAINING] Authoritative pose reconcile expired before the local representation settled. targetPos={FormatVector3(pendingAuthoritativePosition)} reason={pendingAuthoritativeReason}");
+                    ClearPendingAuthoritativeTrainingPose();
+                    return;
+                }
+
+                if (!TryGetLocalPlayerRepresentation(out _, out var playerBody, out var playerCamera) || playerBody == null)
+                {
+                    return;
+                }
+
+                var positionDistance = Vector3.Distance(playerBody.transform.position, pendingAuthoritativePosition);
+                var rotationAngle = Quaternion.Angle(playerBody.transform.rotation, pendingAuthoritativeRotation);
+                if (positionDistance <= TrainingPoseSatisfiedDistanceThreshold && rotationAngle <= TrainingPoseSatisfiedAngleThreshold)
+                {
+                    DraftUIPlugin.Log($"[CLIENT][TRAINING] Authoritative pose reconcile satisfied. bodyId={playerBody.NetworkObjectId} pos={FormatVector3(playerBody.transform.position)} targetPos={FormatVector3(pendingAuthoritativePosition)} reason={pendingAuthoritativeReason}");
+                    ClearPendingAuthoritativeTrainingPose();
+                    return;
+                }
+
+                if (positionDistance <= TrainingPoseReconcileDistanceThreshold && rotationAngle <= TrainingPoseSatisfiedAngleThreshold)
+                {
+                    return;
+                }
+
+                if (Time.unscaledTime - lastAuthoritativePoseApplyAt < TrainingPoseReconcileIntervalSeconds
+                    && lastAuthoritativePoseBodyNetworkObjectId == playerBody.NetworkObjectId)
+                {
+                    return;
+                }
+
+                lastAuthoritativePoseApplyAt = Time.unscaledTime;
+                lastAuthoritativePoseBodyNetworkObjectId = playerBody.NetworkObjectId;
+
+                try
+                {
+                    playerBody.Server_Teleport(pendingAuthoritativePosition, pendingAuthoritativeRotation);
+                    Physics.SyncTransforms();
+                    DraftUIPlugin.Log($"[CLIENT][TRAINING] Applied authoritative pose reconcile to local body. active={(pendingOpenWorldActive ? "yes" : "no")} bodyId={playerBody.NetworkObjectId} cameraId={(playerCamera != null ? playerCamera.NetworkObjectId : 0UL)} beforePos={FormatVector3(playerBody.transform.position)} targetPos={FormatVector3(pendingAuthoritativePosition)} targetRot={FormatQuaternion(pendingAuthoritativeRotation)} reason={pendingAuthoritativeReason}");
+                }
+                catch (Exception ex)
+                {
+                    DraftUIPlugin.LogError($"[CLIENT][TRAINING] Failed to apply authoritative pose reconcile: {ex}");
+                }
+            }
+
             private void ObserveLocalPlayerRepresentation()
             {
                 if (!TryGetLocalPlayerRepresentation(out var localPlayer, out var playerBody, out var playerCamera))
@@ -577,9 +643,27 @@ namespace schrader
                 return Mathf.Round(value * 10f).ToString();
             }
 
+            private void ClearPendingAuthoritativeTrainingPose()
+            {
+                hasPendingAuthoritativePose = false;
+                pendingOpenWorldActive = false;
+                pendingAuthoritativePosition = Vector3.zero;
+                pendingAuthoritativeRotation = Quaternion.identity;
+                pendingAuthoritativeReason = string.Empty;
+                pendingAuthoritativePoseExpiresAt = -999f;
+                lastAuthoritativePoseApplyAt = -999f;
+                lastAuthoritativePoseBodyNetworkObjectId = 0;
+            }
+
             private static string FormatVector3(Vector3 value)
             {
                 return $"({value.x:0.00},{value.y:0.00},{value.z:0.00})";
+            }
+
+            private static string FormatQuaternion(Quaternion value)
+            {
+                var euler = value.eulerAngles;
+                return $"({euler.x:0.0},{euler.y:0.0},{euler.z:0.0})";
             }
 
             private static void AddChatMessage(string message)

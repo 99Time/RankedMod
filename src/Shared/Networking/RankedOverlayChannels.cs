@@ -14,5 +14,6 @@ namespace schrader
         public const string DiscordVerificationDeclined = "schrader.ranked.discord_verification_declined";
         public const string DiscordInviteOpen = "schrader.ranked.discord_invite_open";
         public const string ExternalUrlOpen = "schrader.ranked.external_url_open";
+        public const string TrainingOpenWorldPose = "schrader.ranked.training_openworld_pose";
     }
 }
